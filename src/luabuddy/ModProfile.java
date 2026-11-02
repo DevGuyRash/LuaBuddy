@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
@@ -18,6 +19,7 @@ import java.util.TreeMap;
 import zombie.gameStates.ChooseGameInfo;
 
 record ModProfile(String id, Path file, Properties options) {
+    record Source(String text, String filename) {}
     static List<ModProfile> read(Path directory) throws IOException {
         List<ModProfile> profiles = new ArrayList<>();
         Set<String> ids = new LinkedHashSet<>();
@@ -26,6 +28,8 @@ record ModProfile(String id, Path file, Properties options) {
                 Properties options = new Properties();
                 try (var reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
                     options.load(reader);
+                } catch (IOException | IllegalArgumentException error) {
+                    throw new IOException("Reading profile " + file + ": " + error.getMessage(), error);
                 }
                 String id = options.getProperty("id", "").trim();
                 if (id.isEmpty()) throw new IOException("Missing id in " + file);
@@ -40,7 +44,7 @@ record ModProfile(String id, Path file, Properties options) {
                 if (!enabled.equals("true") && !enabled.equals("false")) {
                     throw new IOException("enabled must be true or false in " + file);
                 }
-                if (enabled.equals("true")) profiles.add(new ModProfile(id, file, options));
+                profiles.add(new ModProfile(id, file, options));
             }
         }
         return profiles;
@@ -48,6 +52,10 @@ record ModProfile(String id, Path file, Properties options) {
 
     List<String> list(String key) {
         return Arrays.stream(options.getProperty(key, "").split(";")).map(String::trim).filter(value -> !value.isEmpty()).toList();
+    }
+
+    boolean enabled() {
+        return options.getProperty("enabled", "true").trim().equals("true");
     }
 
     ChooseGameInfo.Mod resolve() throws IOException {
@@ -60,11 +68,11 @@ record ModProfile(String id, Path file, Properties options) {
         return info;
     }
 
-    Map<String, String> sources(List<Path> roots, Set<String> active) throws IOException {
+    Map<String, Source> sources(List<Path> roots, Set<String> active) throws IOException {
         List<String> excludes = new ArrayList<>(list("exclude"));
         for (String id : active) excludes.addAll(list("excludeWhen." + id));
         List<PathMatcher> matchers = excludes.stream().map(pattern -> FileSystems.getDefault().getPathMatcher("glob:" + pattern)).toList();
-        Map<String, String> sources = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        Map<String, Source> sources = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         for (Path root : roots) {
             for (String phase : List.of("shared", "client")) {
                 Path directory = root.resolve("media/lua/" + phase);
@@ -72,9 +80,11 @@ record ModProfile(String id, Path file, Properties options) {
                 try (var files = Files.walk(directory)) {
                     for (Path path : files.filter(Files::isRegularFile).sorted().toList()) {
                         String relative = phase + "/" + directory.relativize(path).toString().replace('\\', '/');
-                        if (!relative.endsWith(".lua") || relative.startsWith("shared/Translate/")) continue;
+                        String normalized = relative.toLowerCase(Locale.ROOT);
+                        if (!normalized.endsWith(".lua") || normalized.startsWith("shared/translate/")) continue;
                         if (matchers.stream().anyMatch(matcher -> matcher.matches(Path.of(relative)))) continue;
-                        sources.put(relative, Files.readString(path, StandardCharsets.UTF_8));
+                        sources.put(relative, new Source(Files.readString(path, StandardCharsets.UTF_8),
+                                path.toAbsolutePath().normalize().toString().replace('\\', '/')));
                     }
                 }
             }
@@ -86,6 +96,11 @@ record ModProfile(String id, Path file, Properties options) {
     String plugin() throws IOException {
         String name = options.getProperty("plugin", "").trim();
         return name.isEmpty() ? "return {}" : Files.readString(file.getParent().resolve(name), StandardCharsets.UTF_8);
+    }
+
+    String pluginFilename() {
+        String name = options.getProperty("plugin", "").trim();
+        return name.isEmpty() ? "LuaBuddy/plugins/" + id : file.getParent().resolve(name).toAbsolutePath().normalize().toString().replace('\\', '/');
     }
 
     static List<Path> roots(ChooseGameInfo.Mod info) {

@@ -55,6 +55,8 @@ python3 luabuddy.py install --mod AnotherModID
 
 For an unknown mod, the installer creates `config/AnotherModID.properties` containing `id=AnotherModID`. IDs with spaces, punctuation, Unicode, or Windows reserved names use a stable `mod-<hash>.properties` filename while preserving the mod ID inside. Quote such IDs on the command line, for example `--mod 'Spiffo Knew [B42]'`. For a bundled profile, the installer copies the profile and its Lua hook. Existing profiles stay intact. Restart the game after changing profiles. To disable one profile, set `enabled=false` in that file.
 
+The installer rejects filename collisions before writing, including names that differ only by case on Windows. When using `--mod`, existing profiles must have one unindented `id=` entry with plain text, escaped spaces, or escaped backslashes. The runtime accepts Java properties syntax, but the installer refuses advanced or ambiguous identity syntax instead of guessing. Manage those profiles manually or use the conventional `id=` form.
+
 The game's own mod discovery finds installed mods and chooses their `common` and version directories. To select a mod outside those directories, add `path=/absolute/path/to/mod` to its profile. Point at the directory above `42`, `42.20`, and `common`, so version selection can continue to follow upstream updates. Use forward slashes in Windows properties paths, such as `path=D:/Mods/Example`. Relative paths resolve against the profile's directory.
 
 ## Profile reference
@@ -105,6 +107,35 @@ Failures appear in `console.txt` under `[LuaBuddy]`, and in `LuaBuddy.mods` insi
 
 Late loading does not replay events such as `OnBoot` or `OnGameBoot`. Calls that require the game to consider a local mod fully activated, asset lookups through the normal mod filesystem, and mods that replace `require` themselves may need additional integration. An optional hook can address a mod's specific late initialization when that is sufficient. LuaBuddy does not automatically turn client code into server code.
 
+## Diagnose loading problems
+
+Run the read-only installation check and inspect the last loader initialization report.
+
+```sh
+python3 luabuddy.py doctor
+python3 luabuddy.py diagnostics
+python3 luabuddy.py diagnostics --json
+```
+
+On Windows, use `py -3` instead of `python3`. `doctor` checks launcher arguments, the configured debug value, runtime files, profiles, and the last initialization report. A missing report produces a warning. It does not mean the current game has loaded the mods successfully. The JSON forms support scripts and return a nonzero exit code for diagnosed failures or invalid data.
+
+Each multiplayer Lua environment writes one `LuaBuddy/diagnostics.json` file beneath the game's cache directory. The default is `~/Zomboid/LuaBuddy/diagnostics.json` on Linux and `%USERPROFILE%\Zomboid\LuaBuddy\diagnostics.json` on Windows. If you launch the game with a custom `-cachedir`, pass that directory to either diagnostic command.
+
+```sh
+python3 luabuddy.py doctor --cache-dir /path/to/game-cache
+python3 luabuddy.py diagnostics --cache-dir /path/to/game-cache --json
+```
+
+The report records the session ID, UTC timestamps, loader/game/Java versions, selected profile and source paths, loaded/skipped/disabled/failed counts, initialization stages, and available Lua/Java error traces. It describes the last attempted loader initialization. Later gameplay callbacks continue through the game's normal error logging. An old successful report can remain if a later launch never reaches LuaBuddy, so check its session and completion time.
+
+Normal logging writes a startup summary, per-mod result, and report location to the game's existing console logs under `[LuaBuddy]`. To record each initialization stage and source filename, enable debug logging and restart the game.
+
+```sh
+python3 luabuddy.py install --debug
+```
+
+Use `install --no-debug` to turn detailed logging off. Ordinary reinstallations preserve the chosen setting. Report-write failures appear as warnings and do not prevent healthy mods from loading. Reports stay local and contain selected file paths and unredacted error text. The collector does not read complete game logs, unrelated launcher settings, environment variables, or player/server/save records.
+
 ## Remove LuaBuddy
 
 ```sh
@@ -116,5 +147,7 @@ On Windows, use `py -3 luabuddy.py remove`. Restart the game afterward. Removal 
 ## Build and verify
 
 `luabuddy.py build` compiles against the installed game's classes and the pinned ZombieBuddy JAR. It emits Java 25 bytecode in `dist/LuaBuddy.jar`. There is no Maven, Gradle, Python package installation, or replacement Java patch framework.
+
+Installation prepares every changed file before replacing runtime files and activates the launcher last. Ordinary replacement failures attempt to restore the previous files. The original launcher backup is published atomically. This protects failed writes; it is not a transaction across a power loss or filesystem failure.
 
 See [verification](docs/verification.md) for checks, evidence, and runtime limits. See [third-party software](THIRD_PARTY.md) for upstream references and licenses.
