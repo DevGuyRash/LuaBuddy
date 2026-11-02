@@ -1,1 +1,120 @@
 # LuaBuddy
+
+LuaBuddy restores locally installed Project Zomboid client and shared Lua when a multiplayer connection resets the Lua environment to the server's mod list. Add a profile for a mod ID to load it. The loader has no built-in list of mod IDs. AllTheInfo and Auto All have optional compatibility profiles and Lua hooks.
+
+LuaBuddy is a general-purpose **late client Lua loader**. It cannot make every kind of mod work on an arbitrary server. Mods that need server code, earlier startup events, maps, item definitions, Java patches, or assets registered during normal mod loading still need their normal installation. Auto All's worn-clothing repair synchronization requires its server component. A profile cannot supply that component.
+
+The supported runtime is Project Zomboid **42.21** with **ZombieBuddy 2.3.4** and Java **25**. Other builds require verification. Workshop source updates do not require rebuilding LuaBuddy. The game selects the compatible mod version folder at each new Lua environment.
+
+## Install on Linux
+
+Install Python 3.10 or newer and JDK 25 or newer. Install the mods through Steam Workshop or the game's local mods directory. Run these commands from this repository.
+
+```sh
+python3 luabuddy.py build
+python3 luabuddy.py install --mod AllInfo --mod AutoAll
+python3 luabuddy.py status
+```
+
+The installer discovers Steam libraries. If discovery is ambiguous or the game lives elsewhere, pass `--game-dir` to each command. The directory can contain `projectzomboid.jar` directly or a `projectzomboid` child directory.
+
+```sh
+python3 luabuddy.py build --game-dir /path/to/ProjectZomboid
+python3 luabuddy.py install --game-dir /path/to/ProjectZomboid --mod AllInfo --mod AutoAll
+```
+
+## Install on Windows
+
+Install Python 3.10 or newer and JDK 25 or newer, with `javac` and `jar` available through `JAVA_HOME` or `PATH`. Open PowerShell in this repository.
+
+```powershell
+py -3 luabuddy.py build
+py -3 luabuddy.py install --mod AllInfo --mod AutoAll
+py -3 luabuddy.py status
+```
+
+Pass `--game-dir 'D:\SteamLibrary\steamapps\common\ProjectZomboid'` when the installer cannot find the game. Use the game's normal 64-bit launch mode. The alternative launch scripts do not read the launcher's JSON configuration.
+
+## Start and update the game
+
+After installation, quit the game normally and relaunch through Steam. Changes apply to the next launch. A running game keeps its current adapter until it exits.
+
+The installer replaces the legacy `PZClientMods` adapter arguments when present and preserves unrelated launcher settings. It saves the previous launcher configuration before changing it. Running `install` again is safe. After rebuilding LuaBuddy or after a game update resets the launcher configuration, run `install` again.
+
+If another ZombieBuddy agent or a combined patch list is already configured, installation stops before changing the launcher. Combine those patches manually rather than adding a second agent. Removal also leaves a combined agent untouched and reports that it needs manual editing.
+
+Keep your `config` directory at the path printed by `status`. The launcher points to that directory. The installer stages runtime JARs beside the game so ZombieBuddy can use a relative patch path on Windows.
+
+## Add another mod
+
+Use the exact `id=` value from the mod's `mod.info`.
+
+```sh
+python3 luabuddy.py install --mod AnotherModID
+```
+
+For an unknown mod, the installer creates `config/AnotherModID.properties` containing `id=AnotherModID`. IDs with spaces, punctuation, Unicode, or Windows reserved names use a stable `mod-<hash>.properties` filename while preserving the mod ID inside. Quote such IDs on the command line, for example `--mod 'Spiffo Knew [B42]'`. For a bundled profile, the installer copies the profile and its Lua hook. Existing profiles stay intact. Restart the game after changing profiles. To disable one profile, set `enabled=false` in that file.
+
+The game's own mod discovery finds installed mods and chooses their `common` and version directories. To select a mod outside those directories, add `path=/absolute/path/to/mod` to its profile. Point at the directory above `42`, `42.20`, and `common`, so version selection can continue to follow upstream updates. Use forward slashes in Windows properties paths, such as `path=D:/Mods/Example`. Relative paths resolve against the profile's directory.
+
+## Profile reference
+
+Profiles are UTF-8 Java properties files in `config`. Each file has one mod ID. Lists use semicolons. Duplicate IDs, unknown options, missing required mods, and cyclic load order produce diagnostics in the game log. Install each required dependency as a profile too, unless the server already enables it.
+
+| Option | Meaning |
+| --- | --- |
+| `id` | Required mod ID matching `mod.info`. |
+| `enabled` | `true` by default. Set `false` to skip this profile. |
+| `path` | Optional mod root. Otherwise use native installed-mod discovery. |
+| `requires` | Additional required mod IDs. Native `require=` dependencies always apply. |
+| `after` | Optional ordering after other configured IDs. Native `loadAfter` also applies. |
+| `before` | Optional ordering before other configured IDs. Native `loadBefore` also applies. |
+| `exclude` | Glob patterns relative to `media/lua`, such as `client/Example/SelfTest.lua`. |
+| `excludeWhen.ModID` | Additional exclusions when that mod is active on the server. |
+| `preload` | Modules to require before this mod's shared and client files execute. |
+| `plugin` | Optional Lua hook file relative to this profile's directory. |
+
+For example, a mod with no special compatibility rules needs only its ID. Add the other options only when the mod requires them.
+
+```properties
+id=Example
+exclude=client/Example/SelfTest.lua
+preload=Vehicles/ISUI/ISVehicleMechanics
+plugin=Example.lua
+```
+
+A plugin returns a table with optional `before(context)` and `after(context)` functions. Keep imports and initialization inside those hooks. `before` runs before the shared phase. `after` runs after that mod's client phase, before dependent client files. `context.id` is the mod ID, `context.active` contains server-loaded and successfully loaded local IDs, and `context.state.mods` holds each profile's status. Plugins run trusted local code in the game's Lua environment.
+
+```lua
+return {
+    after = function(context)
+        print("Initialized " .. context.id)
+    end,
+}
+```
+
+## Loading behavior
+
+ZombieBuddy applies one hook immediately before the normal `OnGameStart` event. LuaBuddy runs only on multiplayer clients. Single player and dedicated servers use their normal loading paths. A mod already present in the server's active list is skipped. Each Lua environment initializes once, including after disconnecting and rejoining in the same JVM.
+
+LuaBuddy reads upstream files without editing them. Version-specific files replace matching common files. It compiles a mod's sources before executing them, loads the shared phase before the client phase, and orders mods using native dependency metadata. Files with the same relative path follow that mod order, with later mods taking precedence. Shared and client files with the same module name remain distinct scripts. `require` prefers shared modules and caches the first return value, including `nil` and `false`.
+
+An environment-local `require` resolver remains available for imports from later callbacks and other configured mods. Imports outside the local registry go to the game's original `require`. LuaBuddy uses the game's translation parser for language fallback and placeholders. It does not change the server mod list or the checksum calculation.
+
+Failures appear in `console.txt` under `[LuaBuddy]`, and in `LuaBuddy.mods` inside Lua. A failed mod is not retried in the same environment because Lua side effects cannot be rolled back. Unrelated mods can continue. A dependent mod fails when its required mod fails. Fix the cause and reconnect or restart.
+
+Late loading does not replay events such as `OnBoot` or `OnGameBoot`. Calls that require the game to consider a local mod fully activated, asset lookups through the normal mod filesystem, and mods that replace `require` themselves may need additional integration. An optional hook can address a mod's specific late initialization when that is sufficient. LuaBuddy does not automatically turn client code into server code.
+
+## Remove LuaBuddy
+
+```sh
+python3 luabuddy.py remove
+```
+
+On Windows, use `py -3 luabuddy.py remove`. Restart the game afterward. Removal preserves unrelated launcher settings and your profiles.
+
+## Build and verify
+
+`luabuddy.py build` compiles against the installed game's classes and the pinned ZombieBuddy JAR. It emits Java 25 bytecode in `dist/LuaBuddy.jar`. There is no Maven, Gradle, Python package installation, or replacement Java patch framework.
+
+See [verification](docs/verification.md) for checks, evidence, and runtime limits. See [third-party software](THIRD_PARTY.md) for upstream references and licenses.
