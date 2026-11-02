@@ -20,7 +20,7 @@ class CliCheck(unittest.TestCase):
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory(prefix="luabuddy-cli-")
         self.addCleanup(self.scratch.cleanup)
-        self.root = Path(self.scratch.name)
+        self.root = Path(self.scratch.name).resolve()
         shutil.copy2(REPO / "luabuddy.py", self.root / "luabuddy.py")
         shutil.copytree(REPO / "profiles", self.root / "profiles")
         (self.root / "lib").mkdir()
