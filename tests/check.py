@@ -49,6 +49,7 @@ def main() -> None:
         env["LD_LIBRARY_PATH"] = os.pathsep.join([str(game / "natives"), str(game / "jre64/lib"), env.get("LD_LIBRARY_PATH", "")])
         run(java, "--enable-native-access=ALL-UNNAMED", "-Dzomboid.steam=0", "-Djava.library.path=natives",
             "-cp", classpath, "luabuddy.EngineCheck", str(ROOT), str(scratch / "fixtures"), cwd=game, env=env)
+        run(sys.executable, str(ROOT / "luabuddy.py"), "diagnostics", "--cache-dir", str(scratch / "fixtures/cache"), "--json")
     luajit = shutil.which("luajit")
     if luajit:
         run(luajit, "tests/loader.lua", "resources/bootstrap.lua")

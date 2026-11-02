@@ -1,7 +1,6 @@
 package luabuddy;
 
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
@@ -17,6 +16,9 @@ import java.util.function.Function;
 import se.krka.kahlua.j2se.KahluaTableImpl;
 import se.krka.kahlua.luaj.compiler.LuaCompiler;
 import se.krka.kahlua.vm.KahluaTable;
+import se.krka.kahlua.vm.JavaFunction;
+import se.krka.kahlua.vm.LuaClosure;
+import se.krka.kahlua.vm.Prototype;
 import zombie.Lua.LuaManager;
 import zombie.ZomboidFileSystem;
 import zombie.core.Language;
@@ -34,19 +36,38 @@ public final class Bootstrap {
         if (GameServer.server || !GameClient.client || LuaManager.env == null) return;
         if (LuaManager.env.rawget("LuaBuddy") != null) return;
         KahluaTable state = table();
-        state.rawset("version", "1.0.0");
         KahluaTable statuses = table();
         state.rawset("mods", statuses);
         LuaManager.env.rawset("LuaBuddy", state);
+        String directory = System.getProperty("luabuddy.config");
+        Diagnostics diagnostics = new Diagnostics(state, directory);
+        state.rawset("compile", (JavaFunction) (frame, count) -> {
+            try {
+                return frame.push(compile((String) frame.get(0), (String) frame.get(1)));
+            } catch (IOException | RuntimeException error) {
+                frame.push(null, error.toString());
+                frame.push(Diagnostics.stackTrace(error));
+                return 3;
+            }
+        });
         try {
-            String directory = System.getProperty("luabuddy.config");
             if (directory == null) throw new IOException("Missing -Dluabuddy.config=<profile directory>");
             Set<String> active = new LinkedHashSet<>(ZomboidFileSystem.instance.getModIDs());
             Map<String, Mod> mods = new LinkedHashMap<>();
             for (ModProfile profile : ModProfile.read(Path.of(directory))) {
+                KahluaTable detail = diagnostics.mod(profile);
+                if (!profile.enabled()) {
+                    statuses.rawset(profile.id(), "disabled");
+                    detail.rawset("status", "disabled");
+                    detail.rawset("stage", "disabled");
+                    if (Boolean.TRUE.equals(state.rawget("debug"))) Diagnostics.log(profile.id() + " disabled by profile.");
+                    continue;
+                }
                 if (active.contains(profile.id())) {
                     statuses.rawset(profile.id(), "server-loaded");
-                    System.out.println("[LuaBuddy] " + profile.id() + " already loaded by the server; skipping.");
+                    detail.rawset("status", "server-loaded");
+                    detail.rawset("stage", "server-loaded");
+                    Diagnostics.log(profile.id() + " already loaded by the server; skipping.");
                     continue;
                 }
                 try {
@@ -58,7 +79,7 @@ public final class Bootstrap {
                     after.addAll(profile.list("after"));
                     mods.put(profile.id(), new Mod(profile, info, required, after));
                 } catch (IOException | RuntimeException e) {
-                    failed(statuses, profile.id(), e);
+                    diagnostics.failed(profile.id(), detail, e);
                 }
             }
             for (Mod mod : mods.values()) {
@@ -79,23 +100,50 @@ public final class Bootstrap {
                     remaining.remove(id);
                     progress = true;
                     try {
+                        KahluaTable detail = (KahluaTable) ((KahluaTable) state.rawget("details")).rawget(id);
+                        detail.rawset("stage", "dependencies");
                         List<String> missing = mod.required().stream().filter(dep -> !available.contains(dep)).toList();
                         if (!missing.isEmpty()) throw new IOException("Enable required mod profiles or server mods: " + missing);
                         KahluaTable entry = table();
                         entry.rawset("id", id);
-                        entry.rawset("sources", strings(mod.profile().sources(ModProfile.roots(mod.info()), active)));
+                        List<Path> roots = ModProfile.roots(mod.info());
+                        detail.rawset("commonRoot", mod.info().getCommonDir());
+                        detail.rawset("versionRoot", mod.info().getVersionDir());
+                        detail.rawset("requires", String.join(";", mod.required()));
+                        detail.rawset("preload", String.join(";", mod.profile().list("preload")));
+                        detail.rawset("plugin", mod.profile().pluginFilename());
+                        detail.rawset("stage", "source-scan");
+                        var files = mod.profile().sources(roots, active);
+                        KahluaTable sources = table();
+                        KahluaTable filenames = table();
+                        files.forEach((name, source) -> {
+                            sources.rawset(name, source.text());
+                            filenames.rawset(name, source.filename());
+                        });
+                        detail.rawset("sourceCount", files.size());
+                        if (Boolean.TRUE.equals(state.rawget("debug"))) Diagnostics.log(id + " roots=" + roots + " sources=" + files.size());
+                        entry.rawset("sources", sources);
+                        entry.rawset("filenames", filenames);
                         entry.rawset("preload", array(mod.profile().list("preload")));
                         entry.rawset("required", array(mod.required()));
+                        detail.rawset("stage", "plugin-read");
                         entry.rawset("plugin", mod.profile().plugin());
-                        loadTranslations(ModProfile.roots(mod.info()));
+                        entry.rawset("pluginFilename", mod.profile().pluginFilename());
+                        detail.rawset("stage", "translations");
+                        loadTranslations(roots);
+                        detail.rawset("stage", "prepared");
                         payload.rawset(payload.size() + 1, entry);
                         available.add(id);
                     } catch (IOException | RuntimeException e) {
-                        failed(statuses, id, e);
+                        diagnostics.failed(id, (KahluaTable) ((KahluaTable) state.rawget("details")).rawget(id), e);
                     }
                 }
                 if (!progress) {
-                    for (String id : remaining) failed(statuses, id, new IOException("Cyclic mod order: " + remaining));
+                    for (String id : remaining) {
+                        KahluaTable detail = (KahluaTable) ((KahluaTable) state.rawget("details")).rawget(id);
+                        detail.rawset("stage", "dependencies");
+                        diagnostics.failed(id, detail, new IOException("Cyclic mod order: " + remaining));
+                    }
                     break;
                 }
             }
@@ -103,14 +151,10 @@ public final class Bootstrap {
             for (String id : active) activeTable.rawset(id, true);
             if (!payload.isEmpty()) runLoader(payload, activeTable, state);
         } catch (IOException | RuntimeException e) {
-            state.rawset("error", e.toString());
-            System.err.println("[LuaBuddy] Cannot initialize: " + e);
+            diagnostics.failed(e);
+        } finally {
+            diagnostics.finish();
         }
-    }
-
-    private static void failed(KahluaTable statuses, String id, Exception error) {
-        statuses.rawset(id, "failed: " + error.getMessage());
-        System.err.println("[LuaBuddy] " + id + " failed; no retry in this Lua environment: " + error);
     }
 
     private static List<String> orEmpty(List<String> values) {
@@ -149,23 +193,32 @@ public final class Bootstrap {
     private static void runLoader(KahluaTable mods, KahluaTable active, KahluaTable state) throws IOException {
         try (var stream = Bootstrap.class.getResourceAsStream("/bootstrap.lua")) {
             if (stream == null) throw new IOException("Missing bootstrap.lua in LuaBuddy JAR");
-            var chunk = LuaCompiler.loadis(new InputStreamReader(stream, StandardCharsets.UTF_8), "LuaBuddy/bootstrap.lua", LuaManager.env);
+            var chunk = compile(new String(stream.readAllBytes(), StandardCharsets.UTF_8), "LuaBuddy/bootstrap.lua");
             Object[] result = LuaManager.caller.pcall(LuaManager.thread, chunk, new Object[]{mods, active, state});
             if (result.length == 0 || !Boolean.TRUE.equals(result[0])) {
-                throw new IOException("Lua bootstrap failed: " + (result.length > 1 ? result[1] : "no result"));
+                String trace = result.length > 2 ? String.valueOf(result[2]) : "";
+                Throwable cause = result.length > 3 && result[3] instanceof Throwable error ? error : null;
+                throw new IOException("Lua bootstrap failed: " + (result.length > 1 ? result[1] : "no result") + "\n" + trace, cause);
             }
         }
+    }
+
+    private static LuaClosure compile(String source, String filename) throws IOException {
+        LuaClosure chunk = LuaCompiler.loadstring(source, filename, LuaManager.env);
+        sourceMetadata(chunk.prototype, filename);
+        return chunk;
+    }
+
+    private static void sourceMetadata(Prototype prototype, String filename) {
+        prototype.file = filename.substring(filename.lastIndexOf('/') + 1);
+        prototype.filename = filename;
+        if (prototype.name == null) prototype.name = filename;
+        for (Prototype child : prototype.prototypes) sourceMetadata(child, filename);
     }
 
     static KahluaTable array(List<String> values) {
         KahluaTable table = table();
         for (int i = 0; i < values.size(); i++) table.rawset(i + 1, values.get(i));
-        return table;
-    }
-
-    static KahluaTable strings(Map<String, String> values) {
-        KahluaTable table = table();
-        values.forEach(table::rawset);
         return table;
     }
 

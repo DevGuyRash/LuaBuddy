@@ -5,8 +5,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
+import org.json.JSONObject;
 import se.krka.kahlua.luaj.compiler.LuaCompiler;
 import se.krka.kahlua.vm.KahluaTable;
+import se.krka.kahlua.vm.LuaClosure;
 import zombie.Lua.LuaManager;
 import zombie.ZomboidFileSystem;
 import zombie.core.Languages;
@@ -36,6 +38,10 @@ public final class EngineCheck {
         lua("require = function(name) assert(name == 'native-fixture'); return 'native' end");
     }
 
+    private static JSONObject report() throws Exception {
+        return new JSONObject(Files.readString(root.resolve("cache/LuaBuddy/diagnostics.json")));
+    }
+
     public static void main(String[] args) throws Exception {
         Path repo = Path.of(args[0]);
         root = Path.of(args[1]);
@@ -50,11 +56,14 @@ public final class EngineCheck {
         write("mods/Consumer/common/media/lua/shared/Fixture/Overlay.lua", "error('common must be replaced')");
         write("mods/Consumer/42/media/lua/shared/Fixture/Overlay.lua", "return 42");
         write("mods/Consumer/42/media/lua/shared/Fixture/Phase.lua", "phaseCount = (phaseCount or 0) + 1; return 'shared'");
+        write("mods/Consumer/42/media/lua/shared/Fixture/Upper.LUA", "return 73");
         write("mods/Consumer/42/media/lua/client/Fixture/Phase.lua", "phaseCount = phaseCount + 1; return 'client'");
         write("mods/Consumer/42/media/lua/client/Fixture/Consumer.lua",
                 "assert(libraryReady); assert(require('Fixture/Library').number == 41); "
                 + "assert(require('native-fixture') == 'native'); "
-                + "function lateImport() return require('Fixture/Overlay.lua') end");
+                + "assert(require('Fixture/Upper') == 73 and require('FIXTURE/UPPER.LUA') == 73); "
+                + "function lateImport() return require('Fixture/Overlay.lua') end; "
+                + "function makeNested() return function() return 9 end end; nestedCallback = makeNested()");
         write("config/a-consumer.properties", "id=Consumer\npath=../mods/Consumer\n");
         ZomboidFileSystem.instance.setModIdToDir("Library", root.resolve("mods/Library").toString());
         write("config/z-library.properties", "id=Library\nplugin=library.lua\n");
@@ -72,17 +81,40 @@ public final class EngineCheck {
         Bootstrap.load();
         lua("assert(LuaBuddy.mods.Library == 'loaded'); assert(LuaBuddy.mods.Consumer == 'loaded'); "
                 + "assert(lateImport() == 42); assert(phaseCount == 2); assert(require('Fixture/Phase') == 'shared')");
+        String filename = root.resolve("mods/Consumer/42/media/lua/client/Fixture/Consumer.lua").toAbsolutePath().normalize().toString().replace('\\', '/');
+        for (String name : List.of("lateImport", "makeNested", "nestedCallback")) {
+            LuaClosure callback = (LuaClosure) LuaManager.env.rawget(name);
+            if (!filename.equals(LuaManager.GlobalObject.getFilenameOfClosure(callback))
+                    || !"Consumer.lua".equals(callback.prototype.file)) {
+                throw new AssertionError("Native filename metadata for " + name);
+            }
+        }
+        JSONObject successful = report();
+        String session = successful.getString("session");
+        if (successful.getJSONObject("summary").getInt("loaded") != 2
+                || successful.getJSONObject("mods").getJSONObject("Consumer").getInt("sourceCount") != 5
+                || !successful.getJSONObject("mods").getJSONObject("Consumer").getString("stage").equals("complete")) {
+            throw new AssertionError("Successful initialization diagnostic summary");
+        }
         KahluaTable state = (KahluaTable) LuaManager.env.rawget("LuaBuddy");
         Bootstrap.load();
         if (LuaManager.env.rawget("LuaBuddy") != state) throw new AssertionError("Initialize once per Lua environment");
         lua("assert(phaseCount == 2)");
+        if (!session.equals(report().getString("session"))) throw new AssertionError("Same environment must retain its report");
         fresh();
         Bootstrap.load();
         lua("assert(phaseCount == 2); assert(LuaBuddy.mods.Consumer == 'loaded')");
+        if (session.equals(report().getString("session"))) throw new AssertionError("Reconnect must replace the report with a new session");
+        try (var files = Files.list(root.resolve("cache/LuaBuddy"))) {
+            if (!files.map(path -> path.getFileName().toString()).toList().equals(List.of("diagnostics.json"))) {
+                throw new AssertionError("One report and no stale temporary files");
+            }
+        }
         ZomboidFileSystem.instance.getModIDs().addAll(List.of("Library", "Consumer"));
         fresh();
         Bootstrap.load();
         lua("assert(LuaBuddy.mods.Library == 'server-loaded'); assert(LuaBuddy.mods.Consumer == 'server-loaded'); assert(phaseCount == nil)");
+        if (report().getJSONObject("summary").getInt("serverLoaded") != 2) throw new AssertionError("Server-loaded report");
         ZomboidFileSystem.instance.getModIDs().clear();
         write("config/library.lua", "return { after = function() error('dependency hook failed') end }");
         fresh();
@@ -145,5 +177,84 @@ public final class EngineCheck {
         Bootstrap.load();
         lua("assert(LuaBuddy.mods.CycleA:find('Cyclic mod order',1,true)); assert(LuaBuddy.mods.CycleB:find('Cyclic mod order',1,true)); assert(LuaBuddy.error == nil)");
         System.out.println("PASS: missing required profiles and cyclic mod order fail before executing mod sources");
+        diagnosticCases();
+    }
+
+    private static void diagnosticCases() throws Exception {
+        System.clearProperty("luabuddy.config");
+        fresh();
+        Bootstrap.load();
+        if (!report().getString("error").contains("luabuddy.config")
+                || !report().getString("configDirectory").isEmpty()
+                || !report().getString("traceback").contains("IOException")) {
+            throw new AssertionError("Missing configuration diagnostics");
+        }
+        write("invalid-config/broken.properties", "id=Broken\npath=" + '\\' + "uZZZZ\n");
+        System.setProperty("luabuddy.config", root.resolve("invalid-config").toString());
+        fresh();
+        Bootstrap.load();
+        if (!report().getString("error").contains("broken.properties")
+                || !report().getString("traceback").contains("IllegalArgumentException")) {
+            throw new AssertionError("Malformed configuration must identify the profile and original cause");
+        }
+        Files.createDirectories(root.resolve("empty-config"));
+        System.setProperty("luabuddy.config", root.resolve("empty-config").toString());
+        fresh();
+        Bootstrap.load();
+        if (!report().getJSONObject("mods").isEmpty() || report().has("error")) throw new AssertionError("Empty configuration report");
+        write("disabled-config/disabled.properties", "id=NotInstalled\nenabled=false\n");
+        System.setProperty("luabuddy.config", root.resolve("disabled-config").toString());
+        fresh();
+        Bootstrap.load();
+        if (report().getJSONObject("summary").getInt("disabled") != 1 || report().has("error")) {
+            throw new AssertionError("Disabled profiles do not require installed files");
+        }
+
+        write("diagnostic-mod/42/mod.info", "name=DiagnosticFixture\nid=DiagnosticFixture\nversionMin=42.0\n");
+        write("diagnostic-mod/42/media/lua/client/DiagnosticFixture.lua",
+                "local function bottom() error('native diagnostic fixture') end; local function middle() bottom() end; middle()");
+        write("diagnostic-config/fixture.properties", "id=DiagnosticFixture\npath=../diagnostic-mod\nplugin=hooks.lua\n");
+        write("diagnostic-config/hooks.lua", "return {}");
+        System.setProperty("luabuddy.config", root.resolve("diagnostic-config").toString());
+        fresh();
+        Bootstrap.load();
+        JSONObject failed = report().getJSONObject("mods").getJSONObject("DiagnosticFixture");
+        if (!failed.getString("status").equals("failed") || !failed.getString("stage").equals("client")
+                || !failed.getString("source").endsWith("DiagnosticFixture.lua")
+                || !failed.getString("error").contains("native diagnostic fixture")
+                || !failed.getString("traceback").contains("DiagnosticFixture.lua")) {
+            throw new AssertionError("Nested native runtime diagnostic trace: " + failed);
+        }
+        write("diagnostic-mod/42/media/lua/client/DiagnosticFixture.lua", "diagnosticFixtureLoaded = true");
+        for (String hook : List.of("before", "after")) {
+            write("diagnostic-config/hooks.lua", "return { " + hook + " = function() error('" + hook + " fixture') end }");
+            fresh();
+            Bootstrap.load();
+            JSONObject detail = report().getJSONObject("mods").getJSONObject("DiagnosticFixture");
+            if (!detail.getString("stage").equals(hook) || !detail.getString("source").endsWith("hooks.lua")
+                    || !detail.getString("traceback").contains("hooks.lua")) {
+                throw new AssertionError("Plugin hook diagnostic attribution: " + detail);
+            }
+        }
+        write("diagnostic-config/hooks.lua", "return {}");
+        Path blocked = root.resolve("cache/LuaBuddy");
+        Path previous = root.resolve("previous-report");
+        Files.move(blocked, previous);
+        Files.writeString(blocked, "blocked report directory");
+        fresh();
+        Bootstrap.load();
+        lua("assert(LuaBuddy.mods.DiagnosticFixture == 'loaded'); assert(diagnosticFixtureLoaded); assert(LuaBuddy.reportError)");
+        if (!Files.readString(blocked).equals("blocked report directory")) throw new AssertionError("Report failures must preserve unrelated data");
+        Files.delete(blocked);
+        Files.move(previous, blocked);
+        System.setProperty("luabuddy.debug", "true");
+        fresh();
+        Bootstrap.load();
+        lua("assert(LuaBuddy.mods.DiagnosticFixture == 'loaded'); assert(LuaBuddy.debug)");
+        if (!report().getBoolean("debug") || report().getJSONObject("summary").getInt("loaded") != 1) {
+            throw new AssertionError("Debug report must reflect the current initialization");
+        }
+        System.clearProperty("luabuddy.debug");
+        System.out.println("PASS: uppercase Lua modules, native nested closure filenames, complete/reconnect/disabled/empty/failure reports, Lua hook traces, write failure isolation, debug logging");
     }
 }
