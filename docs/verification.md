@@ -33,14 +33,18 @@ The Linux check used Project Zomboid 42.21.0, bundled Java 25.0.1, and ZombieBud
 
 | Check | Result |
 | --- | --- |
-| Portable CLI | Eight subprocess tests pass. They cover repeat install, removal, launcher preservation, backups, legacy Windows arguments, other agents, invalid input, arbitrary mod IDs, and Steam discovery. |
+| Portable CLI | Twenty-five subprocess tests pass. They cover install/remove/idempotence, original backups, staged writes and rollback, launcher ownership, filename collisions, debug settings, read-only diagnostics, malformed reports, and selected-field output. |
 | Native game integration | Passes dependency ordering and hook completion, compile and dependency failures, common/version overlays, shared/client phases, late imports, server-enabled skips, single-player/server isolation, and fresh Lua environments. |
 | Native translations | Passes version precedence, German and English, fallback, and `%1` substitution. |
 | Optional AllInfo profile | Excludes SelfTest and overlapping trait screens while retaining inventory providers. |
+| Native diagnostics | Passes real Kahlua Lua/Java traces, nested closure source metadata, uppercase `.LUA` imports, empty/disabled/malformed configurations, report replacement on reconnect, and report-write failure isolation. The CLI reads the actual native JSON report. |
 | Extra Lua failure checks | Passes `nil` and `false` caching, native delegation, failure without retry, unrelated continuation, circular imports, path overrides, and invalid hooks. |
 | Arbitrary mod IDs in the real client | Two temporary mods load and assert native dependency order, common/version replacement, shared/client files with the same name, and a late cross-mod import. |
 | Installed launcher | Loads the staged JARs through the normal launcher JSON. AllInfo restores 39 files and AutoAll restores 35 files. Native mod discovery finds the installed roots without pinned version paths. |
 | Gameplay | AllTheInfo's weapon tooltip is visible. Auto All completes its normal read action with the ordinary user role and reports one item read. |
 | Reconnect | Two world entries in the same normal-launcher process each pass checksums and initialize each mod exactly once. The second entry uses the ordinary user role. |
+| Multiplayer diagnostic report | A separate client loads AllInfo, AutoAll, and an uppercase-extension probe while isolating a deliberately broken mod. The JSON report records three loaded mods and one failed mod with its actual filename, stage, Lua trace, and Java cause. The real diagnostic CLI reads that report and returns failure as expected. |
+
+The diagnostics pass kept its selected evidence in `~/.local/state/app-verification/LuaBuddy/2026-11-02-diagnostics/`. Its deliberately failing fixture was confined to the disposable client, not the user's configuration.
 
 The workflow in `.github/workflows/check.yml` runs the installer fixtures on Windows and Linux with Python 3.10 and 3.14. It does not distribute or run the proprietary game. A Windows game session and every third-party mod or public-server combination remain outside this verification.
