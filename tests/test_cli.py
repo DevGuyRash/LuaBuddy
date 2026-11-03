@@ -1,4 +1,5 @@
 import importlib.util
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -16,17 +18,23 @@ CLI = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CLI)
 
 
+def framework_jar(version="2.3.4", extra=b""):
+    stream = BytesIO()
+    with zipfile.ZipFile(stream, "w") as jar:
+        jar.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\r\nImplementation-Version: " + version + "\r\nPremain-Class: zombie.Agent\r\n\r\n")
+        jar.writestr("zombie/Agent.class", b"\xca\xfe\xba\xbe" + extra)
+    return stream.getvalue()
+
+
 class CliCheck(unittest.TestCase):
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory(prefix="luabuddy-cli-")
         self.addCleanup(self.scratch.cleanup)
         self.root = Path(self.scratch.name).resolve()
         shutil.copy2(REPO / "luabuddy.py", self.root / "luabuddy.py")
+        shutil.copy2(REPO / "zombiebuddy.py", self.root / "zombiebuddy.py")
         shutil.copytree(REPO / "profiles", self.root / "profiles")
-        (self.root / "lib").mkdir()
         (self.root / "dist").mkdir()
-        (self.root / "lib/ZombieBuddy.jar").write_bytes(b"framework fixture")
-        (self.root / "dist/LuaBuddy.jar").write_bytes(b"adapter fixture")
         self.game = self.root / "Steam library/steamapps/common/ProjectZomboid/projectzomboid"
         self.game.mkdir(parents=True)
         (self.game / "projectzomboid.jar").touch()
@@ -34,6 +42,22 @@ class CliCheck(unittest.TestCase):
         self.original = {"mainClass": "zombie/gameStates/MainScreenState", "classpath": [".", "projectzomboid.jar"],
                          "vmArgs": ["-Xmx3g", "-Dunrelated=preserve me", "-javaagent:other.jar"], "custom": {"value": 7}}
         self.save(self.original)
+        self.seed_build()
+
+    def seed_build(self, helper=b"adapter fixture", framework=None, version="2.3.4", asset_id=1):
+        data = framework if framework is not None else framework_jar(version)
+        tag = "v" + version
+        release = {"tag": tag, "asset_id": asset_id, "size": len(data),
+                   "sha256": CLI.hashlib.sha256(data).hexdigest(),
+                   "url": f"{CLI.zombiebuddy.REPOSITORY}/releases/download/{tag}/ZombieBuddy.jar",
+                   "release_url": f"{CLI.zombiebuddy.REPOSITORY}/releases/tag/{tag}"}
+        dependency = CLI.Dependency(release, data, CLI.datetime.now(CLI.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        with patch.object(CLI, "ROOT", self.root):
+            record = dict(CLI.build_inputs(self.game, dependency), verified=True,
+                          helper=CLI.hashlib.sha256(helper).hexdigest(), gameVersion="42.21", zombieBuddyVersion=version)
+            CLI.apply_files(CLI.build_files(CLI.PreparedBuild(helper, record, dependency)))
+        self.dependency = dependency
+        return dependency
 
     def save(self, value):
         self.launcher.write_text(json.dumps(value, indent=4) + "\n", encoding="utf-8")
@@ -41,6 +65,7 @@ class CliCheck(unittest.TestCase):
     def run_cli(self, *args, success=True, environment=None, preexec_fn=None):
         env = os.environ.copy()
         env.pop("PZ_GAME_DIR", None)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         if environment:
             env.update(environment)
         selection = [] if args[0] == "diagnostics" else ["--game-dir", str(self.game.parent)]
@@ -124,7 +149,7 @@ class CliCheck(unittest.TestCase):
                 self.assertEqual(self.launcher.read_bytes(), original)
                 self.assertFalse((self.game / ".luabuddy").exists())
                 self.assertFalse((self.root / "config").exists())
-                self.assertFalse((self.root / ".local").exists())
+                self.assertFalse((self.root / ".local/backups").exists())
 
     def test_shared_framework_removal_refused_without_writes(self):
         self.original["vmArgs"] += [CLI.CONFIG_PREFIX + "/profiles",
@@ -197,7 +222,7 @@ class CliCheck(unittest.TestCase):
                 self.assertEqual(self.snapshot(), before)
                 self.assertFalse((self.root / "config").exists())
                 self.assertFalse((self.game / ".luabuddy").exists())
-                self.assertFalse((self.root / ".local").exists())
+                self.assertFalse((self.root / ".local/backups").exists())
 
     def test_existing_profile_filename_collisions_refused(self):
         self.run_cli("install", "--mod", "Example", "--mod", "Mod with spaces")
@@ -295,6 +320,22 @@ class CliCheck(unittest.TestCase):
                 self.assertIn("LuaBuddy:", result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertEqual(self.snapshot(), before)
+
+    def test_optional_framework_version_in_old_and_new_initialization_reports(self):
+        self.run_cli("install", "--mod", "FreshMod")
+        cache, path, report = self.report()
+        report["zombieBuddyVersion"] = "2.3.4"
+        path.write_text(json.dumps(report), encoding="utf-8")
+        before = self.snapshot()
+        self.assertEqual(json.loads(self.run_cli("diagnostics", "--cache-dir", str(cache), "--json").stdout), report)
+        self.assertIn("ZombieBuddy at initialization: 2.3.4", self.run_cli("diagnostics", "--cache-dir", str(cache)).stdout)
+        doctor = json.loads(self.run_cli("doctor", "--cache-dir", str(cache), "--json").stdout)
+        self.assertEqual(doctor["report"]["zombieBuddyVersion"], "2.3.4")
+        self.assertIn("ZombieBuddy 2.3.4", self.run_cli("doctor", "--cache-dir", str(cache)).stdout)
+        self.assertEqual(self.snapshot(), before)
+        report["zombieBuddyVersion"] = 234
+        path.write_text(json.dumps(report), encoding="utf-8")
+        self.assertIn("zombieBuddyVersion", self.run_cli("diagnostics", "--cache-dir", str(cache), success=False).stderr)
 
     def test_failed_initialization_reports_lua_and_java_tracebacks(self):
         self.run_cli("install", "--mod", "FreshMod")
@@ -416,20 +457,18 @@ class CliCheck(unittest.TestCase):
 
         self.launcher.chmod(0o640)
         self.run_cli("install", "--mod", "FreshMod")
-        (self.root / "dist/LuaBuddy.jar").write_bytes(b"new adapter")
-        (self.root / "lib/ZombieBuddy.jar").write_bytes(b"x" * 1024)
+        self.seed_build(helper=b"new adapter", framework=framework_jar(extra=b"x" * 1024), asset_id=2)
         before = self.snapshot()
         self.run_cli("install", success=False, preexec_fn=limit_files)
         self.assertEqual(self.snapshot(), before)
         self.assertFalse(list(self.root.rglob(".luabuddy-*")))
         self.run_cli("install")
         self.assertEqual((self.game / ".luabuddy/LuaBuddy.jar").read_bytes(), b"new adapter")
-        self.assertEqual((self.game / ".luabuddy/ZombieBuddy.jar").read_bytes(), b"x" * 1024)
+        self.assertEqual((self.game / ".luabuddy/ZombieBuddy.jar").read_bytes(), self.dependency.data)
 
     def test_replacement_failure_restores_installed_bytes_and_modes(self):
         self.run_cli("install", "--mod", "FreshMod")
-        (self.root / "dist/LuaBuddy.jar").write_bytes(b"new adapter")
-        (self.root / "lib/ZombieBuddy.jar").write_bytes(b"new framework")
+        self.seed_build(helper=b"new adapter", framework=framework_jar(extra=b"new framework"), asset_id=2)
         before = self.snapshot()
         replace = os.replace
         failed = False
