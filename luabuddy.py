@@ -2,7 +2,7 @@
 """Build and install LuaBuddy for Project Zomboid on Linux and Windows."""
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -14,7 +14,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+from typing import NamedTuple
 from uuid import UUID
+
+sys.dont_write_bytecode = True
+import zombiebuddy
 
 
 ROOT = Path(__file__).resolve().parent
@@ -23,13 +27,33 @@ CONFIG_PREFIX = "-Dluabuddy.config="
 LEGACY_PREFIX = "-Dpzclientmods.config="
 DEBUG_PROPERTY = "-Dluabuddy.debug"
 REPORT_LIMIT = 4 * 1024 * 1024
+METADATA_LIMIT = 64 * 1024
+UPDATE_INTERVAL = 60 * 60
+
+
+class Dependency(NamedTuple):
+    release: dict
+    data: bytes
+    checked_at: str
+
+
+class PreparedBuild(NamedTuple):
+    helper: bytes
+    record: dict
+    dependency: Dependency
 
 
 def game_directory(path: Path) -> Path | None:
     for candidate in (path, path / "projectzomboid"):
-        if (candidate / "projectzomboid.jar").is_file():
+        if any((candidate / name).is_file() for name in ("projectzomboid.jar", "java/projectzomboid.jar")):
             return candidate.resolve()
     return None
+
+
+def game_jars(game: Path) -> list[Path]:
+    if (game / "projectzomboid.jar").is_file():
+        return [game / "projectzomboid.jar"]
+    return sorted((game / "java").glob("*.jar"))
 
 
 def steam_libraries() -> list[Path]:
@@ -141,25 +165,257 @@ def atomic_write(path: Path, data: bytes) -> bool:
     return apply_files({path: data})
 
 
-def build(game: Path) -> None:
+def json_bytes(value: dict) -> bytes:
+    return (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def read_json(path: Path) -> dict:
+    with path.open("rb") as stream:
+        data = stream.read(METADATA_LIMIT + 1)
+    if len(data) > METADATA_LIMIT:
+        raise ValueError(f"Metadata exceeds {METADATA_LIMIT} bytes: {path}")
+    try:
+        value = json.loads(data)
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise ValueError(f"Invalid metadata JSON: {path}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"Metadata must be an object: {path}")
+    return value
+
+
+def dependency_directory() -> Path:
+    return ROOT / ".local/dependencies/zombiebuddy"
+
+
+def verify_dependency(release: dict, data: bytes) -> None:
+    if len(data) != release["size"] or hashlib.sha256(data).hexdigest() != release["sha256"]:
+        raise ValueError("ZombieBuddy.jar does not match its verified release size and SHA-256")
+    manifest = zombiebuddy.inspect_jar(data)
+    if manifest["version"] != release["tag"].removeprefix("v"):
+        raise ValueError("ZombieBuddy.jar version does not match its release metadata")
+
+
+def jar_bytes(path: Path) -> bytes:
+    with path.open("rb") as stream:
+        data = stream.read(zombiebuddy.MAX_JAR_SIZE + 1)
+    if len(data) > zombiebuddy.MAX_JAR_SIZE:
+        raise ValueError(f"ZombieBuddy.jar exceeds its size limit: {path}")
+    return data
+
+
+def cached_release(release: dict) -> bytes:
+    directory = dependency_directory() / str(release["asset_id"])
+    stored = zombiebuddy.validate_release(read_json(directory / "release.json"))
+    if stored != release:
+        raise ValueError(f"Cached ZombieBuddy asset {release['asset_id']} metadata differs from the official release")
+    data = jar_bytes(directory / "ZombieBuddy.jar")
+    verify_dependency(release, data)
+    return data
+
+
+def cached_dependency() -> Dependency:
+    path = dependency_directory() / "current.json"
+    selection = read_json(path)
+    if type(selection.get("schemaVersion")) is not int or selection["schemaVersion"] != 1:
+        raise ValueError(f"Invalid dependency selection schema: {path}")
+    release = zombiebuddy.validate_release(selection.get("release"))
+    checked_at = selection.get("checkedAt")
+    if not isinstance(checked_at, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", checked_at) is None:
+        raise ValueError(f"Invalid dependency last-check date: {path}")
+    datetime.strptime(checked_at, "%Y-%m-%dT%H:%M:%SZ")
+    return Dependency(release, cached_release(release), checked_at)
+
+
+def select_dependency(offline: bool = False, force: bool = False) -> Dependency:
+    cached = None
+    cache_error = None
+    try:
+        cached = cached_dependency()
+    except (OSError, ValueError) as error:
+        cache_error = error
+    if offline:
+        if cached is None:
+            raise ValueError(f"No verified cached ZombieBuddy release available offline: {cache_error}")
+        print(f"Offline: using verified cached ZombieBuddy {cached.release['tag']}; latest release not checked.")
+        return cached
+    now = datetime.now(timezone.utc)
+    if cached is not None and not force:
+        checked = datetime.strptime(cached.checked_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        if 0 <= (now - checked).total_seconds() < UPDATE_INTERVAL:
+            return cached
+    try:
+        release = zombiebuddy.validate_release(zombiebuddy.fetch_latest())
+        directory = dependency_directory() / str(release["asset_id"])
+        if (directory / "release.json").exists():
+            stored = zombiebuddy.validate_release(read_json(directory / "release.json"))
+            if stored != release:
+                raise ValueError(f"ZombieBuddy asset {release['asset_id']} metadata changed; refusing to replace a cached release")
+        try:
+            data = cached_release(release)
+        except (OSError, ValueError):
+            data = zombiebuddy.download_release(release)
+        verify_dependency(release, data)
+    except zombiebuddy.ZombieBuddyNetworkError as error:
+        if force or cached is None:
+            raise
+        print(f"Warning: {error}. Using verified cached ZombieBuddy {cached.release['tag']}; latest release not checked.", file=sys.stderr)
+        return cached
+    return Dependency(release, data, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+
+def dependency_files(dependency: Dependency, select: bool = True) -> dict[Path, bytes]:
+    directory = dependency_directory() / str(dependency.release["asset_id"])
+    files = {directory / "ZombieBuddy.jar": dependency.data,
+             directory / "release.json": json_bytes(dependency.release)}
+    if select:
+        files[dependency_directory() / "current.json"] = json_bytes({
+            "schemaVersion": 1, "release": dependency.release, "checkedAt": dependency.checked_at})
+    return files
+
+
+def source_fingerprint() -> str:
+    paths = [ROOT / "luabuddy.py", ROOT / "tests/EngineCheck.java"]
+    paths.extend((ROOT / "src/luabuddy").glob("*.java"))
+    paths.extend((ROOT / "resources").rglob("*"))
+    paths.extend((ROOT / "profiles").glob("*"))
+    digest = hashlib.sha256()
+    for path in sorted(path for path in paths if path.is_file()):
+        digest.update(path.relative_to(ROOT).as_posix().encode("utf-8") + b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def build_inputs(game: Path, dependency: Dependency) -> dict:
+    digest = hashlib.sha256()
+    for path in game_jars(game):
+        digest.update(path.relative_to(game).as_posix().encode("utf-8") + b"\0")
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return {"schemaVersion": 1, "sources": source_fingerprint(),
+            "game": digest.hexdigest(),
+            "framework": dependency.release["sha256"]}
+
+
+def compile_and_verify(game: Path, dependency: Dependency) -> tuple[bytes, dict]:
     sources = sorted((ROOT / "src/luabuddy").glob("*.java"))
-    framework = ROOT / "lib/ZombieBuddy.jar"
-    if not sources or not framework.is_file():
-        raise ValueError("Missing Java sources or lib/ZombieBuddy.jar")
-    destination = ROOT / "dist/LuaBuddy.jar"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="luabuddy-build-") as directory:
+    if not sources or not (ROOT / "resources/bootstrap.lua").is_file() or not (ROOT / "tests/EngineCheck.java").is_file():
+        raise ValueError("Missing Java sources, bootstrap resource, or native compatibility check")
+    log_path = ROOT / ".local/compatibility.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=game, prefix=".luabuddy-check-") as directory, log_path.open("w", encoding="utf-8") as log:
         scratch = Path(directory)
+        framework = scratch / "ZombieBuddy.jar"
+        framework.write_bytes(dependency.data)
+        helper = scratch / "LuaBuddy.jar"
         classes = scratch / "classes"
+        checks = scratch / "checks"
         classes.mkdir()
-        subprocess.run([jdk_tool("javac"), "--release", "25", "-proc:none", "-Xlint:all", "-Werror",
-                        "-cp", os.pathsep.join(map(str, [game / "projectzomboid.jar", framework])),
-                        "-d", str(classes), *map(str, sources)], check=True)
-        artifact = scratch / "LuaBuddy.jar"
-        subprocess.run([jdk_tool("jar"), "--create", "--file", str(artifact),
-                        "-C", str(classes), ".", "-C", str(ROOT / "resources"), "."], check=True)
-        atomic_write(destination, artifact.read_bytes())
-    print(f"Built {destination}")
+        checks.mkdir()
+
+        def relative(path: Path) -> str:
+            return path.relative_to(game).as_posix()
+
+        resource_directories = [game] + ([game / "java"] if (game / "java").is_dir() else [])
+        classpath = os.pathsep.join([*map(relative, resource_directories), *map(relative, game_jars(game)), relative(framework)])
+
+        def run(label: str, command: list[str], env=None) -> None:
+            log.write(label + "\n")
+            log.flush()
+            try:
+                subprocess.run(command, cwd=game, env=env, stdout=log, stderr=subprocess.STDOUT,
+                               check=True, timeout=180)
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                detail = "timed out" if isinstance(error, subprocess.TimeoutExpired) else "failed"
+                raise ValueError(f"{label} {detail} for ZombieBuddy {dependency.release['tag']}; installed files unchanged. See {log_path}") from error
+
+        run("Helper compilation", [jdk_tool("javac"), "--release", "25", "-proc:none", "-Xlint:all", "-Werror",
+                                   "-cp", classpath, "-d", relative(classes), *map(str, sources)])
+        run("Helper packaging", [jdk_tool("jar"), "--create", "--file", relative(helper),
+                                 "-C", relative(classes), ".", "-C", str(ROOT / "resources"), "."])
+        classpath = os.pathsep.join([classpath, relative(helper), relative(checks)])
+        run("Native check compilation", [jdk_tool("javac"), "--release", "25", "-proc:none", "-Xlint:all", "-Werror",
+                                         "-cp", classpath, "-d", relative(checks), str(ROOT / "tests/EngineCheck.java")])
+        executable = "java.exe" if os.name == "nt" else "java"
+        bundled = game / "jre64/bin" / executable
+        java = str(bundled) if bundled.is_file() else jdk_tool("java")
+        native_directories = [path for path in (game / "natives", game / "linux64", game / "win64", game) if path.is_dir()]
+        env = os.environ.copy()
+        env["LD_LIBRARY_PATH"] = os.pathsep.join([*map(str, native_directories), str(game / "jre64/lib"), env.get("LD_LIBRARY_PATH", "")])
+        if os.name == "nt":
+            env["PATH"] = os.pathsep.join([*map(str, native_directories), env.get("PATH", "")])
+        agent = f"-javaagent:{relative(framework)}=patches_jar={relative(helper)}:luabuddy,config_dir={relative(scratch / 'agent-config')}"
+        run("Native agent compatibility check", [java, "--enable-native-access=ALL-UNNAMED", "-Dzomboid.steam=0",
+                                                "-Djava.library.path=" + os.pathsep.join(map(relative, native_directories)), "-Dluabuddy.verifyAgent=true", agent,
+                                                "-cp", classpath, "luabuddy.EngineCheck", str(ROOT), str(scratch / "fixtures")], env)
+        try:
+            report = read_report(scratch / "fixtures/cache")
+            if initialization_status(report) != "completed" or report["summary"]["loaded"] < 1:
+                raise ValueError("Native agent did not complete the final fixture initialization")
+            if report.get("zombieBuddyVersion") != dependency.release["tag"].removeprefix("v"):
+                raise ValueError("Native report does not identify the candidate ZombieBuddy version")
+        except (OSError, ValueError) as error:
+            log.write(str(error) + "\n")
+            raise ValueError(f"Native compatibility report failed validation; installed files unchanged. See {log_path}") from error
+        return helper.read_bytes(), report
+
+
+def prepare_build(game: Path, dependency: Dependency, reuse: bool = True) -> PreparedBuild:
+    inputs = build_inputs(game, dependency)
+    if reuse:
+        try:
+            helper = (ROOT / "dist/LuaBuddy.jar").read_bytes()
+            record = read_json(ROOT / "dist/LuaBuddy.build.json")
+            if (type(record.get("schemaVersion")) is int
+                    and all(record.get(key) == value for key, value in inputs.items())
+                    and record.get("verified") is True
+                    and record.get("helper") == hashlib.sha256(helper).hexdigest()
+                    and isinstance(record.get("gameVersion"), str) and record["gameVersion"]
+                    and record.get("zombieBuddyVersion") == dependency.release["tag"].removeprefix("v")):
+                return PreparedBuild(helper, record, dependency)
+        except (OSError, ValueError):
+            pass
+    helper, report = compile_and_verify(game, dependency)
+    record = dict(inputs, helper=hashlib.sha256(helper).hexdigest(), verified=True,
+                  gameVersion=report["gameVersion"], zombieBuddyVersion=report["zombieBuddyVersion"])
+    return PreparedBuild(helper, record, dependency)
+
+
+def build_files(prepared: PreparedBuild) -> dict[Path, bytes]:
+    return {ROOT / "dist/LuaBuddy.jar": prepared.helper,
+            ROOT / "dist/LuaBuddy.build.json": json_bytes(prepared.record),
+            **dependency_files(prepared.dependency)}
+
+
+def build(game: Path, offline: bool = False) -> None:
+    prepared = prepare_build(game, select_dependency(offline=offline))
+    apply_files(build_files(prepared))
+    print(f"Built {ROOT / 'dist/LuaBuddy.jar'}; verified with ZombieBuddy {prepared.dependency.release['tag']} and Project Zomboid {prepared.record['gameVersion']}.")
+
+
+def compatibility(game: Path, offline: bool = False) -> None:
+    prepared = prepare_build(game, select_dependency(offline=offline), reuse=False)
+    apply_files(dependency_files(prepared.dependency, select=False))
+    print(f"Compatibility passed for Project Zomboid {prepared.record['gameVersion']} with ZombieBuddy {prepared.dependency.release['tag']}. Native APIs and the instrumented OnGameStart event passed.")
+
+
+def check_update(game: Path) -> int:
+    release = zombiebuddy.validate_release(zombiebuddy.fetch_latest())
+    installed = game / ".luabuddy/ZombieBuddy.jar"
+    if not installed.is_file():
+        print(f"ZombieBuddy is not installed. Latest stable JAR: {release['tag']} ({release['sha256']}).")
+        return 2
+    data = jar_bytes(installed)
+    manifest = zombiebuddy.inspect_jar(data)
+    digest = hashlib.sha256(data).hexdigest()
+    print(f"Installed ZombieBuddy {manifest['version']}, SHA-256 {digest}.")
+    print(f"Latest stable JAR {release['tag']}, SHA-256 {release['sha256']}; {release['release_url']}")
+    if digest != release["sha256"] or len(data) != release["size"] or manifest["version"] != release["tag"].removeprefix("v"):
+        print("Update available. Run luabuddy.py update, then fully restart Project Zomboid.")
+        return 2
+    print("Installed ZombieBuddy is current. Running sessions require a full restart to load installed changes.")
+    return 0
 
 
 def buddy_agent(argument: str) -> bool:
@@ -255,7 +511,7 @@ def debug_value(args: list[str]) -> str | None:
 
 
 def configure(game: Path, launcher: Path, directory: Path, ids: list[str], remove: bool,
-              debug: bool | None = None) -> None:
+              debug: bool | None = None, offline: bool = False, force: bool = False) -> None:
     original, config, args = launcher_data(launcher)
     if remove and any(buddy_agent(arg) and "LuaBuddy.jar:luabuddy" in arg and not owned_agent(arg) for arg in args):
         raise ValueError("LuaBuddy shares a ZombieBuddy agent with other options. Remove its patch manually; launcher unchanged.")
@@ -267,11 +523,6 @@ def configure(game: Path, launcher: Path, directory: Path, ids: list[str], remov
         updated = [arg for arg in updated if not arg.startswith(LEGACY_PREFIX) and not owned_agent(arg, legacy=True)]
         if any(buddy_agent(arg) for arg in updated):
             raise ValueError("Another ZombieBuddy agent or patch configuration is present. Combine it manually before installing LuaBuddy; launcher unchanged.")
-        payload = {game / ".luabuddy/LuaBuddy.jar": ROOT / "dist/LuaBuddy.jar",
-                   game / ".luabuddy/ZombieBuddy.jar": ROOT / "lib/ZombieBuddy.jar"}
-        for source in payload.values():
-            if not source.is_file():
-                raise ValueError(f"Missing {source}; run luabuddy.py build first")
         pending = profile_files(ids, directory)
         config_path = directory.as_posix()
         if "\n" in config_path or "\r" in config_path:
@@ -279,18 +530,21 @@ def configure(game: Path, launcher: Path, directory: Path, ids: list[str], remov
         if debug:
             updated.append(DEBUG_PROPERTY + "=true")
         updated.extend([CONFIG_PREFIX + config_path, AGENT])
+        prepared = prepare_build(game, select_dependency(offline=offline, force=force))
+        pending.update(build_files(prepared))
+        pending.update({game / ".luabuddy/LuaBuddy.jar": prepared.helper,
+                        game / ".luabuddy/ZombieBuddy.jar": prepared.dependency.data,
+                        game / ".luabuddy/ZombieBuddy.release.json": json_bytes(prepared.dependency.release)})
     changed = updated != args
     backup = ROOT / ".local/backups" / (hashlib.sha256(str(launcher).encode()).hexdigest()[:16] + "-" + launcher.name + ".original")
     if changed:
         if not backup.exists():
             pending[backup] = original
         config["vmArgs"] = updated
-    if not remove:
-        for target, source in payload.items():
-            pending[target] = source.read_bytes()
-        directory.mkdir(parents=True, exist_ok=True)
     if changed:
         pending[launcher] = (json.dumps(config, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    if not remove:
+        directory.mkdir(parents=True, exist_ok=True)
     apply_files(pending)
     print(("Updated " if changed else "Already configured ") + str(launcher))
     if changed:
@@ -299,7 +553,8 @@ def configure(game: Path, launcher: Path, directory: Path, ids: list[str], remov
         print(f"Runtime files retained at {game / '.luabuddy'}; profiles retained at {directory}")
     else:
         print(f"Profiles: {directory}")
-    print("Changes apply to the next normal Steam launch. Running sessions are unaffected.")
+        print(f"Installed ZombieBuddy {prepared.dependency.release['tag']}; helper verified for Project Zomboid {prepared.record['gameVersion']}.")
+    print("Fully restart Project Zomboid to load installed changes on the next normal Steam launch. Running sessions are unaffected.")
 
 
 def status(game: Path, launcher: Path) -> None:
@@ -350,7 +605,7 @@ def read_report(cache: Path) -> dict:
     require(type(duration) in (int, float) and duration >= 0 and (type(duration) is int or math.isfinite(duration)), "durationMs")
     require(type(report.get("debug")) is bool, "debug")
     result.update(durationMs=duration, debug=report["debug"])
-    for field in ("error", "traceback"):
+    for field in ("error", "traceback", "zombieBuddyVersion"):
         if field in report:
             require(isinstance(report[field], str), field)
             result[field] = report[field]
@@ -396,6 +651,8 @@ def diagnostics(cache: Path, as_json: bool) -> int:
         print(f"Last loader initialization: {state}")
         print(f"Session: {report['session']}")
         print(f"Started: {report['startedAt']}; completed: {report['completedAt']}; duration: {report['durationMs']} ms")
+        if "zombieBuddyVersion" in report:
+            print(f"ZombieBuddy at initialization: {report['zombieBuddyVersion']}")
         print("This report covers loader initialization only; later callbacks are not checked.")
         print("Report paths may identify your local user account or directories.")
         if report.get("error"):
@@ -439,7 +696,7 @@ def doctor(game: Path, launcher: Path, cache: Path, as_json: bool) -> int:
         check("launcher-debug", "ok", f"Debug property: {value!r}" if value is not None else "Debug property: unset (false)")
     except (OSError, ValueError) as error:
         check("launcher", "error", str(error))
-    for name, reference in (("LuaBuddy.jar", ROOT / "dist/LuaBuddy.jar"), ("ZombieBuddy.jar", ROOT / "lib/ZombieBuddy.jar")):
+    for name, reference in (("LuaBuddy.jar", ROOT / "dist/LuaBuddy.jar"),):
         installed = game / ".luabuddy" / name
         try:
             if not installed.is_file():
@@ -452,6 +709,28 @@ def doctor(game: Path, launcher: Path, cache: Path, as_json: bool) -> int:
                 check(name, "ok", f"Runtime matches repository artifact: {installed}")
         except OSError as error:
             check(name, "error", str(error))
+    installed = game / ".luabuddy/ZombieBuddy.jar"
+    try:
+        data = jar_bytes(installed)
+        manifest = zombiebuddy.inspect_jar(data)
+        digest = hashlib.sha256(data).hexdigest()
+        installed_label = f"Installed ZombieBuddy {manifest['version']}, SHA-256 {digest}."
+        metadata_path = game / ".luabuddy/ZombieBuddy.release.json"
+        if metadata_path.is_file():
+            release = zombiebuddy.validate_release(read_json(metadata_path))
+            verify_dependency(release, data)
+            installed_label = f"Installed ZombieBuddy {release['tag']}, SHA-256 {digest}."
+        try:
+            dependency = cached_dependency()
+        except (OSError, ValueError) as error:
+            check("ZombieBuddy.jar", "warning", installed_label + f" Verified dependency cache unavailable: {error}")
+        else:
+            match = digest == dependency.release["sha256"]
+            check("ZombieBuddy.jar", "ok" if match else "warning", installed_label
+                  + (" Matches" if match else " Differs from")
+                  + f" verified cached {dependency.release['tag']}; last checked {dependency.checked_at}.")
+    except (OSError, ValueError) as error:
+        check("ZombieBuddy.jar", "error", str(error))
     if directory is not None:
         if not directory.is_dir():
             check("profiles", "error", f"Profile directory missing: {directory}")
@@ -463,9 +742,13 @@ def doctor(game: Path, launcher: Path, cache: Path, as_json: bool) -> int:
     try:
         report = read_report(cache)
         metadata = {key: report[key] for key in ("schemaVersion", "kind", "version", "session", "startedAt", "completedAt", "durationMs", "gameVersion", "javaVersion", "configDirectory", "debug", "summary")}
+        if "zombieBuddyVersion" in report:
+            metadata["zombieBuddyVersion"] = report["zombieBuddyVersion"]
         state = initialization_status(report)
+        framework_version = f" ZombieBuddy {report['zombieBuddyVersion']}." if "zombieBuddyVersion" in report else ""
         check("last-initialization", "error" if state == "failed" else "warning" if state == "incomplete" else "ok",
-              f"Last loader initialization {state}, session {report['session']}, completed {report['completedAt']}. Later callbacks are not checked.")
+              f"Last loader initialization {state}, session {report['session']}, completed {report['completedAt']}." + framework_version
+              + " Later callbacks are not checked. Fully restart Project Zomboid after installing changes.")
         if directory is None or Path(report["configDirectory"]) != directory or report["debug"] != (value is not None and value.lower() == "true"):
             check("report-configuration", "warning", "Last loader initialization used different settings; the selected launcher settings are not runtime verified.")
     except FileNotFoundError:
@@ -487,7 +770,7 @@ def main() -> int:
     sys.stderr.reconfigure(errors="backslashreplace")
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("build", "install", "remove", "status", "doctor", "diagnostics"):
+    for name in ("build", "install", "update", "compatibility", "remove", "status", "doctor", "diagnostics"):
         command = subparsers.add_parser(name)
         if name in ("doctor", "diagnostics"):
             command.add_argument("--cache-dir", type=Path, default=Path.home() / "Zomboid")
@@ -498,6 +781,10 @@ def main() -> int:
         command.add_argument("--launcher", type=Path)
         if name in ("install", "remove"):
             command.add_argument("--config-dir", type=Path, default=ROOT / "config")
+        if name in ("build", "install", "compatibility"):
+            command.add_argument("--offline", action="store_true", help="Use a verified cached framework without checking GitHub")
+        if name == "update":
+            command.add_argument("--check", action="store_true", help="Check GitHub without changing files; exit 2 when an update is available")
         if name == "install":
             command.add_argument("--mod", action="append", default=[])
             command.add_argument("--debug", action=argparse.BooleanOptionalAction, default=None)
@@ -510,7 +797,20 @@ def main() -> int:
         if launcher.parent != game:
             raise ValueError(f"Launcher must be in the selected game directory {game}; relative runtime paths use that game's working directory")
         if args.command == "build":
-            build(game)
+            build(game, args.offline)
+        elif args.command == "compatibility":
+            compatibility(game, args.offline)
+        elif args.command == "update":
+            if args.check:
+                return check_update(game)
+            _, _, arguments = launcher_data(launcher)
+            configs = [argument[len(CONFIG_PREFIX):] for argument in arguments if argument.startswith(CONFIG_PREFIX)]
+            if len(configs) > 1 or (configs and not configs[0]):
+                raise ValueError("Cannot preserve ambiguous launcher profile settings; no files changed")
+            directory = Path(configs[0]) if configs else ROOT / "config"
+            if not directory.is_absolute():
+                directory = game / directory
+            configure(game, launcher, directory.expanduser().resolve(), [], False, force=True)
         elif args.command == "status":
             status(game, launcher)
         elif args.command == "doctor":
@@ -518,8 +818,9 @@ def main() -> int:
         else:
             configure(game, launcher, args.config_dir.expanduser().resolve(),
                       args.mod if args.command == "install" else [], args.command == "remove",
-                      args.debug if args.command == "install" else None)
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+                      args.debug if args.command == "install" else None,
+                      args.offline if args.command == "install" else False)
+    except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         print(f"LuaBuddy: {error}", file=sys.stderr)
         return 1
     return 0
