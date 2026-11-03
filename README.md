@@ -4,22 +4,22 @@ LuaBuddy restores locally installed Project Zomboid client and shared Lua when a
 
 LuaBuddy is a general-purpose **late client Lua loader**. It cannot make every kind of mod work on an arbitrary server. Mods that need server code, earlier startup events, maps, item definitions, Java patches, or assets registered during normal mod loading still need their normal installation. Auto All's worn-clothing repair synchronization requires its server component. A profile cannot supply that component.
 
-The supported runtime is Project Zomboid **42.21** with **ZombieBuddy 2.3.4** and Java **25**. Other builds require verification. Workshop source updates do not require rebuilding LuaBuddy. The game selects the compatible mod version folder at each new Lua environment.
+The loader and native startup hook have been verified against Project Zomboid **42.21.0 Stable** and **42.22.0 Pre-Release** with **ZombieBuddy 2.3.4** and Java **25**. The 42.22 check uses official preview binaries; a full preview client/server play test remains unverified. See [compatibility](docs/compatibility.md) for the exact scope. Workshop source updates do not require rebuilding LuaBuddy.
 
 ## Install on Linux
 
 Install Python 3.10 or newer and JDK 25 or newer. Install the mods through Steam Workshop or the game's local mods directory. Run these commands from this repository.
 
 ```sh
-python3 luabuddy.py build
 python3 luabuddy.py install --mod AllInfo --mod AutoAll
 python3 luabuddy.py status
 ```
 
-The installer discovers Steam libraries. If discovery is ambiguous or the game lives elsewhere, pass `--game-dir` to each command. The directory can contain `projectzomboid.jar` directly or a `projectzomboid` child directory.
+Installation downloads the current stable ZombieBuddy JAR when needed, builds LuaBuddy, and verifies the candidate through the real game classes and instrumented startup event before installing it. The JAR is cached locally and is not embedded in this repository. `build` prepares a verified local build without installing it.
+
+The installer discovers Steam libraries. If discovery is ambiguous or the game lives elsewhere, pass `--game-dir` to each command. Both flat `projectzomboid.jar` and `java/projectzomboid.jar` layouts are supported, including a `projectzomboid` child directory.
 
 ```sh
-python3 luabuddy.py build --game-dir /path/to/ProjectZomboid
 python3 luabuddy.py install --game-dir /path/to/ProjectZomboid --mod AllInfo --mod AutoAll
 ```
 
@@ -28,7 +28,6 @@ python3 luabuddy.py install --game-dir /path/to/ProjectZomboid --mod AllInfo --m
 Install Python 3.10 or newer and JDK 25 or newer, with `javac` and `jar` available through `JAVA_HOME` or `PATH`. Open PowerShell in this repository.
 
 ```powershell
-py -3 luabuddy.py build
 py -3 luabuddy.py install --mod AllInfo --mod AutoAll
 py -3 luabuddy.py status
 ```
@@ -44,6 +43,23 @@ The installer replaces the legacy `PZClientMods` adapter arguments when present 
 If another ZombieBuddy agent or a combined patch list is already configured, installation stops before changing the launcher. Combine those patches manually rather than adding a second agent. Removal also leaves a combined agent untouched and reports that it needs manual editing.
 
 Keep your `config` directory at the path printed by `status`. The launcher points to that directory. The installer stages runtime JARs beside the game so ZombieBuddy can use a relative patch path on Windows.
+
+## Update ZombieBuddy
+
+Check the installed JAR against the latest stable official release, then update when needed.
+
+```sh
+python3 luabuddy.py update --check
+python3 luabuddy.py update
+```
+
+On Windows, use `py -3`. `update --check` fetches fresh release metadata without changing files. It returns `0` when current, `2` when an update is available, and `1` on error. The updater selects stable releases containing exactly `ZombieBuddy.jar`; GitHub's general latest release can instead be a Windows installer.
+
+`build` and `install` check automatically when the verified local selection is missing or more than one hour old. Downloads must match GitHub's published SHA-256, asset size, and JAR manifest version. The candidate helper/framework pair must compile and pass the native startup-hook and game-API checks before promotion. A failed download, integrity check, or compatibility check leaves the installed files unchanged.
+
+Verified JARs and release metadata are cached under `.local/dependencies/zombiebuddy/`. The build record ties the helper to its source inputs, game JARs, and framework hash. An unchanged verified build is reused. For offline use, pass `--offline` to `build`, `install`, or `compatibility`. An automatic network failure can use a verified cached release with a warning. Explicit `update` fails if it cannot check the current release.
+
+Checks happen when you run these commands. The Steam launch flow is unchanged, and a running JVM keeps its loaded agent until a full restart. The diagnostic report records the ZombieBuddy version loaded in that JVM when available. `doctor` shows installed and cached version information without contacting GitHub. `status` reports configured paths and file presence.
 
 ## Add another mod
 
@@ -146,7 +162,15 @@ On Windows, use `py -3 luabuddy.py remove`. Restart the game afterward. Removal 
 
 ## Build and verify
 
-`luabuddy.py build` compiles against the installed game's classes and the pinned ZombieBuddy JAR. It emits Java 25 bytecode in `dist/LuaBuddy.jar`. There is no Maven, Gradle, Python package installation, or replacement Java patch framework.
+`luabuddy.py build` downloads or reuses a verified stable ZombieBuddy JAR, compiles against the selected game's classes, and runs the native compatibility gate. It emits Java 25 bytecode in `dist/LuaBuddy.jar` and provenance in `dist/LuaBuddy.build.json`. There is no Maven, Gradle, Python package installation, or replacement Java patch framework.
+
+To verify another game installation without installing the helper or replacing the current build, run:
+
+```sh
+python3 luabuddy.py compatibility --game-dir /path/to/preview --offline
+```
+
+The compatibility check uses temporary files inside that game directory and writes its last log to `.local/compatibility.log`. It verifies native APIs and the actual instrumented `OnGameStart` event. It does not join a multiplayer server or establish compatibility with every server anti-cheat or mod combination.
 
 Installation prepares every changed file before replacing runtime files and activates the launcher last. Ordinary replacement failures attempt to restore the previous files. The original launcher backup is published atomically. This protects failed writes; it is not a transaction across a power loss or filesystem failure.
 

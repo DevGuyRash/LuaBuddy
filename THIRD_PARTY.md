@@ -1,6 +1,6 @@
 # Third-party software
 
-LuaBuddy uses [ZombieBuddy 2.3.4](https://github.com/zed-0xff/ZombieBuddy/releases/tag/v2.3.4) without modifying it. Its MIT license is in [lib/ZombieBuddy-LICENSE.txt](lib/ZombieBuddy-LICENSE.txt). The pinned framework JAR is in `lib/ZombieBuddy.jar` so builds and installations use the same version.
+LuaBuddy downloads stable JAR releases from [ZombieBuddy's official repository](https://github.com/zed-0xff/ZombieBuddy/releases) without modifying them. Framework binaries are not embedded in this repository. Downloads are checked against the published asset digest and cached locally. ZombieBuddy 2.3.4 was verified against PZ 42.21 and the 42.22 preview. Its MIT license is retained in [lib/ZombieBuddy-LICENSE.txt](lib/ZombieBuddy-LICENSE.txt); consult the selected upstream release for its licensing.
 
 Project Zomboid supplies the game classes, Kahlua compiler, mod discovery, and translation parser at build time and runtime. Game files are not distributed here. AllTheInfo and Auto All stay in their original Workshop installations. LuaBuddy distributes only compatibility profiles for those mods.
 

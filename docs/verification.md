@@ -6,15 +6,15 @@ Run the portable installer tests without a game installation.
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-On a machine with Project Zomboid installed, run the full check. This builds LuaBuddy and uses the installed game's Java classes and bundled Java runtime.
+On a machine with Project Zomboid installed, run the full check. This compiles a temporary candidate and uses the selected game's Java classes, bundled Java runtime, and the actual ZombieBuddy agent patch.
 
 ```sh
 python3 tests/check.py
 ```
 
-Pass `--game-dir /path/to/ProjectZomboid` if discovery cannot select one installation. On Windows, use `py -3` instead of `python3`. The extra Lua failure checks run when LuaJIT is on `PATH`. The native Kahlua integration checks run independently of LuaJIT.
+Pass `--game-dir /path/to/ProjectZomboid` if discovery cannot select one installation. Pass `--offline` to require an existing verified dependency cache. On Windows, use `py -3` instead of `python3`. The extra Lua failure checks run when LuaJIT is on `PATH`. The native Kahlua integration checks run independently of LuaJIT.
 
-The check runner creates and deletes its own temporary profiles and mod fixtures. It does not install LuaBuddy, change the active launcher, contact a public server, or modify Workshop files.
+The check runner creates and deletes its own temporary profiles and mod fixtures. It can download a verified framework dependency and writes `.local/compatibility.log`. It does not install LuaBuddy, replace the published helper build, change the active launcher, contact a game server, or modify Workshop files.
 
 ## Exercise the installed loader
 
@@ -33,7 +33,7 @@ The Linux check used Project Zomboid 42.21.0, bundled Java 25.0.1, and ZombieBud
 
 | Check | Result |
 | --- | --- |
-| Portable CLI | Twenty-five subprocess tests pass. They cover install/remove/idempotence, original backups, staged writes and rollback, launcher ownership, filename collisions, debug settings, read-only diagnostics, malformed reports, and selected-field output. |
+| Portable CLI | Twenty-six CLI checks pass. They cover install/remove/idempotence, original backups, staged writes and rollback, launcher ownership, filename collisions, debug settings, read-only diagnostics, malformed reports, selected-field output, and the reported running framework version. |
 | Native game integration | Passes dependency ordering and hook completion, compile and dependency failures, common/version overlays, shared/client phases, late imports, server-enabled skips, single-player/server isolation, and fresh Lua environments. |
 | Native translations | Passes version precedence, German and English, fallback, and `%1` substitution. |
 | Optional AllInfo profile | Excludes SelfTest and overlapping trait screens while retaining inventory providers. |
@@ -44,6 +44,7 @@ The Linux check used Project Zomboid 42.21.0, bundled Java 25.0.1, and ZombieBud
 | Gameplay | AllTheInfo's weapon tooltip is visible. Auto All completes its normal read action with the ordinary user role and reports one item read. |
 | Reconnect | Two world entries in the same normal-launcher process each pass checksums and initialize each mod exactly once. The second entry uses the ordinary user role. |
 | Multiplayer diagnostic report | A separate client loads AllInfo, AutoAll, and an uppercase-extension probe while isolating a deliberately broken mod. The JSON report records three loaded mods and one failed mod with its actual filename, stage, Lua trace, and Java cause. The real diagnostic CLI reads that report and returns failure as expected. |
+| Dependency updater | Sixty-six portable Python tests cover CLI behavior, verified downloads/cache reuse, update checks, offline and corrupt-cache behavior, failed promotion, and source/game/framework/helper provenance. Real official 2.3.4 download and instrumented native checks pass on 42.21 and 42.22. See [compatibility](compatibility.md). |
 
 The diagnostics pass kept its selected evidence in `~/.local/state/app-verification/LuaBuddy/2026-11-02-diagnostics/`. Its deliberately failing fixture was confined to the disposable client, not the user's configuration.
 
