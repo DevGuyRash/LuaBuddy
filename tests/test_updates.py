@@ -293,6 +293,29 @@ class UpdaterCheck(unittest.TestCase):
                 self.assertEqual(self.fixture.snapshot(), before)
                 path.write_bytes(original)
 
+    def test_changed_java_runtime_requires_native_gate_without_game_changes(self):
+        executable = self.game / "jre64/bin" / ("java.exe" if CLI.os.name == "nt" else "java")
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"previous Java launcher")
+        release = executable.parent.parent / "release"
+        release.write_text('JAVA_VERSION="25.0.1"\n', encoding="utf-8")
+        record_path = self.root / "dist/LuaBuddy.build.json"
+        record = json.loads(record_path.read_text())
+        record.update(CLI.build_inputs(self.game, self.dependency))
+        record_path.write_bytes(CLI.json_bytes(record))
+        game_bytes = (self.game / "projectzomboid.jar").read_bytes()
+        for path, replacement in ((release, b'JAVA_VERSION="27.0.1"\n'), (executable, b"changed Java launcher")):
+            with self.subTest(runtime_file=path.name):
+                original = path.read_bytes()
+                path.write_bytes(replacement)
+                before = self.fixture.snapshot()
+                with patch.object(CLI, "compile_and_verify", side_effect=ValueError("new runtime is incompatible")) as probe:
+                    self.assertEqual(self.main("install", "--offline")[0], 1)
+                    probe.assert_called_once()
+                self.assertEqual((self.game / "projectzomboid.jar").read_bytes(), game_bytes)
+                self.assertEqual(self.fixture.snapshot(), before)
+                path.write_bytes(original)
+
     def test_compatibility_checks_candidate_without_publishing_build_or_selection(self):
         self.installed()
         self.stale()

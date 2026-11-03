@@ -106,6 +106,25 @@ def jdk_tool(name: str) -> str:
     return result
 
 
+def runtime_java(game: Path) -> Path:
+    executable = "java.exe" if os.name == "nt" else "java"
+    bundled = game / "jre64/bin" / executable
+    return (bundled if bundled.is_file() else Path(jdk_tool("java"))).resolve()
+
+
+def runtime_fingerprint(game: Path) -> str:
+    java = runtime_java(game)
+    digest = hashlib.sha256(str(java).encode("utf-8") + b"\0")
+    for path in (java, java.parent.parent / "release"):
+        digest.update(path.name.encode("utf-8") + b"\0")
+        if path.is_file():
+            digest.update(path.read_bytes())
+        else:
+            digest.update(b"<missing>")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def stage_file(path: Path, data: bytes, mode: int | None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
@@ -295,6 +314,7 @@ def build_inputs(game: Path, dependency: Dependency) -> dict:
                 digest.update(chunk)
     return {"schemaVersion": 1, "sources": source_fingerprint(),
             "game": digest.hexdigest(),
+            "runtime": runtime_fingerprint(game),
             "framework": dependency.release["sha256"]}
 
 
@@ -337,9 +357,7 @@ def compile_and_verify(game: Path, dependency: Dependency) -> tuple[bytes, dict]
         classpath = os.pathsep.join([classpath, relative(helper), relative(checks)])
         run("Native check compilation", [jdk_tool("javac"), "--release", "25", "-proc:none", "-Xlint:all", "-Werror",
                                          "-cp", classpath, "-d", relative(checks), str(ROOT / "tests/EngineCheck.java")])
-        executable = "java.exe" if os.name == "nt" else "java"
-        bundled = game / "jre64/bin" / executable
-        java = str(bundled) if bundled.is_file() else jdk_tool("java")
+        java = str(runtime_java(game))
         native_directories = [path for path in (game / "natives", game / "linux64", game / "win64", game) if path.is_dir()]
         env = os.environ.copy()
         env["LD_LIBRARY_PATH"] = os.pathsep.join([*map(str, native_directories), str(game / "jre64/lib"), env.get("LD_LIBRARY_PATH", "")])
