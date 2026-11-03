@@ -21,7 +21,7 @@ import zombie.ZomboidFileSystem;
 import zombie.core.Core;
 
 final class Diagnostics {
-    static final String VERSION = "1.1.0";
+    static final String VERSION = "1.2.0";
     private static final Set<String> FIELDS = Set.of("status", "stage", "profile", "commonRoot", "versionRoot",
             "sourceCount", "requires", "preload", "plugin", "source", "error", "traceback", "javaTraceback");
     private final KahluaTable state;
@@ -43,11 +43,13 @@ final class Diagnostics {
         report.put("startedAt", Instant.now().toString());
         report.put("gameVersion", Core.getInstance().getVersion());
         report.put("javaVersion", System.getProperty("java.version"));
+        report.put("zombieBuddyVersion", frameworkVersion());
         report.put("configDirectory", directory == null ? "" : directory);
         report.put("debug", Boolean.getBoolean("luabuddy.debug"));
         state.rawset("session", report.get("session"));
         log("Starting session=" + report.get("session") + " version=" + VERSION + " game=" + report.get("gameVersion")
-                + " java=" + report.get("javaVersion") + " config=" + (directory == null ? "<missing>" : directory)
+                + " java=" + report.get("javaVersion") + " zombiebuddy=" + report.get("zombieBuddyVersion")
+                + " config=" + (directory == null ? "<missing>" : directory)
                 + " debug=" + report.get("debug"));
     }
 
@@ -147,6 +149,16 @@ final class Diagnostics {
 
     static void log(String message) {
         System.out.println("[LuaBuddy] " + message);
+    }
+
+    private static String frameworkVersion() {
+        try {
+            String version = Class.forName("me.zed_0xff.zombie_buddy.Patch", false,
+                    Diagnostics.class.getClassLoader()).getPackage().getImplementationVersion();
+            return version == null ? "unknown" : version;
+        } catch (ClassNotFoundException | LinkageError error) {
+            return "unavailable";
+        }
     }
 
     static String stackTrace(Throwable error) {

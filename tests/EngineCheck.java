@@ -10,6 +10,7 @@ import se.krka.kahlua.luaj.compiler.LuaCompiler;
 import se.krka.kahlua.vm.KahluaTable;
 import se.krka.kahlua.vm.LuaClosure;
 import zombie.Lua.LuaManager;
+import zombie.Lua.LuaEventManager;
 import zombie.ZomboidFileSystem;
 import zombie.core.Languages;
 import zombie.core.Translator;
@@ -78,7 +79,12 @@ public final class EngineCheck {
         Bootstrap.load();
         if (LuaManager.env.rawget("LuaBuddy") != null) throw new AssertionError("Single player isolation");
         GameClient.client = true;
-        Bootstrap.load();
+        if (Boolean.getBoolean("luabuddy.verifyAgent")) {
+            LuaEventManager.triggerEvent("OnGameStart");
+            if (LuaManager.env.rawget("LuaBuddy") == null) throw new AssertionError("ZombieBuddy startup patch did not execute");
+        } else {
+            Bootstrap.load();
+        }
         lua("assert(LuaBuddy.mods.Library == 'loaded'); assert(LuaBuddy.mods.Consumer == 'loaded'); "
                 + "assert(lateImport() == 42); assert(phaseCount == 2); assert(require('Fixture/Phase') == 'shared')");
         String filename = root.resolve("mods/Consumer/42/media/lua/client/Fixture/Consumer.lua").toAbsolutePath().normalize().toString().replace('\\', '/');
