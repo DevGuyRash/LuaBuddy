@@ -138,7 +138,7 @@ class CliCheck(unittest.TestCase):
         original = {path.name: path.read_bytes() for path in (self.root / "config").iterdir()}
         ids = ("WalkLootForage", "LootSenseStorage", "LootSenseQuickStack", "CraftPlanner",
                "NeatUI_Framework", "NeatUI_Inventory", "SuperOl3gContextMenuIcons", "WhatItDoes", "P4AlarmSyndrome",
-               "ReloadAllAmmo", "AutoFishing")
+               "ReloadAllAmmo", "AutoFishing", "KADropnLoot", "AreaTasks")
         for mod_id in ids:
             with self.subTest(mod=mod_id):
                 directory = self.root / mod_id
@@ -152,7 +152,7 @@ class CliCheck(unittest.TestCase):
         self.run_cli("install", *(argument for mod_id in ids for argument in ("--mod", mod_id)))
         for name, content in original.items():
             self.assertEqual((self.root / "config" / name).read_bytes(), content)
-        self.assertEqual(len(list((self.root / "config").glob("*.properties"))), 13)
+        self.assertEqual(len(list((self.root / "config").glob("*.properties"))), 15)
 
     def test_legacy_windows_argument_migration(self):
         self.original["vmArgs"] += [r"-Dpzclientmods.config=C:\Old Adapter\adapter.properties",
