@@ -128,6 +128,32 @@ class CliCheck(unittest.TestCase):
         self.run_cli("remove")
         self.assertFalse(list(self.game.glob(".luabuddy-*")))
 
+    def test_fresh_install_selects_no_mods(self):
+        self.run_cli("install")
+        self.assertEqual(list((self.root / "config").iterdir()), [])
+
+    def test_optional_profiles_install_independently_and_preserve_existing(self):
+        self.run_cli("install", "--mod", "AllInfo", "--mod", "AutoAll")
+        (self.root / "config/AutoAll.lua").write_text("return { custom = true }\n", encoding="utf-8")
+        original = {path.name: path.read_bytes() for path in (self.root / "config").iterdir()}
+        ids = ("WalkLootForage", "LootSenseStorage", "LootSenseQuickStack", "CraftPlanner",
+               "NeatUI_Framework", "NeatUI_Inventory", "SuperOl3gContextMenuIcons", "WhatItDoes", "P4AlarmSyndrome",
+               "ReloadAllAmmo", "AutoFishing")
+        for mod_id in ids:
+            with self.subTest(mod=mod_id):
+                directory = self.root / mod_id
+                self.run_cli("install", "--config", str(directory), "--mod", mod_id)
+                self.assertEqual([path.name for path in directory.glob("*.properties")], [mod_id + ".properties"])
+                self.assertEqual((directory / (mod_id + ".properties")).read_bytes(),
+                                 (REPO / "profiles" / (mod_id + ".properties")).read_bytes())
+                hook = REPO / "profiles" / (mod_id + ".lua")
+                if hook.exists():
+                    self.assertEqual((directory / hook.name).read_bytes(), hook.read_bytes())
+        self.run_cli("install", *(argument for mod_id in ids for argument in ("--mod", mod_id)))
+        for name, content in original.items():
+            self.assertEqual((self.root / "config" / name).read_bytes(), content)
+        self.assertEqual(len(list((self.root / "config").glob("*.properties"))), 13)
+
     def test_legacy_windows_argument_migration(self):
         self.original["vmArgs"] += [r"-Dpzclientmods.config=C:\Old Adapter\adapter.properties",
                                   r"-javaagent:C:\Old Adapter\ZombieBuddy.jar=patches_jar=C:\Old Adapter\PZClientMods.jar:localmods"]

@@ -17,6 +17,9 @@ import java.util.Set;
 import java.util.TreeMap;
 
 import zombie.gameStates.ChooseGameInfo;
+import zombie.ZomboidFileSystem;
+import zombie.core.znet.SteamWorkshop;
+import zombie.core.znet.SteamUtils;
 
 record ModProfile(String id, Path file, Properties options) {
     record Source(String text, String filename) {}
@@ -35,7 +38,7 @@ record ModProfile(String id, Path file, Properties options) {
                 if (id.isEmpty()) throw new IOException("Missing id in " + file);
                 if (!ids.add(id)) throw new IOException("Duplicate profile for " + id);
                 for (String key : options.stringPropertyNames()) {
-                    if (!Set.of("id", "path", "enabled", "exclude", "preload", "plugin", "requires", "after", "before").contains(key)
+                    if (!Set.of("id", "path", "enabled", "exclude", "preload", "plugin", "requires", "after", "before", "mount", "replay", "workshop").contains(key)
                             && !key.startsWith("excludeWhen.")) {
                         throw new IOException("Unknown profile option " + key + " in " + file);
                     }
@@ -43,6 +46,19 @@ record ModProfile(String id, Path file, Properties options) {
                 String enabled = options.getProperty("enabled", "true").trim();
                 if (!enabled.equals("true") && !enabled.equals("false")) {
                     throw new IOException("enabled must be true or false in " + file);
+                }
+                String mount = options.getProperty("mount", "false").trim();
+                if (!mount.equals("true") && !mount.equals("false")) {
+                    throw new IOException("mount must be true or false in " + file);
+                }
+                for (String event : options.getProperty("replay", "").split(";")) {
+                    if (!event.isBlank() && !Set.of("OnGameBoot", "OnLoad").contains(event.trim())) {
+                        throw new IOException("replay supports only missed OnGameBoot and OnLoad callbacks in " + file);
+                    }
+                }
+                String workshop = options.getProperty("workshop", "").trim();
+                if (!workshop.isEmpty() && (!workshop.matches("[0-9]{1,18}") || Long.parseLong(workshop) == 0)) {
+                    throw new IOException("workshop must be a positive numeric item ID in " + file);
                 }
                 profiles.add(new ModProfile(id, file, options));
             }
@@ -60,11 +76,49 @@ record ModProfile(String id, Path file, Properties options) {
 
     ChooseGameInfo.Mod resolve() throws IOException {
         String configured = options.getProperty("path", "").trim();
-        ChooseGameInfo.Mod info = configured.isEmpty() ? ChooseGameInfo.getModDetails(id)
-                : ChooseGameInfo.readModInfo(file.getParent().resolve(configured).toRealPath().toString());
+        String workshop = options.getProperty("workshop", "").trim();
+        ChooseGameInfo.Mod info = null;
+        if (configured.isEmpty()) {
+            if (workshop.isEmpty()) {
+                info = ChooseGameInfo.getModDetails(id);
+            } else {
+                String known = ZomboidFileSystem.instance.getModDir(id);
+                List<String> folders = new ArrayList<>();
+                if (known != null) folders.add(known);
+                ZomboidFileSystem.instance.getAllModFolders(folders);
+                for (String folder : folders) {
+                    ChooseGameInfo.Mod candidate = ChooseGameInfo.readModInfo(folder);
+                    if (candidate != null && id.equals(candidate.getId())) {
+                        info = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+        if (info == null && (!configured.isEmpty() || !workshop.isEmpty())) {
+            if (configured.isEmpty() && !SteamUtils.isSteamModeEnabled()) {
+                throw new IOException("Steam is unavailable for Workshop item " + workshop + "; set path to its root directory.");
+            }
+            String installed = configured.isEmpty() ? SteamWorkshop.instance.GetItemInstallFolder(Long.parseLong(workshop))
+                    : file.getParent().resolve(configured).toAbsolutePath().normalize().toString();
+            if (installed == null) throw new IOException("Workshop item " + workshop + " not available; install it through Steam or set path to its root directory.");
+            Path root = Path.of(installed).toAbsolutePath().normalize();
+            if (!workshop.isEmpty() && Files.isRegularFile(root.resolve("mod.info"))) {
+                ChooseGameInfo.Mod flat = ZomboidFileSystem.instance.getModInfoForDir(root.toString());
+                if (!Files.isRegularFile(Path.of(flat.getCommonDir(), "mod.info"))
+                        && !Files.isRegularFile(Path.of(flat.getVersionDir(), "mod.info"))) {
+                    flat.commonDir = root.toString();
+                    flat.versionDir = root.toString();
+                    flat.baseFile.setWithCatch(root.toFile(), root.toFile());
+                    flat.mediaFile.setWithCatch(root.resolve("media").toFile(), root.resolve("media").toFile());
+                }
+            }
+            info = ChooseGameInfo.readModInfo(root.toString());
+        }
         if (info == null) throw new IOException("Mod not installed: " + id + ". Install it or set path to its mod directory.");
         if (!id.equals(info.getId())) throw new IOException("Expected " + id + " but found " + info.getId());
         if (!info.isAvailableSelf()) throw new IOException("Mod is unavailable for this game version: " + id);
+        if (!workshop.isEmpty()) ZomboidFileSystem.instance.setModIdToDir(id, info.getDir());
         return info;
     }
 
