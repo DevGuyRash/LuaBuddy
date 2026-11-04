@@ -20,6 +20,7 @@ import se.krka.kahlua.vm.JavaFunction;
 import se.krka.kahlua.vm.LuaClosure;
 import se.krka.kahlua.vm.Prototype;
 import zombie.Lua.LuaManager;
+import zombie.Lua.LuaEventManager;
 import zombie.ZomboidFileSystem;
 import zombie.core.Language;
 import zombie.core.Translator;
@@ -49,6 +50,17 @@ public final class Bootstrap {
                 frame.push(Diagnostics.stackTrace(error));
                 return 3;
             }
+        });
+        state.rawset("callbacks", (JavaFunction) (frame, count) -> {
+            String event = (String) frame.get(0);
+            KahluaTable filenames = (KahluaTable) frame.get(1);
+            KahluaTable callbacks = table();
+            for (LuaClosure callback : List.copyOf(LuaEventManager.AddEvent(event).callbacks)) {
+                if (Boolean.TRUE.equals(filenames.rawget(callback.prototype.filename))) {
+                    callbacks.rawset(callbacks.size() + 1, callback);
+                }
+            }
+            return frame.push(callbacks);
         });
         try {
             if (directory == null) throw new IOException("Missing -Dluabuddy.config=<profile directory>");
@@ -111,6 +123,7 @@ public final class Bootstrap {
                         detail.rawset("versionRoot", mod.info().getVersionDir());
                         detail.rawset("requires", String.join(";", mod.required()));
                         detail.rawset("preload", String.join(";", mod.profile().list("preload")));
+                        detail.rawset("replay", String.join(";", mod.profile().list("replay")));
                         detail.rawset("plugin", mod.profile().pluginFilename());
                         detail.rawset("stage", "source-scan");
                         var files = mod.profile().sources(roots, active);
@@ -125,12 +138,18 @@ public final class Bootstrap {
                         entry.rawset("sources", sources);
                         entry.rawset("filenames", filenames);
                         entry.rawset("preload", array(mod.profile().list("preload")));
+                        entry.rawset("replay", array(mod.profile().list("replay")));
                         entry.rawset("required", array(mod.required()));
                         detail.rawset("stage", "plugin-read");
                         entry.rawset("plugin", mod.profile().plugin());
                         entry.rawset("pluginFilename", mod.profile().pluginFilename());
                         detail.rawset("stage", "translations");
                         loadTranslations(roots);
+                        if (Boolean.parseBoolean(mod.profile().options().getProperty("mount", "false").trim())) {
+                            detail.rawset("stage", "file-mount");
+                            ZomboidFileSystem.instance.setModIdToDir(id, mod.info().getDir());
+                            ZomboidFileSystem.instance.loadMod(id);
+                        }
                         detail.rawset("stage", "prepared");
                         payload.rawset(payload.size() + 1, entry);
                         available.add(id);

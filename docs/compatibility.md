@@ -9,6 +9,8 @@ The next public PZ update is [42.22 Pre-Release](https://projectzomboid.com/blog
 
 These checks used the downloaded JAR with its published SHA-256 `eb79b9876332010733a8e0d7ce4fe0377846059a9e28859029e2a0fb449f6cf2`. The preview's `java/projectzomboid.jar` and `linux64` layout is supported alongside the current client's flat JAR and `natives` layout.
 
+The November 4 optional-profile additions and generic mounting, callback replay, and flat-root support were checked against 42.21.0. The preview row records the earlier native integration check; rerun the current compatibility gate before relying on the new capabilities with another game build. The new combined multiplayer smoke test and its limits are recorded in [verification](verification.md#optional-profile-verification-on-november-4-2026).
+
 The native gate exercises mod discovery and version directories, dependency ordering, shared/client loading, translation reflection and fallback, actual Kahlua compilation and closure metadata, diagnostics, and the ZombieBuddy-patched `OnGameStart` entry point. It runs in a temporary cache with generated fixtures, without a game window or server connection. An unsuccessful gate prevents dependency promotion and installation.
 
 Run it against another installed build with:

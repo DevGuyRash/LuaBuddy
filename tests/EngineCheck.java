@@ -183,7 +183,113 @@ public final class EngineCheck {
         Bootstrap.load();
         lua("assert(LuaBuddy.mods.CycleA:find('Cyclic mod order',1,true)); assert(LuaBuddy.mods.CycleB:find('Cyclic mod order',1,true)); assert(LuaBuddy.error == nil)");
         System.out.println("PASS: missing required profiles and cyclic mod order fail before executing mod sources");
+        optionalInitializationCases();
         diagnosticCases();
+    }
+
+    private static void optionalInitializationCases() throws Exception {
+        write("replay/42/mod.info", "name=Replay\nid=Replay\nversionMin=42.0\n");
+        write("foreign/42/mod.info", "name=Foreign\nid=Foreign\nversionMin=42.0\n");
+        write("replay/common/media/ui/replay.png", "common");
+        write("replay/42/media/ui/replay.png", "version");
+        write("replay/42/media/lua/server/Server.lua", "error('server Lua must not run')");
+        write("foreign/42/media/lua/shared/Foreign.lua", "Events.OnLoad.Add(function() foreignRuns = (foreignRuns or 0) + 1 end)");
+        write("replay/42/media/lua/shared/A.lua", "require('Foreign'); require('Nested'); "
+                + "local callback = function() assert(clientReady); loadRuns = (loadRuns or 0) + 1 end; "
+                + "Events.OnLoad.Add(callback); Events.OnLoad.Add(callback); "
+                + "local cancelled = function() error('removed callback must not replay') end; "
+                + "Events.OnLoad.Add(cancelled); Events.OnLoad.Remove(cancelled); "
+                + "Events.OnGameBoot.Add(function() bootRuns = (bootRuns or 0) + 1 end)");
+        write("replay/42/media/lua/shared/Nested.lua", "Events.OnLoad.Add(function() nestedRuns = (nestedRuns or 0) + 1 end)");
+        write("replay/42/media/lua/client/Ready.lua", "assert(loadRuns == nil); clientReady = true");
+        write("replay-config/a.properties", "id=Replay\npath=../replay\nmount=true\nreplay=OnGameBoot;OnLoad\nplugin=ready.lua\n");
+        write("replay-config/z.properties", "id=Foreign\npath=../foreign\n");
+        write("replay-config/ready.lua", "return { after = function() assert(bootRuns == 1 and loadRuns == 2 and nestedRuns == 1 and foreignRuns == nil) end }");
+        System.setProperty("luabuddy.config", root.resolve("replay-config").toString());
+        fresh();
+        LuaEventManager.register(LuaManager.platform, LuaManager.env);
+        for (String name : List.of("OnGameBoot", "OnLoad")) {
+            var event = LuaEventManager.AddEvent(name);
+            event.callbacks.clear();
+            event.register(LuaManager.platform, (KahluaTable) LuaManager.env.rawget("Events"));
+        }
+        Bootstrap.load();
+        lua("assert(LuaBuddy.mods.Replay == 'loaded' and LuaBuddy.mods.Foreign == 'loaded', tostring(LuaBuddy.mods.Replay) .. '; ' .. tostring(LuaBuddy.mods.Foreign)); "
+                + "assert(foreignRuns == nil); assert(bootRuns == 1 and loadRuns == 2 and nestedRuns == 1)");
+        String mounted = ZomboidFileSystem.instance.getString("media/ui/replay.png");
+        if (!Files.readString(Path.of(mounted)).equals("version") || !ZomboidFileSystem.instance.getModIDs().isEmpty()) {
+            throw new AssertionError("Native mount uses the selected version without activating a mod");
+        }
+        LuaEventManager.triggerEvent("OnLoad");
+        lua("assert(foreignRuns == 1 and loadRuns == 4 and nestedRuns == 2)");
+        write("replay/42/media/lua/shared/A.lua", "Events.OnLoad.Add(function() error('replay fixture failure') end)");
+        write("replay-config/ready.lua", "return {}");
+        fresh();
+        LuaEventManager.register(LuaManager.platform, LuaManager.env);
+        for (String name : List.of("OnGameBoot", "OnLoad")) {
+            var event = LuaEventManager.AddEvent(name);
+            event.callbacks.clear();
+            event.register(LuaManager.platform, (KahluaTable) LuaManager.env.rawget("Events"));
+        }
+        Bootstrap.load();
+        JSONObject failed = report().getJSONObject("mods").getJSONObject("Replay");
+        if (!failed.getString("stage").equals("replay-OnLoad") || !failed.getString("source").endsWith("A.lua")
+                || !failed.getString("error").contains("replay fixture failure")) {
+            throw new AssertionError("Replay failures retain native callback source attribution");
+        }
+        lua("assert(LuaBuddy.mods.Foreign == 'loaded')");
+        for (String invalid : List.of("mount=yes", "replay=OnGameStart")) {
+            write("invalid-optional/profile.properties", "id=Invalid\n" + invalid + "\n");
+            try {
+                ModProfile.read(root.resolve("invalid-optional"));
+                throw new AssertionError("Invalid optional initialization setting accepted: " + invalid);
+            } catch (java.io.IOException expected) {
+                if (!expected.getMessage().contains("invalid-optional")) throw expected;
+            }
+        }
+        write("flat/mod.info", "name=Flat\nid=Flat\nversionMin=42.0\n");
+        write("flat/media/lua/shared/Flat.lua", "flatLoaded = true");
+        write("flat-config/flat.properties", "id=Flat\npath=../flat\nworkshop=123\n");
+        System.setProperty("luabuddy.config", root.resolve("flat-config").toString());
+        fresh();
+        Bootstrap.load();
+        lua("assert(LuaBuddy.mods.Flat == 'loaded'); assert(flatLoaded)");
+        if (!report().getJSONObject("mods").getJSONObject("Flat").getString("versionRoot").equals(root.resolve("flat").toRealPath().toString())) {
+            throw new AssertionError("Flat Workshop metadata and Lua must use the upstream root in place");
+        }
+        write("unavailable-workshop/profile.properties", "id=NotInstalledWorkshop\nworkshop=123\n");
+        System.setProperty("luabuddy.config", root.resolve("unavailable-workshop").toString());
+        fresh();
+        Bootstrap.load();
+        lua("assert(LuaBuddy.mods.NotInstalledWorkshop:find('Steam is unavailable', 1, true))");
+        write("retry-flat/mod.info", "name=Retry\nid=NotInstalledWorkshop\nversionMin=42.0\n");
+        write("retry-flat/media/lua/client/Retry.lua", "workshopRetryLoaded = true");
+        write("unavailable-workshop/profile.properties", "id=NotInstalledWorkshop\nworkshop=123\npath=../retry-flat\n");
+        fresh();
+        Bootstrap.load();
+        lua("assert(LuaBuddy.mods.NotInstalledWorkshop == 'loaded'); assert(workshopRetryLoaded)");
+        if (zombie.gameStates.ChooseGameInfo.getModDetails("NotInstalledWorkshop") == null) {
+            throw new AssertionError("A failed Workshop lookup must not poison subsequent native metadata discovery");
+        }
+        if (!System.getProperty("os.name").startsWith("Windows")) {
+            write("alias-source/42/mod.info", "name=Alias\nid=Alias\nversionMin=42.0\n");
+            write("alias-source/42/media/lua/client/Alias.lua", "aliasLoaded = true");
+            write("alias-source/42/media/ui/alias.png", "asset");
+            Path alias = Files.createSymbolicLink(root.resolve("alias-mod"), root.resolve("alias-source"));
+            var nativeInfo = zombie.gameStates.ChooseGameInfo.readModInfo(alias.toString());
+            write("alias-config/profile.properties", "id=Alias\npath=../alias-mod\nmount=true\n");
+            System.setProperty("luabuddy.config", root.resolve("alias-config").toString());
+            fresh();
+            Bootstrap.load();
+            lua("assert(LuaBuddy.mods.Alias == 'loaded'); assert(aliasLoaded)");
+            if (!report().getJSONObject("mods").getJSONObject("Alias").getString("versionRoot").equals(nativeInfo.getVersionDir())
+                    || !ZomboidFileSystem.instance.getString("media/ui/alias.png").equals(alias.resolve("42/media/ui/alias.png").toString())) {
+                throw new AssertionError("Explicit paths must preserve native symlink aliases for image prefix validation");
+            }
+            System.out.println("PASS: explicit symlink paths retain native directory and asset aliases");
+        }
+        System.out.println("PASS: opt-in flat Workshop roots use native metadata, sources stay in place, no-Steam lookup fails safely");
+        System.out.println("PASS: opt-in native mounting, common/version assets, no activation/server Lua, isolated callback replay, native registration/removal, nested and foreign imports, replay failure attribution");
     }
 
     private static void diagnosticCases() throws Exception {

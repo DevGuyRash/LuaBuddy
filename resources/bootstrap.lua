@@ -65,6 +65,7 @@ for _, mod in ipairs(mods) do
     mod.detail = state.details[mod.id] or {status = "prepared"}
     state.details[mod.id] = mod.detail
     mod.entries = {}
+    mod.sourceFiles = {}
     mod.pluginFilename = mod.pluginFilename or "LuaBuddy/plugins/" .. mod.id
     local ok, err, trace, cause = pcall(function()
         stage(mod, "plugin-compile", mod.pluginFilename)
@@ -82,6 +83,7 @@ for _, mod in ipairs(mods) do
                 error("Compiling " .. filename .. ": " .. tostring(message))
             end
             mod.entries[#mod.entries + 1] = {name = name, filename = filename, chunk = chunk, owner = mod}
+            mod.sourceFiles[filename] = true
         end
         table.sort(mod.entries, function(a, b) return a.name:lower() < b.name:lower() end)
         stage(mod, "plugin-initialize", mod.pluginFilename)
@@ -151,6 +153,12 @@ for _, phase in ipairs({"shared", "client"}) do
                     checkDependencies(mod)
                     for _, id in ipairs(mod.required) do
                         assert(active[id] or state.mods[id] == "loaded", "Required mod did not load: " .. id)
+                    end
+                    for _, name in ipairs(mod.replay or {}) do
+                        for _, callback in ipairs(state.callbacks(name, mod.sourceFiles)) do
+                            stage(mod, "replay-" .. name, getFilenameOfClosure(callback))
+                            callback()
+                        end
                     end
                     stage(mod, "after", mod.pluginFilename)
                     if mod.hooks.after then mod.hooks.after(mod.context) end

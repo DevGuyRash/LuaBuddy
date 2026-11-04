@@ -1,6 +1,6 @@
 # LuaBuddy
 
-LuaBuddy restores locally installed Project Zomboid client and shared Lua when a multiplayer connection resets the Lua environment to the server's mod list. Add a profile for a mod ID to load it. The loader has no built-in list of mod IDs. AllTheInfo and Auto All have optional compatibility profiles and Lua hooks.
+LuaBuddy restores locally installed Project Zomboid client and shared Lua when a multiplayer connection resets the Lua environment to the server's mod list. Add a profile for a mod ID to load it. The loader has no built-in list of mod IDs. Bundled compatibility profiles and Lua hooks are optional; a fresh installation selects no mods.
 
 LuaBuddy is a general-purpose **late client Lua loader**. It cannot make every kind of mod work on an arbitrary server. Mods that need server code, earlier startup events, maps, item definitions, Java patches, or assets registered during normal mod loading still need their normal installation. Auto All's worn-clothing repair synchronization requires its server component. A profile cannot supply that component.
 
@@ -11,7 +11,7 @@ The loader and native startup hook have been verified against Project Zomboid **
 Install Python 3.10 or newer and JDK 25 or newer. Install the mods through Steam Workshop or the game's local mods directory. Run these commands from this repository.
 
 ```sh
-python3 luabuddy.py install --mod AllInfo --mod AutoAll
+python3 luabuddy.py install
 python3 luabuddy.py status
 ```
 
@@ -28,7 +28,7 @@ python3 luabuddy.py install --game-dir /path/to/ProjectZomboid --mod AllInfo --m
 Install Python 3.10 or newer and JDK 25 or newer, with `javac` and `jar` available through `JAVA_HOME` or `PATH`. Open PowerShell in this repository.
 
 ```powershell
-py -3 luabuddy.py install --mod AllInfo --mod AutoAll
+py -3 luabuddy.py install
 py -3 luabuddy.py status
 ```
 
@@ -71,6 +71,40 @@ python3 luabuddy.py install --mod AnotherModID
 
 For an unknown mod, the installer creates `config/AnotherModID.properties` containing `id=AnotherModID`. IDs with spaces, punctuation, Unicode, or Windows reserved names use a stable `mod-<hash>.properties` filename while preserving the mod ID inside. Quote such IDs on the command line, for example `--mod 'Spiffo Knew [B42]'`. For a bundled profile, the installer copies the profile and its Lua hook. Existing profiles stay intact. Restart the game after changing profiles. To disable one profile, set `enabled=false` in that file.
 
+### Optional bundled profiles
+
+Subscribe to the upstream Workshop items separately, then select only the profiles you want with `--mod`. Neither these mods nor their dependencies are selected automatically. For example, to add AllTheInfo and Auto All:
+
+```sh
+python3 luabuddy.py install --mod AllInfo --mod AutoAll
+```
+
+| Workshop mod | `--mod` ID | Integration |
+| --- | --- | --- |
+| [AllTheInfo](https://steamcommunity.com/sharedfiles/filedetails/?id=3781129962) | `AllInfo` | Existing tooltip, provider, and settings initialization. |
+| [Auto All](https://steamcommunity.com/sharedfiles/filedetails/?id=3777237134) | `AutoAll` | Existing mechanics preloads and initialization check. |
+| [Easy Pickings](https://steamcommunity.com/sharedfiles/filedetails/?id=3788245131) | `WalkLootForage` | Restore the saved forage key and loot priority. |
+| [LootSense: Storage](https://steamcommunity.com/sharedfiles/filedetails/?id=3733326180) | `LootSenseStorage` | Restore its display settings. |
+| [LootSense: QuickStack](https://steamcommunity.com/sharedfiles/filedetails/?id=3733862305) | `LootSenseQuickStack` | Restore settings; load after Storage when both are selected. Storage is optional. |
+| [Craft Planner](https://steamcommunity.com/sharedfiles/filedetails/?id=3808092704) | `CraftPlanner` | Mount UI images, run its missed Neat Crafting initialization, restore settings and an already tracked window. |
+| [NeatUI Inventory](https://steamcommunity.com/sharedfiles/filedetails/?id=3820447422) | `NeatUI_Inventory` | Requires `NeatUI_Framework`; mount images, rebuild existing inventory-page children through upstream code, and load before the bundled inventory/tooltip wrappers. |
+| [Better Context Menu Icons](https://steamcommunity.com/sharedfiles/filedetails/?id=3830018449) | `SuperOl3gContextMenuIcons` | Mount images and register after Auto All and Alarm Syndrome when selected. |
+| [What It Does](https://steamcommunity.com/sharedfiles/filedetails/?id=3823732502) | `WhatItDoes` | Uses upstream client Lua without a custom hook. |
+| [Alarm Syndrome](https://steamcommunity.com/sharedfiles/filedetails/?id=3409527910) | `P4AlarmSyndrome` | Mount alarm icons, run its missed `OnLoad` initialization, and restore settings. |
+| [ReloadAllAmmo](https://steamcommunity.com/sharedfiles/filedetails/?id=3774932027) | `ReloadAllAmmo` | Uses upstream client Lua and native optional Gunworks ordering without a custom hook. |
+| [Auto Fishing](https://steamcommunity.com/sharedfiles/filedetails/?id=3804080377) | `AutoFishing` | Mount its UI image; use upstream fishing actions and sandbox-value fallbacks without a custom hook. |
+| [NeatUI Framework](https://steamcommunity.com/sharedfiles/filedetails/?id=3508537032) | `NeatUI_Framework` | Optional dependency profile for NeatUI Inventory; mount the framework's UI images. |
+
+For NeatUI Inventory, subscribe to both Workshop items and select both profiles unless the server already loads the framework:
+
+```sh
+python3 luabuddy.py install --mod NeatUI_Framework --mod NeatUI_Inventory
+```
+
+On Windows, use `py -3` in these examples. Existing selections remain when adding another profile. No new integration disables Auto All or AllTheInfo features. Other combinations and custom profiles continue to use native dependency metadata and explicit ordering. These profiles do not fix upstream gameplay bugs or provide missing server components; QuickStack keeps its upstream multiplayer transfer implementation.
+
+Auto Fishing reads `SandboxVars.AutoFishing` when the world supplies it and otherwise uses its upstream defaults. Late client loading does not register its sandbox-options page or change the server's sandbox settings. Its custom seated bait-changing animation also requires normal animation-set loading; file mounting alone does not register that animation node. ReloadAllAmmo uses the game's ordinary magazine load/unload actions; Gunworks remains an optional upstream integration.
+
 The installer rejects filename collisions before writing, including names that differ only by case on Windows. When using `--mod`, existing profiles must have one unindented `id=` entry with plain text, escaped spaces, or escaped backslashes. The runtime accepts Java properties syntax, but the installer refuses advanced or ambiguous identity syntax instead of guessing. Manage those profiles manually or use the conventional `id=` form.
 
 The game's own mod discovery finds installed mods and chooses their `common` and version directories. To select a mod outside those directories, add `path=/absolute/path/to/mod` to its profile. Point at the directory above `42`, `42.20`, and `common`, so version selection can continue to follow upstream updates. Use forward slashes in Windows properties paths, such as `path=D:/Mods/Example`. Relative paths resolve against the profile's directory.
@@ -84,6 +118,7 @@ Profiles are UTF-8 Java properties files in `config`. Each file has one mod ID. 
 | `id` | Required mod ID matching `mod.info`. |
 | `enabled` | `true` by default. Set `false` to skip this profile. |
 | `path` | Optional mod root. Otherwise use native installed-mod discovery. |
+| `workshop` | Optional numeric Workshop item ID for a mod packaged directly at the item root. Native mod-ID discovery takes precedence; otherwise Steam locates the item and the native parser reads its root `mod.info`. Set `path` as well when Steam is unavailable. |
 | `requires` | Additional required mod IDs. Native `require=` dependencies always apply. |
 | `after` | Optional ordering after other configured IDs. Native `loadAfter` also applies. |
 | `before` | Optional ordering before other configured IDs. Native `loadBefore` also applies. |
@@ -91,6 +126,8 @@ Profiles are UTF-8 Java properties files in `config`. Each file has one mod ID. 
 | `excludeWhen.ModID` | Additional exclusions when that mod is active on the server. |
 | `preload` | Modules to require before this mod's shared and client files execute. |
 | `plugin` | Optional Lua hook file relative to this profile's directory. |
+| `mount` | `false` by default. Set `true` to publish the mod's common/version file paths through the game's native `loadMod` API, including loose UI images. Does not activate the mod or execute its server Lua. |
+| `replay` | Optional `OnGameBoot` and/or `OnLoad`. Run only callbacks registered by this mod's restored Lua for those missed events, in the listed event order, after its client files and before its `after` hook. Callbacks receive no arguments. |
 
 For example, a mod with no special compatibility rules needs only its ID. Add the other options only when the mod requires them.
 
@@ -121,7 +158,11 @@ An environment-local `require` resolver remains available for imports from later
 
 Failures appear in `console.txt` under `[LuaBuddy]`, and in `LuaBuddy.mods` inside Lua. A failed mod is not retried in the same environment because Lua side effects cannot be rolled back. Unrelated mods can continue. A dependent mod fails when its required mod fails. Fix the cause and reconnect or restart.
 
-Late loading does not replay events such as `OnBoot` or `OnGameBoot`. Calls that require the game to consider a local mod fully activated, asset lookups through the normal mod filesystem, and mods that replace `require` themselves may need additional integration. An optional hook can address a mod's specific late initialization when that is sufficient. LuaBuddy does not automatically turn client code into server code.
+Late loading does not replay the game's startup lifecycle. A profile can opt into `replay` for its own missed `OnGameBoot` or `OnLoad` callbacks when they are safe to run late. Other mods' callbacks are not triggered. Native event subscriptions remain intact; use replay only for initialization that is safe if the game later emits the event again. Replay does not reproduce event arguments, earlier game state, or callbacks registered outside that mod's restored sources.
+
+Opt-in file mounting exposes the upstream mod's files through the native virtual filesystem, with normal common/version precedence and later mounted mods winning path collisions. Images remain subject to the game's path validation: use native-discovered mod roots for assets. An explicit external `path` can supply Lua without making that path valid for native image loading. Mounting does not load texture packs, animation sets, item definitions, maps, or server code, invalidate previously cached textures, or change the server's active mod list. Files mounted or callbacks registered before a failure can remain in that environment. Reconnect or restart after fixing a failure. Calls that require full mod activation and mods that replace `require` may still need additional integration. LuaBuddy does not automatically turn client code into server code.
+
+Easy Pickings currently packages `mod.info` and `media` directly at its Workshop item root. Its profile's `workshop` fallback handles that layout without moving or copying its files. Native versioned discovery takes over if upstream adopts the normal mod layout. With Steam disabled, set this profile's `path` to the installed item's root.
 
 ## Diagnose loading problems
 
