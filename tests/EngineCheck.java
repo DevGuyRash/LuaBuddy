@@ -271,6 +271,15 @@ public final class EngineCheck {
         if (zombie.gameStates.ChooseGameInfo.getModDetails("NotInstalledWorkshop") == null) {
             throw new AssertionError("A failed Workshop lookup must not poison subsequent native metadata discovery");
         }
+        write("mapped/42/mod.info", "name=MappedNative\nid=MappedNative\nversionMin=42.0\n");
+        write("mapped/42/media/lua/client/Mapped.lua", "mappedNativeLoaded = true");
+        write("mapped-config/profile.properties", "id=MappedNative\nworkshop=123\n");
+        ZomboidFileSystem.instance.setModIdToDir("MappedNative", root.resolve("mapped").toString());
+        System.setProperty("luabuddy.config", root.resolve("mapped-config").toString());
+        fresh();
+        Bootstrap.load();
+        lua("assert(LuaBuddy.mods.MappedNative == 'loaded', tostring(LuaBuddy.mods.MappedNative)); assert(mappedNativeLoaded)");
+        System.out.println("PASS: Workshop profiles honor native registered directories outside enumerated mod folders without Steam");
         if (!System.getProperty("os.name").startsWith("Windows")) {
             write("alias-source/42/mod.info", "name=Alias\nid=Alias\nversionMin=42.0\n");
             write("alias-source/42/media/lua/client/Alias.lua", "aliasLoaded = true");

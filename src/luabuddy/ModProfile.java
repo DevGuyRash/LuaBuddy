@@ -84,8 +84,8 @@ record ModProfile(String id, Path file, Properties options) {
             } else {
                 String known = ZomboidFileSystem.instance.getModDir(id);
                 List<String> folders = new ArrayList<>();
-                if (known != null) folders.add(known);
                 ZomboidFileSystem.instance.getAllModFolders(folders);
+                if (known != null) folders.add(0, known);
                 for (String folder : folders) {
                     ChooseGameInfo.Mod candidate = ChooseGameInfo.readModInfo(folder);
                     if (candidate != null && id.equals(candidate.getId())) {
