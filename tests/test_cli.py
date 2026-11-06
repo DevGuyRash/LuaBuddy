@@ -401,6 +401,24 @@ class CliCheck(unittest.TestCase):
         path.write_text(json.dumps(report), encoding="utf-8")
         self.assertIn("zombieBuddyVersion", self.run_cli("diagnostics", "--cache-dir", str(cache), success=False).stderr)
 
+    def test_runtime_operation_report_retains_loaded_generation(self):
+        cache, path, value = self.report()
+        value.update(operation="reload", target="FreshMod", error="Reload rejected: candidate syntax error")
+        value["mods"]["FreshMod"]["replay"] = "OnGameStart"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        result = self.run_cli("diagnostics", "--cache-dir", str(cache), "--json", success=False)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["operation"], "reload")
+        self.assertEqual(report["target"], "FreshMod")
+        self.assertEqual(report["session"], value["session"])
+        self.assertEqual(report["mods"]["FreshMod"]["status"], "loaded")
+        self.assertEqual(report["mods"]["FreshMod"]["replay"], "OnGameStart")
+        self.assertIn("Operation: reload; target: FreshMod", self.run_cli("diagnostics", "--cache-dir", str(cache), success=False).stdout)
+        for field in ("operation", "target"):
+            broken = dict(value, **{field: []})
+            path.write_text(json.dumps(broken), encoding="utf-8")
+            self.assertIn(field, self.run_cli("diagnostics", "--cache-dir", str(cache), success=False).stderr)
+
     def test_failed_initialization_reports_lua_and_java_tracebacks(self):
         self.run_cli("install", "--mod", "FreshMod")
         cache, path, report = self.report()

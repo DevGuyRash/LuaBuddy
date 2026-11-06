@@ -52,8 +52,8 @@ record ModProfile(String id, Path file, Properties options) {
                     throw new IOException("mount must be true or false in " + file);
                 }
                 for (String event : options.getProperty("replay", "").split(";")) {
-                    if (!event.isBlank() && !Set.of("OnGameBoot", "OnLoad").contains(event.trim())) {
-                        throw new IOException("replay supports only missed OnGameBoot and OnLoad callbacks in " + file);
+                    if (!event.isBlank() && !Set.of("OnGameBoot", "OnLoad", "OnGameStart").contains(event.trim())) {
+                        throw new IOException("replay supports only OnGameBoot, OnLoad and runtime OnGameStart callbacks in " + file);
                     }
                 }
                 String workshop = options.getProperty("workshop", "").trim();

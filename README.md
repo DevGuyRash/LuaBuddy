@@ -69,7 +69,13 @@ Use the exact `id=` value from the mod's `mod.info`.
 python3 luabuddy.py install --mod AnotherModID
 ```
 
-For an unknown mod, the installer creates `config/AnotherModID.properties` containing `id=AnotherModID`. IDs with spaces, punctuation, Unicode, or Windows reserved names use a stable `mod-<hash>.properties` filename while preserving the mod ID inside. Quote such IDs on the command line, for example `--mod 'Spiffo Knew [B42]'`. For a bundled profile, the installer copies the profile and its Lua hook. Existing profiles stay intact. Restart the game after changing profiles. To disable one profile, set `enabled=false` in that file.
+For an unknown mod, the installer creates `config/AnotherModID.properties` containing `id=AnotherModID`. IDs with spaces, punctuation, Unicode, or Windows reserved names use a stable `mod-<hash>.properties` filename while preserving the mod ID inside. Quote such IDs on the command line, for example `--mod 'Spiffo Knew [B42]'`. For a bundled profile, the installer copies the profile and its Lua hook. Existing profiles stay intact. With the runtime-capable loader already running, use **Options > Mods > LuaBuddy > Load new profiles** to load newly enabled profiles. Otherwise reconnect or restart. To disable one profile for the next connection, set `enabled=false` in that file.
+
+### Load and reload during play
+
+After installing this loader version and starting the game with it, **Load new profiles** reads the existing configuration and loads only new selections. Loaded mods retain their module objects, event registrations, and settings. Apply or discard pending Options edits first; the action rebuilds the native Mods page so newly registered preferences appear there. It does not add missing server code or make every mod safe to initialize late.
+
+**Reload a profile** accepts one configured mod ID in a native dialog. It requires the running profile's explicit `unload(context)` hook, checks dependencies and ordering, and compiles replacement Lua before cleanup. Existing bundled profiles do not claim safe reload automatically. See [runtime loading](docs/runtime.md) for the API, cleanup contract, refusal behavior, and verification scope.
 
 ### Optional bundled profiles
 
@@ -132,7 +138,7 @@ Profiles are UTF-8 Java properties files in `config`. Each file has one mod ID. 
 | `preload` | Modules to require before this mod's shared and client files execute. |
 | `plugin` | Optional Lua hook file relative to this profile's directory. |
 | `mount` | `false` by default. Set `true` to publish the mod's common/version file paths through the game's native `loadMod` API, including loose UI images. Does not activate the mod or execute its server Lua. |
-| `replay` | Optional `OnGameBoot` and/or `OnLoad`. Run only callbacks registered by this mod's restored Lua for those missed events, in the listed event order, after its client files and before its `after` hook. Callbacks receive no arguments. |
+| `replay` | Optional `OnGameBoot`, `OnLoad`, and/or `OnGameStart`. Boot/load callbacks run after client files and before the `after` hook. `OnGameStart` runs only during runtime loading, after the new batch's client files and hooks. Normal startup uses the real event. Only this mod's restored-source callbacks run, without arguments. |
 
 For example, a mod with no special compatibility rules needs only its ID. Add the other options only when the mod requires them.
 
@@ -143,7 +149,7 @@ preload=Vehicles/ISUI/ISVehicleMechanics
 plugin=Example.lua
 ```
 
-A plugin returns a table with optional `before(context)` and `after(context)` functions. Keep imports and initialization inside those hooks. `before` runs before the shared phase. `after` runs after that mod's client phase, before dependent client files. `context.id` is the mod ID, `context.active` contains server-loaded and successfully loaded local IDs, and `context.state.mods` holds each profile's status. Plugins run trusted local code in the game's Lua environment.
+A plugin returns a table with optional `before(context)`, `after(context)`, and `unload(context)` functions. Keep imports and initialization inside those hooks. `before` runs before the shared phase. `after` runs after that mod's client phase, before dependent client files. `context.id` is the mod ID, `context.active` contains server-loaded and successfully loaded local IDs, and `context.state.mods` holds each profile's status. `context.runtime` and `context.operation` (`startup`, `refresh`, or `reload`) describe that generation's activation. Its `unload` hook receives the same original context; see the [cooperative-reload contract](docs/runtime.md). Plugins run trusted local code in the game's Lua environment.
 
 ```lua
 return {
@@ -155,7 +161,7 @@ return {
 
 ## Loading behavior
 
-ZombieBuddy applies one hook immediately before the normal `OnGameStart` event. LuaBuddy runs only on multiplayer clients. Single player and dedicated servers use their normal loading paths. A mod already present in the server's active list is skipped. Each Lua environment initializes once, including after disconnecting and rejoining in the same JVM.
+ZombieBuddy applies one patch around the normal `OnGameStart` event. LuaBuddy runs only on multiplayer clients. Single player and dedicated servers use their normal loading paths. A mod already present in the server's active list is skipped. Each Lua environment initializes one session, including after disconnecting and rejoining in the same JVM. Runtime requests reuse that session and its require resolver after the native startup event finishes.
 
 LuaBuddy reads upstream files without editing them. Version-specific files replace matching common files. It compiles a mod's sources before executing them, loads the shared phase before the client phase, and orders mods using native dependency metadata. Files with the same relative path follow that mod order, with later mods taking precedence. Shared and client files with the same module name remain distinct scripts. `require` prefers shared modules and caches the first return value, including `nil` and `false`.
 
@@ -163,7 +169,7 @@ An environment-local `require` resolver remains available for imports from later
 
 Failures appear in `console.txt` under `[LuaBuddy]`, and in `LuaBuddy.mods` inside Lua. A failed mod is not retried in the same environment because Lua side effects cannot be rolled back. Unrelated mods can continue. A dependent mod fails when its required mod fails. Fix the cause and reconnect or restart.
 
-Late loading does not replay the game's startup lifecycle. A profile can opt into `replay` for its own missed `OnGameBoot` or `OnLoad` callbacks when they are safe to run late. Other mods' callbacks are not triggered. Native event subscriptions remain intact; use replay only for initialization that is safe if the game later emits the event again. Replay does not reproduce event arguments, earlier game state, or callbacks registered outside that mod's restored sources.
+Late loading does not replay the game's startup lifecycle. A profile can opt into `replay` for its own missed callbacks when they are safe to run late. Runtime-only `OnGameStart` replay occurs after all new client scripts and `after` hooks; initial restoration lets the native event run normally. Other mods' callbacks are not triggered. Native event subscriptions remain intact; use replay only for initialization that is safe if the game later emits the event again. Replay does not reproduce event arguments, earlier game state, or callbacks registered outside that mod's restored sources, including profile and shared-helper callbacks.
 
 Opt-in file mounting exposes the upstream mod's files through the native virtual filesystem, with normal common/version precedence and later mounted mods winning path collisions. Images remain subject to the game's path validation: use native-discovered mod roots for assets. An explicit external `path` can supply Lua without making that path valid for native image loading. Mounting does not load texture packs, animation sets, item definitions, maps, or server code, invalidate previously cached textures, or change the server's active mod list. Files mounted or callbacks registered before a failure can remain in that environment. Reconnect or restart after fixing a failure. Calls that require full mod activation and mods that replace `require` may still need additional integration. LuaBuddy does not automatically turn client code into server code.
 
@@ -188,7 +194,7 @@ python3 luabuddy.py doctor --cache-dir /path/to/game-cache
 python3 luabuddy.py diagnostics --cache-dir /path/to/game-cache --json
 ```
 
-The report records the session ID, UTC timestamps, loader/game/Java versions, selected profile and source paths, loaded/skipped/disabled/failed counts, initialization stages, and available Lua/Java error traces. It describes the last attempted loader initialization. Later gameplay callbacks continue through the game's normal error logging. An old successful report can remain if a later launch never reaches LuaBuddy, so check its session and completion time.
+The report records the environment session ID, latest operation and optional reload target, UTC timestamps, loader/game/Java versions, selected profile and source paths, loaded/skipped/disabled/failed counts, initialization stages, and available Lua/Java error traces. Runtime operations retain the session and actual running-mod records. A refused replacement can report an operation error while the old mod remains loaded. Later gameplay callbacks continue through the game's normal error logging. An old successful report can remain if a later launch never reaches LuaBuddy, so check its session and completion time.
 
 Normal logging writes a startup summary, per-mod result, and report location to the game's existing console logs under `[LuaBuddy]`. To record each initialization stage and source filename, enable debug logging and restart the game.
 

@@ -9,7 +9,15 @@ public final class Patches {
     public static class BeforeGameStart {
         @Patch.OnEnter
         public static void enter(@Patch.Argument(0) String event) {
-            if ("OnGameStart".equals(event)) Bootstrap.load();
+            if ("OnGameStart".equals(event)) {
+                Bootstrap.load();
+                Bootstrap.started(false);
+            }
+        }
+
+        @Patch.OnExit
+        public static void exit(@Patch.Argument(0) String event) {
+            if ("OnGameStart".equals(event)) Bootstrap.started(true);
         }
     }
 }
