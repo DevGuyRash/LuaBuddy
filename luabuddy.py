@@ -464,6 +464,11 @@ def launcher_data(launcher: Path) -> tuple[bytes, dict, list[str]]:
 
 
 def profile_files(ids: list[str], directory: Path) -> dict[Path, bytes]:
+    for mod_id in ids:
+        if not mod_id.strip() or any(ord(char) < 32 or ord(char) == 127 for char in mod_id):
+            raise ValueError("Mod IDs must be nonempty and contain no control characters")
+    # Java's String.trim() removes ASCII padding; controls remain invalid input.
+    ids = [mod_id.strip(" ") for mod_id in ids]
     files = {}
     names = {}
     existing = {}
@@ -487,8 +492,6 @@ def profile_files(ids: list[str], directory: Path) -> dict[Path, bytes]:
                     raise ValueError(f"Cannot safely read mod ID in {path}; use one unindented id= entry with plain text, escaped spaces or escaped backslashes before using --mod; no files changed")
                 identities[path] = re.sub(r"\\([\\ ])", r"\1", entries[0]).strip(" ")
     for mod_id in dict.fromkeys(ids):
-        if not mod_id.strip() or any(ord(char) < 32 or ord(char) == 127 for char in mod_id):
-            raise ValueError("Mod IDs must be nonempty and contain no control characters")
         reserved = re.fullmatch(r"CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]", mod_id.split(".", 1)[0], re.IGNORECASE)
         portable = re.fullmatch(r"[A-Za-z0-9_.-]+", mod_id) and not reserved and not mod_id.endswith(".") and len(mod_id) <= 180
         stem = mod_id if portable else "mod-" + hashlib.sha256(mod_id.encode("utf-8")).hexdigest()[:16]
