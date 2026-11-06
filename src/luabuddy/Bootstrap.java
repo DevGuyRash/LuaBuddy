@@ -126,7 +126,7 @@ public final class Bootstrap {
                 Diagnostics diagnostics = new Diagnostics(state, directory, operation, target);
                 KahluaTable statuses = (KahluaTable) state.rawget("mods");
                 try {
-                    if (state.rawget("execute") == null) runLoader(null, table(), state, operation);
+                    if (state.rawget("execute") == null) runResource("bootstrap.lua", new Object[]{null, table(), state, operation});
                     if (directory == null) throw new IOException("Missing -Dluabuddy.config=<profile directory>");
                     boolean replacing = operation.equals("reload");
                     if (!operation.equals("startup")) {
@@ -330,7 +330,7 @@ public final class Bootstrap {
     }
 
     private static Outcome runLoader(KahluaTable mods, KahluaTable active, KahluaTable state, String operation) throws IOException {
-        Object[] result = runResource("bootstrap.lua", new Object[]{mods, active, state, operation});
+        Object[] result = call(state.rawget("execute"), new Object[]{mods, active, operation});
         return new Outcome(result.length < 2 || !Boolean.FALSE.equals(result[1]),
                 result.length > 2 && result[2] instanceof String message ? message : "",
                 result.length > 3 && Boolean.TRUE.equals(result[3]));
