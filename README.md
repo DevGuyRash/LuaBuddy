@@ -95,6 +95,7 @@ python3 luabuddy.py install --mod AllInfo --mod AutoAll
 | [Auto Fishing](https://steamcommunity.com/sharedfiles/filedetails/?id=3804080377) | `AutoFishing` | Mount its UI image; use upstream fishing actions and sandbox-value fallbacks without a custom hook. |
 | [Easy Drop'n'Loot](https://steamcommunity.com/sharedfiles/filedetails/?id=2871469707) | `KADropnLoot` | Restore its saved settings; wrap NeatUI Inventory when selected so upstream inventory buttons and category-transfer menus remain available. |
 | [Area Tasks](https://steamcommunity.com/sharedfiles/filedetails/?id=3793163745) | `AreaTasks` | Uses upstream initialization, native tasks, and multiplayer sandbox-value fallbacks without a custom hook. |
+| [Loot Tracker](https://steamcommunity.com/sharedfiles/filedetails/?id=3823828778) | `LootTrackerB42` | Mount map icons, restore saved preferences, and use upstream map tracking, local multiplayer saves, and the vanilla respawn-wave countdown. |
 | [NeatUI Framework](https://steamcommunity.com/sharedfiles/filedetails/?id=3508537032) | `NeatUI_Framework` | Optional dependency profile for NeatUI Inventory; mount the framework's UI images. |
 
 For NeatUI Inventory, subscribe to both Workshop items and select both profiles unless the server already loads the framework:
@@ -106,6 +107,8 @@ python3 luabuddy.py install --mod NeatUI_Framework --mod NeatUI_Inventory
 On Windows, use `py -3` in these examples. Existing selections remain when adding another profile. No new integration disables Auto All or AllTheInfo features. Other combinations and custom profiles continue to use native dependency metadata and explicit ordering. These profiles do not fix upstream gameplay bugs or provide missing server components; QuickStack keeps its upstream multiplayer transfer implementation.
 
 Auto Fishing reads `SandboxVars.AutoFishing` when the world supplies it and otherwise uses its upstream defaults. Late client loading does not register its sandbox-options page or change the server's sandbox settings. Its custom seated bait-changing animation also requires normal animation-set loading; file mounting alone does not register that animation node. ReloadAllAmmo uses the game's ordinary magazine load/unload actions; Gunworks remains an optional upstream integration.
+
+Loot Tracker uses the server's sandbox settings and synchronized world time for its vanilla respawn-wave countdown. The countdown does not guarantee a particular container refills: server eligibility rules still apply, and the mod infers restocks from item counts in loaded containers. Custom server respawn schedules require support from that server's mod. Loot Tracker's own sandbox options use upstream defaults when absent.
 
 The installer rejects filename collisions before writing, including names that differ only by case on Windows. When using `--mod`, existing profiles must have one unindented `id=` entry with plain text, escaped spaces, or escaped backslashes. The runtime accepts Java properties syntax, but the installer refuses advanced or ambiguous identity syntax instead of guessing. Manage those profiles manually or use the conventional `id=` form.
 
