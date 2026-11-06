@@ -21,25 +21,31 @@ import zombie.ZomboidFileSystem;
 import zombie.core.Core;
 
 final class Diagnostics {
-    static final String VERSION = "1.2.0";
+    static final String VERSION = "1.3.0";
     private static final Set<String> FIELDS = Set.of("status", "stage", "profile", "commonRoot", "versionRoot",
-            "sourceCount", "requires", "preload", "plugin", "source", "error", "traceback", "javaTraceback");
+            "sourceCount", "requires", "preload", "replay", "plugin", "source", "error", "traceback", "javaTraceback");
     private final KahluaTable state;
-    private final KahluaTable details = Bootstrap.table();
+    private final KahluaTable details;
     private final long started = System.nanoTime();
     private final Map<String, Object> report = new LinkedHashMap<>();
 
-    Diagnostics(KahluaTable state, String directory) {
+    Diagnostics(KahluaTable state, String directory, String operation, String target) {
         this.state = state;
+        details = state.rawget("details") instanceof KahluaTable existing ? existing : Bootstrap.table();
         state.rawset("version", VERSION);
         state.rawset("details", details);
+        state.rawset("error", null);
+        state.rawset("traceback", null);
+        state.rawset("reportError", null);
         state.rawset("debug", Boolean.getBoolean("luabuddy.debug"));
         state.rawset("stackTrace", (JavaFunction) (frame, count) -> frame.push(frame.get(0) instanceof Throwable error
                 ? stackTrace(error) : String.valueOf(frame.get(0))));
         report.put("schemaVersion", 1);
         report.put("kind", "loader-initialization");
         report.put("version", VERSION);
-        report.put("session", UUID.randomUUID().toString());
+        report.put("session", state.rawget("session") instanceof String session ? session : UUID.randomUUID().toString());
+        report.put("operation", operation);
+        if (target != null) report.put("target", target);
         report.put("startedAt", Instant.now().toString());
         report.put("gameVersion", Core.getInstance().getVersion());
         report.put("javaVersion", System.getProperty("java.version"));
@@ -53,12 +59,12 @@ final class Diagnostics {
                 + " debug=" + report.get("debug"));
     }
 
-    KahluaTable mod(ModProfile profile) {
+    KahluaTable mod(ModProfile profile, boolean publish) {
         KahluaTable detail = Bootstrap.table();
         detail.rawset("profile", profile.file().toAbsolutePath().normalize().toString());
         detail.rawset("status", "prepared");
         detail.rawset("stage", "resolve");
-        details.rawset(profile.id(), detail);
+        if (publish) details.rawset(profile.id(), detail);
         return detail;
     }
 
@@ -106,6 +112,7 @@ final class Diagnostics {
         report.put("completedAt", Instant.now().toString());
         report.put("durationMs", elapsed);
         if (state.rawget("error") != null) report.put("error", state.rawget("error"));
+        if (state.rawget("traceback") instanceof String trace) report.put("traceback", trace);
         KahluaTable counts = Bootstrap.table();
         summary.forEach(counts::rawset);
         state.rawset("summary", counts);

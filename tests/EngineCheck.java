@@ -184,6 +184,7 @@ public final class EngineCheck {
         lua("assert(LuaBuddy.mods.CycleA:find('Cyclic mod order',1,true)); assert(LuaBuddy.mods.CycleB:find('Cyclic mod order',1,true)); assert(LuaBuddy.error == nil)");
         System.out.println("PASS: missing required profiles and cyclic mod order fail before executing mod sources");
         optionalInitializationCases();
+        runtimeCases();
         diagnosticCases();
     }
 
@@ -238,7 +239,7 @@ public final class EngineCheck {
             throw new AssertionError("Replay failures retain native callback source attribution");
         }
         lua("assert(LuaBuddy.mods.Foreign == 'loaded')");
-        for (String invalid : List.of("mount=yes", "replay=OnGameStart")) {
+        for (String invalid : List.of("mount=yes", "replay=OnTick")) {
             write("invalid-optional/profile.properties", "id=Invalid\n" + invalid + "\n");
             try {
                 ModProfile.read(root.resolve("invalid-optional"));
@@ -299,6 +300,180 @@ public final class EngineCheck {
         }
         System.out.println("PASS: opt-in flat Workshop roots use native metadata, sources stay in place, no-Steam lookup fails safely");
         System.out.println("PASS: opt-in native mounting, common/version assets, no activation/server Lua, isolated callback replay, native registration/removal, nested and foreign imports, replay failure attribution");
+    }
+
+    private static void runtimeStart(String directory) throws Exception {
+        Files.createDirectories(root.resolve(directory));
+        System.setProperty("luabuddy.config", root.resolve(directory).toString());
+        fresh();
+        LuaEventManager.register(LuaManager.platform, LuaManager.env);
+        for (String name : List.of("OnGameStart", "OnTick")) {
+            var event = LuaEventManager.AddEvent(name);
+            event.callbacks.clear();
+            event.register(LuaManager.platform, (KahluaTable) LuaManager.env.rawget("Events"));
+        }
+        lua("Events.OnGameStart.Add(function() foreignStarts = (foreignStarts or 0) + 1; "
+                + "if LuaBuddy then startupRequest = LuaBuddy.refresh() end end); "
+                + "Events.OnTick.Add(function() foreignTicks = (foreignTicks or 0) + 1 end)");
+        if (Boolean.getBoolean("luabuddy.verifyAgent")) LuaEventManager.triggerEvent("OnGameStart");
+        else {
+            Bootstrap.load();
+            LuaEventManager.triggerEvent("OnGameStart");
+            Bootstrap.started(true);
+        }
+        lua("assert(LuaBuddy.ready); assert(foreignStarts == 1); assert(startupRequest == false); "
+                + "savedRequire = require; savedSession = LuaBuddy.session");
+    }
+
+    private static void runtimeMod(String folder, String id, String metadata, String relative, String source) throws Exception {
+        write(folder + "/42/mod.info", "name=" + id + "\nid=" + id + "\nversionMin=42.0\n" + metadata);
+        write(folder + "/42/media/lua/" + relative, source);
+    }
+
+    private static String leafSource(int version) {
+        return "leafRuns = (leafRuns or 0) + 1; local m = {version = " + version + ", ticks = 0}; RuntimeLeaf = m; "
+                + "function m.tick() m.ticks = m.ticks + 1 end; Events.OnTick.Add(m.tick); return m";
+    }
+
+    private static void runtimeCases() throws Exception {
+        runtimeMod("runtime-library", "RuntimeLibrary", "", "shared/Runtime/Library.lua",
+                "libraryRuns = (libraryRuns or 0) + 1; "
+                + "Events.OnGameStart.Add(function() libraryStarts = (libraryStarts or 0) + 1 end); return {value = 11}");
+        write("runtime-library/42/media/lua/shared/Runtime/False.lua", "falseRuns = (falseRuns or 0) + 1; return false");
+        write("runtime-library/42/media/lua/shared/Runtime/Nil.lua", "nilRuns = (nilRuns or 0) + 1");
+        write("runtime-library/42/media/lua/client/Runtime/ClientOnly.lua", "return 'old-client'");
+        write("runtime-config/library.properties", "id=RuntimeLibrary\npath=../runtime-library\nreplay=OnGameStart\n");
+        runtimeStart("runtime-config");
+        lua("assert(libraryRuns == 1 and libraryStarts == 1); libraryObject = require('Runtime/Library'); "
+                + "assert(require('Runtime/False') == false and require('Runtime/Nil') == nil); "
+                + "assert(LuaBuddy.refresh()); assert(LuaBuddy.refresh()); assert(require == savedRequire); "
+                + "assert(require('Runtime/Library') == libraryObject); assert(libraryRuns == 1 and falseRuns == 1 and nilRuns == 1)");
+        runtimeMod("runtime-child", "RuntimeChild", "require=RuntimeLibrary\n", "client/Runtime/Child.lua",
+                "assert(require('Runtime/Library') == libraryObject); childRuns = (childRuns or 0) + 1; "
+                + "Events.OnGameStart.Add(function() assert(peerReady); childStarts = (childStarts or 0) + 1 end); return 29");
+        runtimeMod("runtime-peer", "RuntimePeer", "", "client/Runtime/Peer.lua", "peerRuns = (peerRuns or 0) + 1");
+        write("runtime-config/child.properties", "id=RuntimeChild\npath=../runtime-child\nreplay=OnGameStart\n");
+        write("runtime-config/peer.properties", "id=RuntimePeer\npath=../runtime-peer\nafter=RuntimeChild\nplugin=peer.lua\n");
+        write("runtime-config/peer.lua", "return {after = function(context) assert(context.runtime and context.operation == 'refresh'); "
+                + "local ok, reason = context.state.refresh(); assert(not ok and reason:find('already running', 1, true)); peerReady = true end}");
+        lua("assert(LuaBuddy.refresh()); assert(savedRequire('Runtime/Child') == 29); assert(childRuns == 1 and childStarts == 1); "
+                + "assert(peerRuns == 1 and foreignStarts == 1 and libraryStarts == 1); assert(LuaBuddy.session == savedSession)");
+        write("runtime-config/library.properties", "id=RuntimeLibrary\nenabled=false\n");
+        lua("assert(LuaBuddy.refresh()); assert(LuaBuddy.mods.RuntimeLibrary == 'loaded'); assert(libraryRuns == 1)");
+        Files.delete(root.resolve("runtime-config/library.properties"));
+        lua("assert(LuaBuddy.refresh()); assert(require('Runtime/Library') == libraryObject)");
+
+        runtimeMod("runtime-leaf", "RuntimeLeaf", "", "shared/Runtime/Leaf.lua", leafSource(1));
+        write("runtime-leaf/42/media/lua/server/DoNotRun.lua", "error('runtime server source executed')");
+        write("runtime-config/leaf.properties", "id=RuntimeLeaf\npath=../runtime-leaf\nmount=true\nplugin=leaf.lua\n");
+        write("runtime-config/leaf.lua", "local hookTick; return {after = function() hookTick = function() hookTicks = (hookTicks or 0) + 1 end; "
+                + "Events.OnTick.Add(hookTick) end, unload = function() if refuseCleanup then return false, 'busy' end; "
+                + "Events.OnTick.Remove(hookTick); leafUnloads = (leafUnloads or 0) + 1; RuntimeLeaf = nil; return true end}");
+        lua("assert(LuaBuddy.refresh()); oldLeaf = require('Runtime/Leaf'); assert(oldLeaf.version == 1); assert(leafRuns == 1)");
+        LuaEventManager.triggerEvent("OnTick");
+        lua("assert(oldLeaf.ticks == 1 and hookTicks == 1 and foreignTicks == 1)");
+        write("runtime-leaf/42/media/lua/shared/Runtime/Leaf.lua", leafSource(2));
+        lua("assert(LuaBuddy.reload('RuntimeLeaf')); assert(require == savedRequire); assert(require('Runtime/Leaf') == RuntimeLeaf); "
+                + "assert(RuntimeLeaf ~= oldLeaf and RuntimeLeaf.version == 2); assert(leafUnloads == 1 and leafRuns == 2)");
+        LuaEventManager.triggerEvent("OnTick");
+        lua("assert(RuntimeLeaf.ticks == 1 and oldLeaf.ticks == 1); assert(hookTicks == 2 and foreignTicks == 2); "
+                + "assert(libraryRuns == 1 and falseRuns == 1 and nilRuns == 1)");
+        JSONObject reloaded = report();
+        if (!reloaded.getString("operation").equals("reload") || !reloaded.getString("target").equals("RuntimeLeaf")
+                || !reloaded.getJSONObject("mods").getJSONObject("RuntimeLibrary").getString("status").equals("loaded")) {
+            throw new AssertionError("Runtime reports retain actual running generations and operation metadata");
+        }
+        lua("refuseCleanup = true; local old = RuntimeLeaf; local ok = LuaBuddy.reload('RuntimeLeaf'); "
+                + "assert(not ok and RuntimeLeaf == old and require('Runtime/Leaf') == old); "
+                + "assert(leafUnloads == 1 and LuaBuddy.mods.RuntimeLeaf == 'loaded'); refuseCleanup = false");
+        String unmapped = ZomboidFileSystem.instance.getString("media/ui/runtime-unpublished.png");
+        write("runtime-leaf/42/media/ui/runtime-unpublished.png", "must stay unpublished after compile rejection");
+        write("runtime-leaf/42/media/lua/shared/Runtime/Leaf.lua", "return )");
+        lua("local old = RuntimeLeaf; local ok = LuaBuddy.reload('RuntimeLeaf'); assert(not ok); "
+                + "assert(RuntimeLeaf == old and require('Runtime/Leaf') == old and old.version == 2); "
+                + "assert(leafUnloads == 1 and leafRuns == 2 and LuaBuddy.mods.RuntimeLeaf == 'loaded')");
+        if (!ZomboidFileSystem.instance.getString("media/ui/runtime-unpublished.png").equals(unmapped)) {
+            throw new AssertionError("Compile rejection must not publish candidate native mappings");
+        }
+        write("runtime-leaf/42/media/lua/shared/Runtime/Leaf.lua", leafSource(3));
+        lua("assert(LuaBuddy.reload('RuntimeLeaf')); assert(RuntimeLeaf.version == 3 and leafRuns == 3 and leafUnloads == 2); "
+                + "assert(LuaBuddy.error == nil and LuaBuddy.session == savedSession)");
+        runtimeMod("runtime-consumer", "RuntimeConsumer", "require=RuntimeLeaf\n", "client/Runtime/Consumer.lua",
+                "assert(require('Runtime/Leaf').version == 3); consumerRuns = (consumerRuns or 0) + 1");
+        write("runtime-config/consumer.properties", "id=RuntimeConsumer\npath=../runtime-consumer\n");
+        write("runtime-config/library.properties", "id=RuntimeLibrary\npath=../runtime-library\nreplay=OnGameStart\n");
+        lua("assert(LuaBuddy.refresh()); local old = RuntimeLeaf; assert(not LuaBuddy.reload('RuntimeLeaf')); "
+                + "assert(RuntimeLeaf == old and leafUnloads == 2 and consumerRuns == 1); "
+                + "assert(not LuaBuddy.reload('RuntimeLibrary')); assert(require('Runtime/Library') == libraryObject)");
+        if (Boolean.getBoolean("luabuddy.verifyAgent")) {
+            LuaEventManager.triggerEvent("OnGameStart");
+            lua("assert(startupRequest == false and LuaBuddy.ready); assert(libraryRuns == 1)");
+        }
+        Object oldRefresh = LuaManager.env.rawget("LuaBuddy") instanceof KahluaTable state ? state.rawget("refresh") : null;
+        LuaClosure foreignProbe = LuaCompiler.loadstring("return LuaBuddy.refresh()", "runtime-thread", LuaManager.env);
+        java.util.concurrent.atomic.AtomicReference<Object[]> result = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread wrongThread = new Thread(() -> result.set(LuaManager.caller.pcall(LuaManager.thread, foreignProbe, new Object[]{})));
+        wrongThread.setDaemon(true);
+        wrongThread.start();
+        wrongThread.join(5000);
+        if (wrongThread.isAlive() || result.get() == null || !Boolean.TRUE.equals(result.get()[0])
+                || !Boolean.FALSE.equals(result.get()[1]) || !String.valueOf(result.get()[2]).contains("game thread")) {
+            throw new AssertionError("Foreign-thread API requests must refuse before mutation");
+        }
+        runtimeStart("runtime-empty");
+        LuaManager.env.rawset("oldRefresh", oldRefresh);
+        lua("assert(not oldRefresh()); assert(require == savedRequire); assert(LuaBuddy.refresh())");
+        if (zombie.gameStates.ChooseGameInfo.getModDetails("RuntimeInstalledLater") != null) throw new AssertionError("New mod fixture already exists");
+        runtimeMod("cache/mods/RuntimeInstalledLater", "RuntimeInstalledLater", "", "client/Runtime/InstalledLater.lua", "installedLater = true");
+        write("runtime-empty/new.properties", "id=RuntimeInstalledLater\n");
+        lua("assert(LuaBuddy.refresh()); assert(installedLater and LuaBuddy.mods.RuntimeInstalledLater == 'loaded')");
+
+        runtimeRejectionCases();
+        System.out.println("PASS: runtime append/no-op identity, runtime-only scoped startup, cooperative reload/callback cleanup, preflight preservation, native discovery refresh, owner/session/startup guards, running selection and diagnostics");
+    }
+
+    private static void runtimeRejectionCases() throws Exception {
+        for (String rule : List.of("before", "reverse", "path", "alias")) {
+            String directory = "runtime-reject-" + rule;
+            write(directory + "/library.properties", "id=RuntimeLibrary\npath=../runtime-library\n" + (rule.equals("reverse") ? "after=RuntimeBlocked\n" : ""));
+            runtimeStart(directory);
+            String source = rule.equals("path") ? "shared/Runtime/Library.lua" : rule.equals("alias") ? "shared/Runtime/ClientOnly.lua" : "client/Runtime/Blocked.lua";
+            runtimeMod("runtime-blocked", "RuntimeBlocked", "", source, "blockedRuntimeExecuted = true");
+            write(directory + "/new.properties", "id=RuntimeBlocked\npath=../runtime-blocked\n" + (rule.equals("before") ? "before=RuntimeLibrary\n" : ""));
+            lua("assert(not LuaBuddy.refresh()); assert(blockedRuntimeExecuted == nil); assert(libraryRuns == 1); "
+                    + "assert(LuaBuddy.mods.RuntimeLibrary == 'loaded'); assert(LuaBuddy.mods.RuntimeBlocked:find('failed:', 1, true) == 1)");
+            Files.delete(root.resolve("runtime-blocked/42/media/lua/" + source));
+        }
+
+        for (String cleanup : List.of("throw", "nil", "activation")) {
+            String directory = "runtime-cleanup-" + cleanup;
+            write("runtime-leaf/42/media/lua/shared/Runtime/Leaf.lua", leafSource(1));
+            write(directory + "/leaf.properties", "id=RuntimeLeaf\npath=../runtime-leaf\nplugin=leaf.lua\n");
+            String behavior = cleanup.equals("throw") ? "error('cleanup failed')" : cleanup.equals("nil") ? "return nil" : "return true";
+            write(directory + "/leaf.lua", "return {unload = function(context) assert(context.runtime == false and context.operation == 'startup'); "
+                    + "cleanupCalls = (cleanupCalls or 0) + 1; " + behavior + " end}");
+            runtimeStart(directory);
+            if (cleanup.equals("activation")) write("runtime-leaf/42/media/lua/shared/Runtime/Leaf.lua", "leafRuns = leafRuns + 1; error('activation failed')");
+            lua("assert(not LuaBuddy.reload('RuntimeLeaf')); assert(cleanupCalls == 1); "
+                    + "assert(LuaBuddy.mods.RuntimeLeaf:find('failed:', 1, true) == 1); assert(not pcall(require, 'Runtime/Leaf')); "
+                    + "local count = leafRuns; assert(not LuaBuddy.reload('RuntimeLeaf')); LuaBuddy.refresh(); "
+                    + "assert(leafRuns == count and cleanupCalls == 1)");
+        }
+
+        runtimeStart("runtime-init-failure");
+        runtimeMod("runtime-init-base", "RuntimeInitBase", "", "client/Runtime/InitBase.lua",
+                "initBaseRuns = (initBaseRuns or 0) + 1; Events.OnGameStart.Add(function() error('runtime startup failed') end)");
+        runtimeMod("runtime-init-dependent", "RuntimeInitDependent", "require=RuntimeInitBase\n", "client/Runtime/InitDependent.lua", "initDependentRuns = (initDependentRuns or 0) + 1");
+        runtimeMod("runtime-init-unrelated", "RuntimeInitUnrelated", "", "client/Runtime/InitUnrelated.lua", "initUnrelatedRuns = (initUnrelatedRuns or 0) + 1");
+        write("runtime-init-failure/a.properties", "id=RuntimeInitBase\npath=../runtime-init-base\nreplay=OnGameStart\n");
+        write("runtime-init-failure/b.properties", "id=RuntimeInitDependent\npath=../runtime-init-dependent\n");
+        write("runtime-init-failure/z.properties", "id=RuntimeInitUnrelated\npath=../runtime-init-unrelated\n");
+        lua("assert(not LuaBuddy.refresh()); assert(LuaBuddy.mods.RuntimeInitBase:find('failed:', 1, true) == 1); "
+                + "assert(LuaBuddy.mods.RuntimeInitDependent:find('failed:', 1, true) == 1); "
+                + "assert(LuaBuddy.mods.RuntimeInitUnrelated == 'loaded'); "
+                + "assert(initBaseRuns == 1 and initDependentRuns == 1 and initUnrelatedRuns == 1); "
+                + "assert(not LuaBuddy.refresh()); assert(initBaseRuns == 1 and initDependentRuns == 1)");
+        System.out.println("PASS: runtime ordering/path/alias refusal, cleanup uncertainty/activation quarantine, dependency startup-failure propagation and unrelated continuation");
     }
 
     private static void diagnosticCases() throws Exception {

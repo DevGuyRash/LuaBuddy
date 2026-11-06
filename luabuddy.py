@@ -626,7 +626,7 @@ def read_report(cache: Path) -> dict:
     require(type(duration) in (int, float) and duration >= 0 and (type(duration) is int or math.isfinite(duration)), "durationMs")
     require(type(report.get("debug")) is bool, "debug")
     result.update(durationMs=duration, debug=report["debug"])
-    for field in ("error", "traceback", "zombieBuddyVersion"):
+    for field in ("error", "traceback", "zombieBuddyVersion", "operation", "target"):
         if field in report:
             require(isinstance(report[field], str), field)
             result[field] = report[field]
@@ -644,7 +644,7 @@ def read_report(cache: Path) -> dict:
         require(record.get("status") in ("loaded", "server-loaded", "disabled", "failed", "prepared"), "mods.status")
         require(isinstance(record.get("stage"), str), "mods.stage")
         entry = {"status": record["status"], "stage": record["stage"]}
-        for field in ("profile", "commonRoot", "versionRoot", "requires", "preload", "plugin", "source", "error", "traceback", "javaTraceback"):
+        for field in ("profile", "commonRoot", "versionRoot", "requires", "preload", "replay", "plugin", "source", "error", "traceback", "javaTraceback"):
             if field in record:
                 require(isinstance(record[field], str), "mods." + field)
                 entry[field] = record[field]
@@ -671,6 +671,8 @@ def diagnostics(cache: Path, as_json: bool) -> int:
     else:
         print(f"Last loader initialization: {state}")
         print(f"Session: {report['session']}")
+        if "operation" in report:
+            print(f"Operation: {report['operation']}" + (f"; target: {report['target']}" if "target" in report else ""))
         print(f"Started: {report['startedAt']}; completed: {report['completedAt']}; duration: {report['durationMs']} ms")
         if "zombieBuddyVersion" in report:
             print(f"ZombieBuddy at initialization: {report['zombieBuddyVersion']}")
