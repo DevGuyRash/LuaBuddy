@@ -216,6 +216,44 @@ class CliCheck(unittest.TestCase):
         self.run_cli("install", "--mod", ids[0])
         self.assertEqual(len(list((self.root / "config").glob("*.properties"))), len(ids))
 
+    def test_padded_mod_ids_normalize_before_selection_and_deduplication(self):
+        self.run_cli("install", "--mod", " Example ", "--mod", "Example",
+                     "--mod", " AllInfo ", "--mod", "AllInfo")
+        config = self.root / "config"
+        self.assertEqual({path.name for path in config.glob("*.properties")},
+                         {"Example.properties", "AllInfo.properties"})
+        self.assertEqual((config / "Example.properties").read_text(), "id=Example\n")
+        self.assertEqual((config / "AllInfo.lua").read_bytes(),
+                         (REPO / "profiles/AllInfo.lua").read_bytes())
+        (config / "Example.properties").write_text("id=Example\nenabled=false\n")
+        before = self.snapshot()
+        self.run_cli("install", "--mod", "  Example  ", "--mod", " AllInfo ")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_padded_mod_id_cannot_duplicate_renamed_existing_profile(self):
+        config = self.root / "config"
+        config.mkdir()
+        (config / "Renamed.properties").write_text("id=Example\nenabled=false\n")
+        before = self.snapshot()
+        result = self.run_cli("install", "--mod", " Example ", success=False)
+        self.assertIn("already appears under another profile filename", result.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_mod_id_normalization_preserves_internal_and_unicode_spaces(self):
+        ids = ["Mod with spaces", "\u00a0Example\u00a0", "\u2003Example\u2003"]
+        directory = self.root / "profile-test"
+        files = CLI.profile_files(ids + [" " + value + " " for value in ids], directory)
+        self.assertEqual(len(files), len(ids))
+        self.assertEqual(set(files.values()),
+                         {("id=" + value.replace(" ", "\\ ") + "\n").encode("utf-8") for value in ids})
+
+    def test_padded_invalid_mod_ids_fail_without_writes(self):
+        for mod_id in ("   ", "\tExample ", " Example\n", "Example\x7f"):
+            with self.subTest(mod_id=mod_id):
+                before = self.snapshot()
+                self.run_cli("install", "--mod", "Valid", "--mod", mod_id, success=False)
+                self.assertEqual(self.snapshot(), before)
+
     def test_debug_toggle_preservation_idempotence_and_removal(self):
         self.original["vmArgs"].append(CLI.DEBUG_PROPERTY + "ger=unrelated")
         self.save(self.original)
