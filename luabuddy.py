@@ -273,7 +273,7 @@ def select_dependency(offline: bool = False, force: bool = False) -> Dependency:
             data = cached_release(release)
         except (OSError, ValueError):
             data = zombiebuddy.download_release(release)
-        verify_dependency(release, data)
+            verify_dependency(release, data)
     except zombiebuddy.ZombieBuddyNetworkError as error:
         if force or cached is None:
             raise
@@ -562,8 +562,7 @@ def configure(game: Path, launcher: Path, directory: Path, ids: list[str], remov
         if not backup.exists():
             pending[backup] = original
         config["vmArgs"] = updated
-    if changed:
-        pending[launcher] = (json.dumps(config, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        pending[launcher] = json_bytes(config)
     if not remove:
         directory.mkdir(parents=True, exist_ok=True)
     apply_files(pending)
