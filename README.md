@@ -102,6 +102,7 @@ python3 luabuddy.py install --mod AllInfo --mod AutoAll
 | [Easy Drop'n'Loot](https://steamcommunity.com/sharedfiles/filedetails/?id=2871469707) | `KADropnLoot` | Restore its saved settings; wrap NeatUI Inventory when selected so upstream inventory buttons and category-transfer menus remain available. |
 | [Area Tasks](https://steamcommunity.com/sharedfiles/filedetails/?id=3793163745) | `AreaTasks` | Uses upstream initialization, native tasks, and multiplayer sandbox-value fallbacks without a custom hook. |
 | [Loot Tracker](https://steamcommunity.com/sharedfiles/filedetails/?id=3823828778) | `LootTrackerB42` | Mount map icons, restore saved preferences, and use upstream map tracking, local multiplayer saves, and the vanilla respawn-wave countdown. |
+| [True Line of Sight](https://steamcommunity.com/sharedfiles/filedetails/?id=3792740760) | `TrueLineOfSight` | Mount its fallback outline image and restore saved preferences; use upstream player and render callbacks without startup replay. |
 | [NeatUI Framework](https://steamcommunity.com/sharedfiles/filedetails/?id=3508537032) | `NeatUI_Framework` | Optional dependency profile for NeatUI Inventory; mount the framework's UI images. |
 
 For NeatUI Inventory, subscribe to both Workshop items and select both profiles unless the server already loads the framework:
