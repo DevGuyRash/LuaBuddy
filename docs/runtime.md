@@ -23,7 +23,7 @@ replay=OnGameStart
 
 During normal initial restoration, the real event runs once. During runtime loading, only callbacks from that mod's restored upstream source files run, after the entire new batch's client scripts and `after` hooks. No global startup event is triggered. Other events, arguments and earlier game state are not reconstructed. Profile-hook and shared-helper registrations are outside this automatic ownership set; initialize those explicitly in hooks and clean up their exact registrations when needed.
 
-The bundled Loot Tracker profile requests this runtime initialization. A previously installed profile needs the additive `replay=OnGameStart` opt-in before loading Loot Tracker mid-session. Add it only after starting a runtime-capable loader; older loaded helpers reject that new replay value. An already-loaded Loot Tracker is skipped by refresh.
+The bundled Loot Tracker and Nutrition Helper profiles request this runtime initialization. A previously installed profile needs the additive `replay=OnGameStart` opt-in before loading Loot Tracker mid-session. Add it only after starting a runtime-capable loader; older loaded helpers reject that new replay value. An already-loaded Loot Tracker is skipped by refresh.
 
 ## Reload a cooperating profile
 

@@ -103,6 +103,8 @@ python3 luabuddy.py install --mod AllInfo --mod AutoAll
 | [Area Tasks](https://steamcommunity.com/sharedfiles/filedetails/?id=3793163745) | `AreaTasks` | Uses upstream initialization, native tasks, and multiplayer sandbox-value fallbacks without a custom hook. |
 | [Loot Tracker](https://steamcommunity.com/sharedfiles/filedetails/?id=3823828778) | `LootTrackerB42` | Mount map icons, restore saved preferences, and use upstream map tracking, local multiplayer saves, and the vanilla respawn-wave countdown. |
 | [True Line of Sight](https://steamcommunity.com/sharedfiles/filedetails/?id=3792740760) | `TrueLineOfSight` | Mount its fallback outline image and restore saved preferences; use upstream player and render callbacks without startup replay. |
+| [Batch Craft Recipe](https://steamcommunity.com/sharedfiles/filedetails/?id=3584890848) | `vac_mod_b42_10` | Use upstream right-click batch modes, native crafting actions, and craft-recipe tag changes without a custom hook. |
+| [Nutrition Helper UI](https://steamcommunity.com/sharedfiles/filedetails/?id=3803702351) | `NutritionHelper` | Restore saved preferences and attach the Health-tab button; load before AllTheInfo when both are selected so both food-tooltip renderers remain available. |
 | [NeatUI Framework](https://steamcommunity.com/sharedfiles/filedetails/?id=3508537032) | `NeatUI_Framework` | Optional dependency profile for NeatUI Inventory; mount the framework's UI images. |
 
 For NeatUI Inventory, subscribe to both Workshop items and select both profiles unless the server already loads the framework:
@@ -116,6 +118,8 @@ On Windows, use `py -3` in these examples. Existing selections remain when addin
 Auto Fishing reads `SandboxVars.AutoFishing` when the world supplies it and otherwise uses its upstream defaults. Late client loading does not register its sandbox-options page or change the server's sandbox settings. Its custom seated bait-changing animation also requires normal animation-set loading; file mounting alone does not register that animation node. ReloadAllAmmo uses the game's ordinary magazine load/unload actions; Gunworks remains an optional upstream integration.
 
 Loot Tracker uses the server's sandbox settings and synchronized world time for its vanilla respawn-wave countdown. The countdown does not guarantee a particular container refills: server eligibility rules still apply, and the mod infers restocks from item counts in loaded containers. Custom server respawn schedules require support from that server's mod. Loot Tracker's own sandbox options use upstream defaults when absent.
+
+Batch Craft Recipe also adds `InHandCraft` and removes `AnySurfaceCraft` on client craft recipes. The profile retains those upstream changes; they do not supply missing server-side recipe changes. Nutrition Helper must precede AllTheInfo, so adding it when AllTheInfo is already running requires reconnecting. Its missing sandbox values use upstream defaults, and late loading does not register a server sandbox-options page.
 
 The installer rejects filename collisions before writing, including names that differ only by case on Windows. When using `--mod`, existing profiles must have one unindented `id=` entry with plain text, escaped spaces, or escaped backslashes. The runtime accepts Java properties syntax, but the installer refuses advanced or ambiguous identity syntax instead of guessing. Manage those profiles manually or use the conventional `id=` form.
 
