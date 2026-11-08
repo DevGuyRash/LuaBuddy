@@ -184,8 +184,66 @@ public final class EngineCheck {
         lua("assert(LuaBuddy.mods.CycleA:find('Cyclic mod order',1,true)); assert(LuaBuddy.mods.CycleB:find('Cyclic mod order',1,true)); assert(LuaBuddy.error == nil)");
         System.out.println("PASS: missing required profiles and cyclic mod order fail before executing mod sources");
         optionalInitializationCases();
+        quickBuildFavoriteCases(repo);
         runtimeCases();
         diagnosticCases();
+    }
+
+    private static void quickBuildFavoriteCases(Path repo) throws Exception {
+        var keep = new zombie.scripting.entity.components.crafting.CraftRecipe();
+        keep.Load("LuaBuddyFavoriteKeep", "craftRecipe LuaBuddyFavoriteKeep { }");
+        var changed = new zombie.scripting.entity.components.crafting.CraftRecipe();
+        changed.Load("LuaBuddyFavoriteChanged", "craftRecipe LuaBuddyFavoriteChanged { }");
+        var recipes = new java.util.ArrayList<>(List.of(keep, changed));
+        for (String scenario : List.of("removed", "unchanged", "empty", "runtime")) {
+            fresh();
+            LuaEventManager.register(LuaManager.platform, LuaManager.env);
+            var startup = LuaEventManager.AddEvent("OnGameStart");
+            var tick = LuaEventManager.AddEvent("OnTick");
+            for (var event : List.of(startup, tick)) {
+                event.callbacks.clear();
+                event.register(LuaManager.platform, (KahluaTable) LuaManager.env.rawget("Events"));
+            }
+            LuaManager.env.rawset("favoriteRecipes", recipes);
+            lua("ScriptManager = {instance = {getAllCraftRecipes = function() return favoriteRecipes end}}; "
+                    + "local key = BaseCraftingLogic.getFavouriteModDataString; "
+                    + "keepKey = key('LuaBuddyFavoriteKeep'); changedKey = key('LuaBuddyFavoriteChanged'); "
+                    + "orphanKey = key('LuaBuddyRemovedRecipe'); "
+                    + "favoriteData = {[keepKey] = " + !scenario.equals("empty") + ", [changedKey] = " + !scenario.equals("empty") + ", [orphanKey] = true, foreign = 'old'}; "
+                    + "settingsLoads = 0; transmissions = 0; foreignTicks = 0; "
+                    + "PZAPI = {ModOptions = {load = function() settingsLoads = settingsLoads + 1 end}}; "
+                    + "getPlayer = function() return {getModData = function() return favoriteData end, "
+                    + "transmitModData = function() transmissions = transmissions + 1 end} end; "
+                    + "Events.OnTick.Add(function() foreignTicks = foreignTicks + 1 end); "
+                    + "Events.OnGameStart.Add(function() "
+                    + "local function cleanup() "
+                    + (scenario.equals("removed") ? "favoriteData[keepKey] = nil; " : "")
+                    + "favoriteData[changedKey] = false; favoriteData[orphanKey] = nil; favoriteData.foreign = 'new'; "
+                    + "Events.OnTick.Remove(cleanup) end; Events.OnTick.Add(cleanup) end)");
+            var source = repo.resolve("profiles/QuickBuildMenu.lua");
+            var chunk = LuaCompiler.loadstring(Files.readString(source), source.toString(), LuaManager.env);
+            Object[] result = LuaManager.caller.pcall(LuaManager.thread, chunk, new Object[]{});
+            if (!Boolean.TRUE.equals(result[0])) throw new AssertionError(result[1]);
+            LuaManager.env.rawset("quickBuildHook", result[1]);
+            lua("quickBuildHook.after({runtime = " + scenario.equals("runtime") + "}); assert(settingsLoads == 1)");
+            if (scenario.equals("runtime")) {
+                if (startup.callbacks.size() != 1 || tick.callbacks.size() != 1) {
+                    throw new AssertionError("Runtime options restore must not register startup protection");
+                }
+                lua("assert(transmissions == 0 and favoriteData[keepKey] == true)");
+                continue;
+            }
+            startup.trigger(LuaManager.env, LuaManager.caller, new Object[]{});
+            tick.trigger(LuaManager.env, LuaManager.caller, new Object[]{});
+            lua("assert(favoriteData[keepKey] == " + !scenario.equals("empty") + ", 'Valid favorite: " + scenario + "'); "
+                    + "assert(favoriteData[changedKey] == false and favoriteData[orphanKey] == nil); "
+                    + "assert(favoriteData.foreign == 'new' and foreignTicks == 1); "
+                    + "assert(transmissions == " + (scenario.equals("removed") ? 1 : 0) + ")");
+            if (tick.callbacks.size() != 1) throw new AssertionError("Temporary favorite callbacks must drain");
+            tick.trigger(LuaManager.env, LuaManager.caller, new Object[]{});
+            lua("assert(foreignTicks == 2); assert(transmissions == " + (scenario.equals("removed") ? 1 : 0) + ")");
+        }
+        System.out.println("PASS: Quick Build native favorite keys, startup ordering/self-removal, false/orphan isolation, no-change sends, runtime callback isolation");
     }
 
     private static void optionalInitializationCases() throws Exception {
