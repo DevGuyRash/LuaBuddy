@@ -185,6 +185,7 @@ public final class EngineCheck {
         System.out.println("PASS: missing required profiles and cyclic mod order fail before executing mod sources");
         optionalInitializationCases();
         quickBuildFavoriteCases(repo);
+        neatInventoryResizeCases(repo);
         runtimeCases();
         diagnosticCases();
     }
@@ -244,6 +245,49 @@ public final class EngineCheck {
             lua("assert(foreignTicks == 2); assert(transmissions == " + (scenario.equals("removed") ? 1 : 0) + ")");
         }
         System.out.println("PASS: Quick Build native favorite keys, startup ordering/self-removal, false/orphan isolation, no-change sends, runtime callback isolation");
+    }
+
+    private static void neatInventoryResizeCases(Path repo) throws Exception {
+        fresh();
+        LuaManager.env.rawset("newNativeUI", (se.krka.kahlua.vm.JavaFunction) (frame, count) ->
+                frame.push(new zombie.ui.UIElement()));
+        lua("settingsLoads = 0; builds = 0; NeatInventory = {enabled = true}; "
+                + "PZAPI = {ModOptions = {load = function() settingsLoads = settingsLoads + 1 end}}; "
+                + "function page(width, height, pinned) "
+                + "local root = newNativeUI(); root:setWidth(455); root:setHeight(300); root:onResize(); "
+                + "root:setWidth(width); root:setHeight(height); "
+                + "return {root = root, pin = pinned, clearChildren = function(self) self.root:ClearChildren() end, "
+                + "recalcSize = function(self) self.root:onResize() end, "
+                + "setPinned = function(self) self.pin = true end, "
+                + "createChildren = function(self) builds = builds + 1; self.pin = false; self.ninvSearch = {}; "
+                + "local pin = newNativeUI(); pin:setWidth(16); pin:setHeight(16); "
+                + "pin:setAnchorLeft(false); pin:setAnchorRight(true); pin:setX(self.root:getWidth() - 17); "
+                + "self.root:AddChild(pin); self.pinButton = pin; "
+                + "local grip = newNativeUI(); grip:setWidth(12); grip:setHeight(12); "
+                + "grip:setAnchorLeft(false); grip:setAnchorRight(true); grip:setAnchorTop(false); grip:setAnchorBottom(true); "
+                + "grip:setX(self.root:getWidth() - 12); grip:setY(self.root:getHeight() - 12); "
+                + "self.root:AddChild(grip); self.resizeWidget = grip end} end; "
+                + "inventoryPage = page(460, 300, true); lootPage = page(620, 420, false); "
+                + "getNumActivePlayers = function() return 1 end; "
+                + "getPlayerInventory = function() return inventoryPage end; getPlayerLoot = function() return lootPage end");
+        var source = repo.resolve("profiles/NeatUI_Inventory.lua");
+        var chunk = LuaCompiler.loadstring(Files.readString(source), source.toString(), LuaManager.env);
+        Object[] result = LuaManager.caller.pcall(LuaManager.thread, chunk, new Object[]{});
+        if (!Boolean.TRUE.equals(result[0])) throw new AssertionError(result[1]);
+        LuaManager.env.rawset("neatHook", result[1]);
+        lua("neatHook.after(); inventoryPage.root:onResize(); lootPage.root:onResize(); "
+                + "assert(builds == 2 and settingsLoads == 1); "
+                + "assert(inventoryPage.pin == true and lootPage.pin == false, 'Saved pin state changed'); "
+                + "assert(inventoryPage.root:getWidth() == 460 and inventoryPage.root:getHeight() == 300); "
+                + "assert(inventoryPage.pinButton:getX() == 443 and inventoryPage.resizeWidget:getX() == 448); "
+                + "assert(inventoryPage.resizeWidget:getY() == 288); "
+                + "assert(lootPage.root:getWidth() == 620 and lootPage.root:getHeight() == 420); "
+                + "assert(lootPage.pinButton:getX() == 603, 'Loot pin moved beyond saved window'); "
+                + "assert(lootPage.resizeWidget:getX() == 608 and lootPage.resizeWidget:getY() == 408, 'Loot grip moved beyond saved window'); "
+                + "inventoryPage.pin = false; neatHook.after(); assert(builds == 2 and inventoryPage.pin == false); "
+                + "NeatInventory.enabled = false; inventoryPage.ninvSearch = nil; lootPage.ninvSearch = nil; "
+                + "neatHook.after(); assert(builds == 2 and settingsLoads == 3)");
+        System.out.println("PASS: NeatUI native deferred resize/anchors, saved geometry and pin state, existing/disabled page preservation");
     }
 
     private static void optionalInitializationCases() throws Exception {
