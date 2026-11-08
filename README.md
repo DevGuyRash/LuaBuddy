@@ -105,6 +105,7 @@ python3 luabuddy.py install --mod AllInfo --mod AutoAll
 | [True Line of Sight](https://steamcommunity.com/sharedfiles/filedetails/?id=3792740760) | `TrueLineOfSight` | Mount its fallback outline image and restore saved preferences; use upstream player and render callbacks without startup replay. |
 | [Batch Craft Recipe](https://steamcommunity.com/sharedfiles/filedetails/?id=3584890848) | `vac_mod_b42_10` | Use upstream right-click batch modes, native crafting actions, and craft-recipe tag changes without a custom hook. |
 | [Nutrition Helper UI](https://steamcommunity.com/sharedfiles/filedetails/?id=3803702351) | `NutritionHelper` | Restore saved preferences and attach the Health-tab button; load before AllTheInfo when both are selected so both food-tooltip renderers remain available. |
+| [Quick Build Menu](https://steamcommunity.com/sharedfiles/filedetails/?id=3741839491) | `QuickBuildMenu` | Preload the native build action, restore saved options, and preserve handcraft favorites during upstream startup cleanup. |
 | [NeatUI Framework](https://steamcommunity.com/sharedfiles/filedetails/?id=3508537032) | `NeatUI_Framework` | Optional dependency profile for NeatUI Inventory; mount the framework's UI images. |
 
 For NeatUI Inventory, subscribe to both Workshop items and select both profiles unless the server already loads the framework:
@@ -120,6 +121,8 @@ Auto Fishing reads `SandboxVars.AutoFishing` when the world supplies it and othe
 Loot Tracker uses the server's sandbox settings and synchronized world time for its vanilla respawn-wave countdown. The countdown does not guarantee a particular container refills: server eligibility rules still apply, and the mod infers restocks from item counts in loaded containers. Custom server respawn schedules require support from that server's mod. Loot Tracker's own sandbox options use upstream defaults when absent.
 
 Batch Craft Recipe also adds `InHandCraft` and removes `AnySurfaceCraft` on client craft recipes. The profile retains those upstream changes; they do not supply missing server-side recipe changes. Nutrition Helper must precede AllTheInfo, so adding it when AllTheInfo is already running requires reconnecting. Its missing sandbox values use upstream defaults, and late loading does not register a server sandbox-options page.
+
+Quick Build Menu currently declares support for game versions 42.20 through 42.21.99. Its startup cleanup uses the shared recipe-favorites namespace with a build-only allowlist. When LuaBuddy restores the mod, its profile preserves valid handcraft favorites while retaining that cleanup. Adding the profile during play does not replay the startup cleanup. Server-loaded copies are skipped by LuaBuddy and retain upstream startup behavior.
 
 The installer rejects filename collisions before writing, including names that differ only by case on Windows. When using `--mod`, existing profiles must have one unindented `id=` entry with plain text, escaped spaces, or escaped backslashes. The runtime accepts Java properties syntax, but the installer refuses advanced or ambiguous identity syntax instead of guessing. Manage those profiles manually or use the conventional `id=` form.
 
