@@ -93,7 +93,7 @@ python3 luabuddy.py install --mod AllInfo --mod AutoAll
 | [LootSense: Storage](https://steamcommunity.com/sharedfiles/filedetails/?id=3733326180) | `LootSenseStorage` | Restore its display settings. |
 | [LootSense: QuickStack](https://steamcommunity.com/sharedfiles/filedetails/?id=3733862305) | `LootSenseQuickStack` | Restore settings; load after Storage when both are selected. Storage is optional. |
 | [Craft Planner](https://steamcommunity.com/sharedfiles/filedetails/?id=3808092704) | `CraftPlanner` | Mount UI images, run its missed Neat Crafting initialization, restore settings and an already tracked window. |
-| [NeatUI Inventory](https://steamcommunity.com/sharedfiles/filedetails/?id=3820447422) | `NeatUI_Inventory` | Requires `NeatUI_Framework`; mount images, rebuild existing inventory-page children through upstream code, and load before the bundled inventory/tooltip wrappers. |
+| [NeatUI Inventory](https://steamcommunity.com/sharedfiles/filedetails/?id=3820447422) | `NeatUI_Inventory` | Requires `NeatUI_Framework`; mount images, rebuild existing inventory-page children through upstream code while preserving saved geometry and pin state, and load before the bundled inventory/tooltip wrappers. |
 | [Better Context Menu Icons](https://steamcommunity.com/sharedfiles/filedetails/?id=3830018449) | `SuperOl3gContextMenuIcons` | Mount images and register after Auto All and Alarm Syndrome when selected. |
 | [What It Does](https://steamcommunity.com/sharedfiles/filedetails/?id=3823732502) | `WhatItDoes` | Uses upstream client Lua without a custom hook. |
 | [Alarm Syndrome](https://steamcommunity.com/sharedfiles/filedetails/?id=3409527910) | `P4AlarmSyndrome` | Mount alarm icons, run its missed `OnLoad` initialization, and restore settings. |
