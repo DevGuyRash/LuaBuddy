@@ -74,8 +74,8 @@ local function contains(values, value)
     return false
 end
 
-local function replay(mod, event)
-    for _, callback in ipairs(state.callbacks(event, mod.sourceFiles)) do
+local function replay(mod, event, callbacks)
+    for _, callback in ipairs(callbacks or state.callbacks(event, mod.sourceFiles)) do
         stage(mod, "replay-" .. event, getFilenameOfClosure(callback))
         callback()
     end
@@ -125,6 +125,10 @@ state.execute = function(mods, available, operation)
             end
             table.sort(mod.entries, function(a, b) return a.name:lower() < b.name:lower() end)
             mod.pluginChunk = plugin
+            for id in pairs(running) do
+                assert(not contains(mod.before, id), (runtime and "Runtime" or "Startup") .. " order requires "
+                    .. mod.id .. " before " .. id .. "; already loaded; reconnect with a compatible selection")
+            end
             if runtime then
                 local old = replacing and byId[mod.id] or nil
                 if replacing then
@@ -132,9 +136,6 @@ state.execute = function(mods, available, operation)
                     assert(type(old.hooks.unload) == "function", "Profile has no unload hook; reconnect to reload " .. mod.id)
                     assert(ZombieBuddy and ZombieBuddy.Events and ZombieBuddy.Events.getByFile,
                         "ZombieBuddy callback ownership API is unavailable")
-                end
-                for id in pairs(running) do
-                    assert(not contains(mod.before, id), "Runtime order requires " .. mod.id .. " before " .. id .. "; reconnect")
                 end
                 for id, existing in pairs(byId) do
                     if existing ~= old and running[id] then
@@ -281,7 +282,7 @@ state.execute = function(mods, available, operation)
                             assert(running[id] or state.mods[id] == "loaded", "Required mod did not load: " .. id)
                         end
                         for _, name in ipairs(mod.replay or {}) do
-                            if name ~= "OnGameStart" then replay(mod, name) end
+                            if name == "OnGameBoot" then replay(mod, name) end
                         end
                         stage(mod, "after", mod.pluginFilename)
                         if mod.hooks.after then mod.hooks.after(mod.context) end
@@ -296,12 +297,35 @@ state.execute = function(mods, available, operation)
             end
         end
     end
+    if runtime then
+        for _, event in ipairs({"OnGameStart", "OnLoad"}) do
+            local files, owners, requested = {}, {}, false
+            for _, mod in ipairs(mods) do
+                if not mod.failed and contains(mod.replay, event) then
+                    requested = true
+                    for filename in pairs(mod.sourceFiles) do
+                        files[filename], owners[filename] = true, mod
+                    end
+                end
+            end
+            for _, callback in ipairs(requested and state.callbacks(event, files) or {}) do
+                local mod = owners[getFilenameOfClosure(callback)]
+                if not mod.failed then
+                    local ok, err, trace, cause = pcall(function()
+                        if not contains(state.callbacks(event, mod.sourceFiles), callback) then return end
+                        checkDependencies(mod)
+                        replay(mod, event, {callback})
+                    end)
+                    if not ok then fail(mod, err, trace, cause) end
+                end
+            end
+        end
+    end
     local loaded, failed = 0, 0
     for _, mod in ipairs(mods) do
         if runtime and not mod.failed then
             local ok, err, trace, cause = pcall(function()
                 checkDependencies(mod)
-                if contains(mod.replay, "OnGameStart") then replay(mod, "OnGameStart") end
                 stage(mod, "complete")
             end)
             if not ok then fail(mod, err, trace, cause) end

@@ -115,3 +115,52 @@ The original late rebuild recreated anchored controls while the native page stil
 The profile now calls native `recalcSize()` after clearing old children and before upstream recreation, then restores a previously pinned page with native `setPinned()`. No core, upstream, event, ordering, or rendering code changed. The complete production correction was built before new regression tests. The full offline runner passes 74 portable tests, the instrumented 42.21.0 / Java 25 / ZombieBuddy 2.3.4 native gate, and extra Lua checks. The regression executes the actual profile using real native `UIElement` parents, anchored children, and deferred resize, with explicit page/player/options boundaries. It checks hand-calculated final control bounds, preserved dimensions, true and false pin states, and already-built/disabled guards.
 
 An isolated ordinary-role Linux client reproduced the original displacement and pin reset using saved layouts. With the corrected profile, actual corner drags resized both windows, loot unpin/re-pin worked, and its gear opened settings and saved a changed scrolling option. Reconnecting retained geometry, mixed pin states, and the saved setting. A combination with NeatUI Framework, AutoAll, AllInfo, Easy Drop'n'Loot, LootSense Storage, and the observer loaded seven profiles without failure. Loot resize, pinning, settings, and no-op refresh remained functional. Evidence and fixture corrections stay outside Git under `~/.local/state/app-verification/LuaBuddy/2026-11-08-neatui-controls/` on the verification machine. No user game was controlled or restarted. Windows gameplay and every optional combination remain unverified.
+
+## Early UI restoration and additional UI profiles on November 8, 2026
+
+Native `GameLoadingState` calls `UIManager.init()`, which fires `OnCreateUI`, then fires `OnCreatePlayer(index, player)`. The native player callback constructs inventory, mechanics and dashboard windows and restores saved layouts. `OnGameStart` follows later. The new `install --early-ui` option uses the existing ZombieBuddy event patch to restore the selected batch before UI/player construction. The default timing and `OnGameStart` fallback remain available. Runtime operations still wait for the real game-start callbacks to finish.
+
+The complete implementation was built before adding tests. The offline runner passes 75 portable tests, the instrumented 42.21.0 / Java 25 / ZombieBuddy 2.3.4 native gate, and extra Lua checks. Native event cases cover opt-in constructor/player ordering, default and explicitly disabled timing, fallback without `OnCreateUI`, startup refusal of runtime requests, and once-per-environment loading. Public installer checks cover the opt-in, preservation on reinstall, removal, and fresh configurations selecting no mods. Each new bundled profile installs independently while preserving existing files.
+
+An ordinary-role isolated client tested NeatUI Mechanics with its required framework, Better Crafting alone, Retro Dashboard alone, and all 24 bundled profiles together with one observer. The combined session loaded 25 profiles without initialization failures against an unmodified loopback server with empty mod lists and Lua checksum enforcement. NeatUI Mechanics retained saved geometry/preferences, exposed car-tab pinning, search, settings, resize and Best Parts, and displayed Auto All's Train Mechanics entry. Better Crafting displayed collapsible categories, Best XP Gain sorting and cursor XP tooltips. A real star click saved a favorite, and a separate real recipe absent before reconnect imported through native `OnCreatePlayer` and appeared in Favorites. Retro Dashboard rendered after actual driver-seat entry; its context menu changed scale and units, its headlight control changed the native vehicle state, and preferences survived reconnect. Mod Manager Reforged worked in the normal native main-menu Mods screen and initialized its boot patches during multiplayer restoration.
+
+Native Options also loaded Better Crafting and Retro Dashboard during play while retaining the existing mechanics window. A no-op refresh preserved window/dashboard identity and startup counts. Loading NeatUI Mechanics during play exposed an upstream setup resize from 900×660 to 1049×682; its profile now retains the existing dimensions around upstream setup. The corrected late setup preserved the 900×660 window, added its sidebar button and retained the driving dashboard. In the full combination, the loot window pinned and resized through actual input, its gear changed saved settings, and AllTheInfo's numeric weapon details and Nutrition Helper's food block remained visible.
+
+Evidence, source hashes, reports, screenshots and fixture corrections stay outside Git under `~/.local/state/app-verification/LuaBuddy/2026-11-08-mechanics-crafting/` on the verification machine. Workshop files were read in place. No user game was controlled, evaluated, signaled or restarted. These gameplay checks used 42.21.0 on Linux; Windows gameplay, preview gameplay, every upstream action and every optional combination remain unverified. Better Crafting's server fish-fillet fix still requires normal server installation, and its cross-save import needs early restoration when joining.
+
+## Per-profile maintenance review on November 8, 2026
+
+The requested Poteto sweep reviewed every bundled profile separately against the installed upstream source and native APIs. Each review distinguished actual-source headless checks from the earlier game evidence. The resulting changes use existing native APIs and replay metadata. No Workshop implementation was copied or edited, and no mod IDs were added to core code.
+
+| Profile | Review result |
+| --- | --- |
+| `AutoAll` | Added runtime startup replay for Medicine, VHS and other upstream installers. |
+| `AllInfo` | Added runtime startup replay and its existing custom Options-page builder; removed the obsolete SelfTest exclusion. |
+| `NeatUI_Inventory` | Restored native/NeatUI saved layouts after late construction; runtime snapshots retain live pane preferences, geometry, pins and menu-hidden visibility. |
+| `NeatUI_Mechanics` | Retained the upstream setup hook and runtime dimension preservation. |
+| `NeatUI_Framework` | Retained ID and mounting only. |
+| `KADropnLoot` | Retained settings and ordering; classified titlebar overlap as upstream coexistence. |
+| `P4AlarmSyndrome` | Added runtime startup replay and corrected shared load-event timing. |
+| `LootSenseStorage` | Added runtime startup replay for display installers. |
+| `LootSenseQuickStack` | Removed unnecessary Storage ordering; the optional bridge reads the live API. |
+| `CraftPlanner` | Waits for native inventory/loot UI before opening a saved plan; early mode uses the upstream player callback. |
+| `EURY_CRAFTING` | Retained the native preference hook and documented early favorites initialization. |
+| `RetroDashboard` | Retained native factory use and mounting; PNG glyphs need no new font framework. |
+| `MMReforgedC` | Retained boot replay and added its runtime persistence bootstrap. |
+| `ReloadAllAmmo` | Added native mounting for current upstream radial icons. |
+| `SuperOl3gContextMenuIcons` | Added runtime startup replay for supplemental icon installers. |
+| `WalkLootForage` | Added runtime startup replay for its key registration. |
+| `WhatItDoes` | Added the upstream runtime installer retry for optional classes introduced in the same batch. |
+| `NutritionHelper` | Retained initialization and optional tooltip ordering. |
+| `QuickBuildMenu` | Retained the preload, settings and native-favorite protection. |
+| `LootTrackerB42` | Retained settings, mounting and scoped runtime initialization. |
+| `TrueLineOfSight` | Retained settings and image mounting. |
+| `AreaTasks` | Retained ID only. |
+| `AutoFishing` | Retained ID and mounting only. |
+| `vac_mod_b42_10` | Retained ID only. |
+
+Two shared corrections emerged. Startup now enforces declared ordering against already executed native code, including reciprocal rules from skipped native profiles and native `loadModAfter` metadata. Runtime lifecycle replay follows native event phase and callback-registration order, skips callbacks removed before invocation, and keeps failure attribution with the owning profile. Initial restoration no longer duplicates the native `OnLoad` still ahead. Replay takes one callback snapshot per event; callbacks added to that same event during replay wait for a later event.
+
+Native regression cases exercise initial and runtime ordering refusal before hooks, sources or mounts; explicit and reciprocal profile rules; native metadata; shared/client registration order; scoped startup/load phases; removed callbacks; and unchanged foreign callbacks. Live follow-up restored saved native/custom pane sorts and per-window NeatUI views under default timing, added Auto All and AllInfo during play with Medicine/VHS/moodles and one functional custom Options tab, and checked no-op identity/counts. AllInfo's actual SelfTest button passed 221 of 222 checks during runtime addition; its constructor-hook assertion does not recognize direct use of its public page builder. The profile does not falsify that upstream diagnostic flag.
+
+The review also recorded upstream issues that these loading profiles do not replace. Easy Drop'n'Loot's fixed titlebar buttons overlap NeatUI text, and its hide setting does not update existing buttons. QuickStack can plan a backpack item twice and restricts multiplayer destinations beyond the native action's vehicle-seat check. Quick Build removals bypass Better Crafting's cross-save favorite tombstones. Easy Pickings' main-inventory priority can use the currently selected bag. Auto Fishing and Auto All can retain competing fishing sessions; Auto Fishing can select a rod without a hook. LootSense targets a missing native row method and nonexistent tooltip description methods. True Line of Sight's one-shot label-tooltip attachment misses controls replaced by later Options refresh. Context-menu icons omit a required translation count. AllInfo diagnostics also treat some composable wrapper identities as failures. These findings belong to upstream behavior and are recorded with reproductions in the private per-mod reports. They do not justify a general-loader gameplay framework, hardcoded offsets, or broad feature suppression.

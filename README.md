@@ -4,6 +4,8 @@ LuaBuddy restores locally installed Project Zomboid client and shared Lua when a
 
 LuaBuddy is a general-purpose **late client Lua loader**. It cannot make every kind of mod work on an arbitrary server. Mods that need server code, earlier startup events, maps, item definitions, Java patches, or assets registered during normal mod loading still need their normal installation. Auto All's worn-clothing repair synchronization requires its server component. A profile cannot supply that component.
 
+Version 1.4 adds opt-in early restoration with `install --early-ui`. It restores the selected batch before native `OnCreateUI`, ahead of player UI construction and `OnCreatePlayer`, while retaining `OnGameStart` as a fallback. This lets upstream constructors and player callbacks initialize normally instead of requiring startup UI repairs. The default remains restoration before `OnGameStart`. The option affects all selected profiles, so custom hooks must tolerate player UI that has not been constructed. Use `install --no-early-ui` to return to the default. Installing this core update requires your next normal game restart; reconnecting alone cannot replace the running Java helper.
+
 The loader and native startup hook have been verified against Project Zomboid **42.21.0 Stable** and **42.22.0 Pre-Release** with **ZombieBuddy 2.3.4** and Java **25**. The 42.22 check uses official preview binaries; a full preview client/server play test remains unverified. See [compatibility](docs/compatibility.md) for the exact scope. Workshop source updates do not require rebuilding LuaBuddy.
 
 ## Install on Linux
@@ -87,17 +89,17 @@ python3 luabuddy.py install --mod AllInfo --mod AutoAll
 
 | Workshop mod | `--mod` ID | Integration |
 | --- | --- | --- |
-| [AllTheInfo](https://steamcommunity.com/sharedfiles/filedetails/?id=3781129962) | `AllInfo` | Existing tooltip, provider, and settings initialization. |
-| [Auto All](https://steamcommunity.com/sharedfiles/filedetails/?id=3777237134) | `AutoAll` | Existing mechanics preloads and initialization check. |
+| [AllTheInfo](https://steamcommunity.com/sharedfiles/filedetails/?id=3781129962) | `AllInfo` | Restore settings and runtime moodles, retain its opt-in SelfTest, and attach its custom Options tab when added during play. |
+| [Auto All](https://steamcommunity.com/sharedfiles/filedetails/?id=3777237134) | `AutoAll` | Native mechanics preloads, initialization check, and scoped runtime startup initialization. |
 | [Easy Pickings](https://steamcommunity.com/sharedfiles/filedetails/?id=3788245131) | `WalkLootForage` | Restore the saved forage key and loot priority. |
 | [LootSense: Storage](https://steamcommunity.com/sharedfiles/filedetails/?id=3733326180) | `LootSenseStorage` | Restore its display settings. |
-| [LootSense: QuickStack](https://steamcommunity.com/sharedfiles/filedetails/?id=3733862305) | `LootSenseQuickStack` | Restore settings; load after Storage when both are selected. Storage is optional. |
+| [LootSense: QuickStack](https://steamcommunity.com/sharedfiles/filedetails/?id=3733862305) | `LootSenseQuickStack` | Restore settings; discover optional Storage dynamically, including when it is added later. |
 | [Craft Planner](https://steamcommunity.com/sharedfiles/filedetails/?id=3808092704) | `CraftPlanner` | Mount UI images, run its missed Neat Crafting initialization, restore settings and an already tracked window. |
-| [NeatUI Inventory](https://steamcommunity.com/sharedfiles/filedetails/?id=3820447422) | `NeatUI_Inventory` | Requires `NeatUI_Framework`; mount images, rebuild existing inventory-page children through upstream code while preserving saved geometry and pin state, and load before the bundled inventory/tooltip wrappers. |
+| [NeatUI Inventory](https://steamcommunity.com/sharedfiles/filedetails/?id=3820447422) | `NeatUI_Inventory` | Requires `NeatUI_Framework`; mount images, rebuild existing pages through upstream code, restore native/NeatUI layouts, preserve current runtime geometry and pane preferences, and load before the bundled inventory/tooltip wrappers. |
 | [Better Context Menu Icons](https://steamcommunity.com/sharedfiles/filedetails/?id=3830018449) | `SuperOl3gContextMenuIcons` | Mount images and register after Auto All and Alarm Syndrome when selected. |
 | [What It Does](https://steamcommunity.com/sharedfiles/filedetails/?id=3823732502) | `WhatItDoes` | Uses upstream client Lua without a custom hook. |
 | [Alarm Syndrome](https://steamcommunity.com/sharedfiles/filedetails/?id=3409527910) | `P4AlarmSyndrome` | Mount alarm icons, run its missed `OnLoad` initialization, and restore settings. |
-| [ReloadAllAmmo](https://steamcommunity.com/sharedfiles/filedetails/?id=3774932027) | `ReloadAllAmmo` | Uses upstream client Lua and native optional Gunworks ordering without a custom hook. |
+| [ReloadAllAmmo](https://steamcommunity.com/sharedfiles/filedetails/?id=3774932027) | `ReloadAllAmmo` | Mount radial icons; use upstream client Lua and native optional Gunworks ordering without a custom hook. |
 | [Auto Fishing](https://steamcommunity.com/sharedfiles/filedetails/?id=3804080377) | `AutoFishing` | Mount its UI image; use upstream fishing actions and sandbox-value fallbacks without a custom hook. |
 | [Easy Drop'n'Loot](https://steamcommunity.com/sharedfiles/filedetails/?id=2871469707) | `KADropnLoot` | Restore its saved settings; wrap NeatUI Inventory when selected so upstream inventory buttons and category-transfer menus remain available. |
 | [Area Tasks](https://steamcommunity.com/sharedfiles/filedetails/?id=3793163745) | `AreaTasks` | Uses upstream initialization, native tasks, and multiplayer sandbox-value fallbacks without a custom hook. |
@@ -106,7 +108,11 @@ python3 luabuddy.py install --mod AllInfo --mod AutoAll
 | [Batch Craft Recipe](https://steamcommunity.com/sharedfiles/filedetails/?id=3584890848) | `vac_mod_b42_10` | Use upstream right-click batch modes, native crafting actions, and craft-recipe tag changes without a custom hook. |
 | [Nutrition Helper UI](https://steamcommunity.com/sharedfiles/filedetails/?id=3803702351) | `NutritionHelper` | Restore saved preferences and attach the Health-tab button; load before AllTheInfo when both are selected so both food-tooltip renderers remain available. |
 | [Quick Build Menu](https://steamcommunity.com/sharedfiles/filedetails/?id=3741839491) | `QuickBuildMenu` | Preload the native build action, restore saved options, and preserve handcraft favorites during upstream startup cleanup. |
-| [NeatUI Framework](https://steamcommunity.com/sharedfiles/filedetails/?id=3508537032) | `NeatUI_Framework` | Optional dependency profile for NeatUI Inventory; mount the framework's UI images. |
+| [NeatUI Mechanics](https://steamcommunity.com/sharedfiles/filedetails/?id=3832114824) | `NeatUI_Mechanics` | Requires `NeatUI_Framework`; mount images, restore preferences, and use upstream setup for existing mechanics windows and sidebars while preserving current window dimensions. |
+| [Better Crafting](https://steamcommunity.com/sharedfiles/filedetails/?id=3618123324) | `EURY_CRAFTING` | Restore and apply saved preferences; use upstream recipe browsing, XP tooltips, sorting, ingredient memory, and favorites. |
+| [Banger's Retro Car Dashboard](https://steamcommunity.com/sharedfiles/filedetails/?id=3739256322) | `RetroDashboard` | Mount its images and use the upstream dashboard factory for existing player UI when loading during play. |
+| [Mod Manager Reforged (Client)](https://steamcommunity.com/sharedfiles/filedetails/?id=3737874810) | `MMReforgedC` | Mount images and run its missed boot patch registration. Enable it normally in the game's Mods menu for the main-menu manager. |
+| [NeatUI Framework](https://steamcommunity.com/sharedfiles/filedetails/?id=3508537032) | `NeatUI_Framework` | Optional dependency profile for NeatUI Inventory and Mechanics; mount the framework's UI images. |
 
 For NeatUI Inventory, subscribe to both Workshop items and select both profiles unless the server already loads the framework:
 
@@ -114,15 +120,23 @@ For NeatUI Inventory, subscribe to both Workshop items and select both profiles 
 python3 luabuddy.py install --mod NeatUI_Framework --mod NeatUI_Inventory
 ```
 
+For NeatUI Mechanics, select `NeatUI_Framework` and `NeatUI_Mechanics` instead, or select both NeatUI integrations with the shared framework. Mechanics requires game version 42.21 or newer. Its action buttons use the native part menu, including Auto All's additions.
+
 On Windows, use `py -3` in these examples. Existing selections remain when adding another profile. No new integration disables Auto All or AllTheInfo features. Other combinations and custom profiles continue to use native dependency metadata and explicit ordering. These profiles do not fix upstream gameplay bugs or provide missing server components; QuickStack keeps its upstream multiplayer transfer implementation.
 
 Auto Fishing reads `SandboxVars.AutoFishing` when the world supplies it and otherwise uses its upstream defaults. Late client loading does not register its sandbox-options page or change the server's sandbox settings. Its custom seated bait-changing animation also requires normal animation-set loading; file mounting alone does not register that animation node. ReloadAllAmmo uses the game's ordinary magazine load/unload actions; Gunworks remains an optional upstream integration.
 
 Loot Tracker uses the server's sandbox settings and synchronized world time for its vanilla respawn-wave countdown. The countdown does not guarantee a particular container refills: server eligibility rules still apply, and the mod infers restocks from item counts in loaded containers. Custom server respawn schedules require support from that server's mod. Loot Tracker's own sandbox options use upstream defaults when absent.
 
-Batch Craft Recipe also adds `InHandCraft` and removes `AnySurfaceCraft` on client craft recipes. The profile retains those upstream changes; they do not supply missing server-side recipe changes. Nutrition Helper must precede AllTheInfo, so adding it when AllTheInfo is already running requires reconnecting. Its missing sandbox values use upstream defaults, and late loading does not register a server sandbox-options page.
+Batch Craft Recipe also adds `InHandCraft` and removes `AnySurfaceCraft` on client craft recipes. The profile retains those upstream changes; they do not supply missing server-side recipe changes. Nutrition Helper must precede AllTheInfo, so adding it after AllTheInfo requires a compatible new connection. Load both locally in that order, or normally through the native loader; reconnecting with AllTheInfo still loaded by the server cannot satisfy the declared local ordering. Missing Nutrition Helper sandbox values use upstream defaults, and late loading does not register a server sandbox-options page.
 
 Quick Build Menu currently declares support for game versions 42.20 through 42.21.99. Its startup cleanup uses the shared recipe-favorites namespace with a build-only allowlist. When LuaBuddy restores the mod, its profile preserves valid handcraft favorites while retaining that cleanup. Adding the profile during play does not replay the startup cleanup. Server-loaded copies are skipped by LuaBuddy and retain upstream startup behavior.
+
+Better Crafting's current version also includes a server-side fish-fillet synchronization fix. Client loading retains its UI and client features but cannot supply that server fix. Its optional cross-save favorites import runs on native `OnCreatePlayer`. Enable `install --early-ui`, restart normally to apply that launcher option, then join with cross-save favorites enabled. If early mode is already running, reconnect after adding the profile during play. XP rewards use upstream audited indexes, so unaudited mod recipes can show an unknown reward.
+
+Alarm Syndrome's current custom alarm-unsetting action uses the native server-synchronized timed-action path. Manual and automatic unsetting need its action definition installed normally on the server. Client restoration supplies its overlay, preferences and menu initialization without replacing that action.
+
+Mod Manager Reforged manages the game's native mod selections and presets. It does not edit LuaBuddy profiles. LuaBuddy runs after connecting to multiplayer, so its profile cannot provide a mod manager on the initial main menu. Subscribe and enable `MMReforgedC` normally for that screen; the optional profile restores its client modules after the multiplayer Lua reset.
 
 The installer rejects filename collisions before writing, including names that differ only by case on Windows. When using `--mod`, existing profiles must have one unindented `id=` entry with plain text, escaped spaces, or escaped backslashes. The runtime accepts Java properties syntax, but the installer refuses advanced or ambiguous identity syntax instead of guessing. Manage those profiles manually or use the conventional `id=` form.
 
@@ -139,14 +153,14 @@ Profiles are UTF-8 Java properties files in `config`. Each file has one mod ID. 
 | `path` | Optional mod root. Otherwise use native installed-mod discovery. |
 | `workshop` | Optional numeric Workshop item ID for a mod packaged directly at the item root. Native mod-ID discovery takes precedence; otherwise Steam locates the item and the native parser reads its root `mod.info`. Set `path` as well when Steam is unavailable. |
 | `requires` | Additional required mod IDs. Native `require=` dependencies always apply. |
-| `after` | Optional ordering after other configured IDs. Native `loadAfter` also applies. |
-| `before` | Optional ordering before other configured IDs. Native `loadBefore` also applies. |
+| `after` | Optional ordering after other configured IDs. Native `loadModAfter` also applies. |
+| `before` | Optional ordering before other configured IDs. Native `loadModBefore` also applies. |
 | `exclude` | Glob patterns relative to `media/lua`, such as `client/Example/SelfTest.lua`. |
 | `excludeWhen.ModID` | Additional exclusions when that mod is active on the server. |
 | `preload` | Modules to require before this mod's shared and client files execute. |
 | `plugin` | Optional Lua hook file relative to this profile's directory. |
 | `mount` | `false` by default. Set `true` to publish the mod's common/version file paths through the game's native `loadMod` API, including loose UI images. Does not activate the mod or execute its server Lua. |
-| `replay` | Optional `OnGameBoot`, `OnLoad`, and/or `OnGameStart`. Boot/load callbacks run after client files and before the `after` hook. `OnGameStart` runs only during runtime loading, after the new batch's client files and hooks. Normal startup uses the real event. Only this mod's restored-source callbacks run, without arguments. |
+| `replay` | Optional `OnGameBoot`, `OnGameStart`, and/or `OnLoad`. Missed boot callbacks run after client files and before the profile's `after` hook. During runtime loading, opted-in startup callbacks run after all new files/hooks, first `OnGameStart`, then `OnLoad`, preserving native registration order within each event. Initial restoration uses the real startup/load events. Only opted-in restored-source callbacks run, without arguments. |
 
 For example, a mod with no special compatibility rules needs only its ID. Add the other options only when the mod requires them.
 
@@ -169,7 +183,7 @@ return {
 
 ## Loading behavior
 
-ZombieBuddy applies one patch around the normal `OnGameStart` event. LuaBuddy runs only on multiplayer clients. Single player and dedicated servers use their normal loading paths. A mod already present in the server's active list is skipped. Each Lua environment initializes one session, including after disconnecting and rejoining in the same JVM. Runtime requests reuse that session and its require resolver after the native startup event finishes.
+ZombieBuddy applies one event patch that normally restores before `OnGameStart`, or before `OnCreateUI` when early mode is enabled. LuaBuddy runs only on multiplayer clients. Single player and dedicated servers use their normal loading paths. A mod already present in the server's active list is skipped. Declared ordering still applies to skipped native mods; an impossible order is refused before hooks, source execution or mounts. Each Lua environment initializes one session, including after disconnecting and rejoining in the same JVM. Runtime requests reuse that session and its require resolver after the native startup event finishes.
 
 LuaBuddy reads upstream files without editing them. Version-specific files replace matching common files. It compiles a mod's sources before executing them, loads the shared phase before the client phase, and orders mods using native dependency metadata. Files with the same relative path follow that mod order, with later mods taking precedence. Shared and client files with the same module name remain distinct scripts. `require` prefers shared modules and caches the first return value, including `nil` and `false`.
 

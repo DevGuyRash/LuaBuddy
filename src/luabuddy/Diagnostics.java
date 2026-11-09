@@ -21,7 +21,7 @@ import zombie.ZomboidFileSystem;
 import zombie.core.Core;
 
 final class Diagnostics {
-    static final String VERSION = "1.3.0";
+    static final String VERSION = "1.4.0";
     private static final Set<String> FIELDS = Set.of("status", "stage", "profile", "commonRoot", "versionRoot",
             "sourceCount", "requires", "preload", "replay", "plugin", "source", "error", "traceback", "javaTraceback");
     private final KahluaTable state;

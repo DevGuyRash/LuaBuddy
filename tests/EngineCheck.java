@@ -160,10 +160,10 @@ public final class EngineCheck {
         write("allinfo/media/lua/client/AllInfo/character/InfoScreen.lua", "return 2");
         write("allinfo/media/lua/client/AllInfo/providers/MeleeWeapon.lua", "return 3");
         var filtered = allInfo.sources(List.of(root.resolve("allinfo")), java.util.Set.of("DetailedDescriptionsForOccupationsAndTraits"));
-        if (!filtered.keySet().equals(java.util.Set.of("client/AllInfo/providers/MeleeWeapon.lua"))) {
+        if (!filtered.keySet().equals(java.util.Set.of("client/AllInfo/SelfTest.lua", "client/AllInfo/providers/MeleeWeapon.lua"))) {
             throw new AssertionError("AllInfo conflict exclusions preserve inventory information");
         }
-        System.out.println("PASS: optional AllInfo profile excludes SelfTest and overlapping trait screens");
+        System.out.println("PASS: optional AllInfo profile retains SelfTest/providers and omits overlapping trait screens");
 
         write("blocked/42/mod.info", "name=Blocked\nid=Blocked\nversionMin=42.0\n");
         write("blocked/42/media/lua/client/Blocked.lua", "error('blocked mod must not execute')");
@@ -186,8 +186,139 @@ public final class EngineCheck {
         optionalInitializationCases();
         quickBuildFavoriteCases(repo);
         neatInventoryResizeCases(repo);
+        earlyUICases();
+        nativeOrderCases();
+        runtimeLifecycleCases();
         runtimeCases();
         diagnosticCases();
+    }
+
+    private static void earlyUICases() throws Exception {
+        write("early-ui/42/mod.info", "name=EarlyUI\nid=EarlyUI\nversionMin=42.0\n");
+        write("early-ui/42/media/lua/client/Factory.lua",
+                "factoryLoads = (factoryLoads or 0) + 1; local original = fixtureCreate; "
+                + "fixtureCreate = function() local ui = original(); ui.customized = true; return ui end; "
+                + "Events.OnCreatePlayer.Add(function(index, player) assert(index == 0 and player == fixtureToken); "
+                + "playerCallbacks = (playerCallbacks or 0) + 1 end)");
+        write("early-ui-config/early.properties", "id=EarlyUI\npath=../early-ui\n");
+        String previous = System.getProperty("luabuddy.earlyUI");
+        try {
+            for (String mode : List.of("default", "enabled", "disabled", "fallback")) {
+                if (mode.equals("default")) System.clearProperty("luabuddy.earlyUI");
+                else System.setProperty("luabuddy.earlyUI", Boolean.toString(!mode.equals("disabled")));
+                boolean early = mode.equals("enabled");
+                System.setProperty("luabuddy.config", root.resolve("early-ui-config").toString());
+                fresh();
+                LuaEventManager.register(LuaManager.platform, LuaManager.env);
+                for (String name : List.of("OnCreateUI", "OnCreatePlayer", "OnGameStart")) {
+                    var event = LuaEventManager.AddEvent(name);
+                    event.callbacks.clear();
+                    event.register(LuaManager.platform, (KahluaTable) LuaManager.env.rawget("Events"));
+                }
+                lua("fixtureToken = {}; fixtureCreate = function() return {} end; "
+                        + "Events.OnCreateUI.Add(function() foreignCreates = (foreignCreates or 0) + 1 end); "
+                        + "Events.OnCreatePlayer.Add(function() fixtureUI = fixtureCreate() end); "
+                        + "Events.OnGameStart.Add(function() assert(LuaBuddy); startupRequest = LuaBuddy.refresh() end)");
+                if (!mode.equals("fallback")) {
+                    if (!Boolean.getBoolean("luabuddy.verifyAgent") && early) Bootstrap.load();
+                    LuaEventManager.triggerEvent("OnCreateUI");
+                    lua(early ? "assert(LuaBuddy and not LuaBuddy.ready and factoryLoads == 1)"
+                            : "assert(LuaBuddy == nil and factoryLoads == nil)");
+                }
+                LuaEventManager.triggerEvent("OnCreatePlayer", 0, LuaManager.env.rawget("fixtureToken"));
+                lua(early ? "assert(fixtureUI.customized and playerCallbacks == 1)"
+                        : "assert(fixtureUI.customized == nil and playerCallbacks == nil)");
+                if (!Boolean.getBoolean("luabuddy.verifyAgent")) Bootstrap.load();
+                LuaEventManager.triggerEvent("OnGameStart");
+                if (!Boolean.getBoolean("luabuddy.verifyAgent")) Bootstrap.started(true);
+                lua("assert(LuaBuddy.ready and factoryLoads == 1 and startupRequest == false)");
+                String session = report().getString("session");
+                LuaEventManager.triggerEvent("OnCreateUI");
+                lua("assert(factoryLoads == 1 and LuaBuddy.ready)");
+                if (!report().getString("session").equals(session)) throw new AssertionError("Startup must retain its session");
+            }
+        } finally {
+            if (previous == null) System.clearProperty("luabuddy.earlyUI");
+            else System.setProperty("luabuddy.earlyUI", previous);
+        }
+        System.out.println("PASS: opt-in native UI/player startup order, default/disabled timing, fallback, readiness and once-per-environment loading");
+    }
+
+    private static void nativeOrderCases() throws Exception {
+        for (String relation : List.of("before", "profileAfter", "nativeAfter")) {
+            for (boolean runtime : List.of(false, true)) {
+                String suffix = relation + runtime;
+                String nativeId = "Native_" + suffix;
+                String incoming = "Incoming_" + suffix;
+                String directory = "order-config-" + suffix;
+                write("order-native-" + suffix + "/42/mod.info", "name=Native\nid=" + nativeId + "\nversionMin=42.0\n"
+                        + (relation.equals("nativeAfter") ? "loadModAfter=" + incoming + "\n" : ""));
+                write("order-new-" + suffix + "/42/mod.info", "name=Incoming\nid=" + incoming + "\nversionMin=42.0\n");
+                write("order-new-" + suffix + "/42/media/lua/client/Order.lua", "nativeOrderMutation = true");
+                write("order-new-" + suffix + "/42/media/ui/" + suffix + ".png", "unpublished");
+                ZomboidFileSystem.instance.setModIdToDir(nativeId, root.resolve("order-native-" + suffix).toString());
+                if (relation.equals("nativeAfter") && !zombie.gameStates.ChooseGameInfo.getModDetails(nativeId).getLoadAfter().contains(incoming)) {
+                    throw new AssertionError("Native ordering fixture metadata was not parsed");
+                }
+                ZomboidFileSystem.instance.getModIDs().add(nativeId);
+                try {
+                    Files.createDirectories(root.resolve(directory));
+                    if (runtime) runtimeStart(directory);
+                    write(directory + "/new.properties", "id=" + incoming + "\npath=../order-new-" + suffix + "\nmount=true\n"
+                            + (relation.equals("before") ? "before=" + nativeId + "\n" : "") + "plugin=order.lua\n");
+                    write(directory + "/order.lua", "return {before = function() nativeOrderHookMutation = true end}");
+                    if (relation.equals("profileAfter")) {
+                        write(directory + "/native.properties", "id=" + nativeId + "\nafter=" + incoming + "\n");
+                    }
+                    if (runtime) lua("local ok = LuaBuddy.refresh(); assert(not ok)");
+                    else {
+                        System.setProperty("luabuddy.config", root.resolve(directory).toString());
+                        fresh();
+                        Bootstrap.load();
+                    }
+                    lua("assert(nativeOrderMutation == nil and nativeOrderHookMutation == nil); "
+                            + "assert(LuaBuddy.mods['" + incoming + "']:find('order requires', 1, true))");
+                    String image = "media/ui/" + suffix + ".png";
+                    if (ZomboidFileSystem.instance.getString(image).equals(root.resolve("order-new-" + suffix + "/42/" + image).toString())) {
+                        throw new AssertionError("Rejected native ordering must not publish files");
+                    }
+                } finally {
+                    ZomboidFileSystem.instance.getModIDs().remove(nativeId);
+                }
+            }
+        }
+        System.out.println("PASS: startup/runtime native order refusal before hooks, sources or mounts, including reciprocal profile and native metadata");
+    }
+
+    private static void runtimeLifecycleCases() throws Exception {
+        runtimeStart("runtime-lifecycle-config");
+        var load = LuaEventManager.AddEvent("OnLoad");
+        load.callbacks.clear();
+        load.register(LuaManager.platform, (KahluaTable) LuaManager.env.rawget("Events"));
+        lua("lifecycle = {}; Events.OnLoad.Add(function() foreignLoads = (foreignLoads or 0) + 1 end)");
+        for (String id : List.of("First", "Second")) {
+            runtimeMod("lifecycle-" + id, id, "", (id.equals("Second") ? "shared" : "client") + "/Lifecycle/" + id + ".lua",
+                    "Events.OnGameStart.Add(function() assert(firstHook and secondHook); lifecycle[#lifecycle + 1] = 'start-" + id + "' end); "
+                    + "Events.OnLoad.Add(function() assert(lifecycle[1] == 'start-Second' and lifecycle[2] == 'start-First'); lifecycle[#lifecycle + 1] = 'load-" + id + "' end)");
+            write("runtime-lifecycle-config/" + id + ".properties", "id=" + id + "\npath=../lifecycle-" + id
+                    + "\nreplay=OnLoad;OnGameStart\nplugin=" + id + ".lua\n");
+            write("runtime-lifecycle-config/" + id + ".lua", "return {after = function() " + id.toLowerCase() + "Hook = true end}");
+        }
+        lua("local ok, message = LuaBuddy.refresh(); assert(ok, message); "
+                + "assert(table.concat(lifecycle, ',') == 'start-Second,start-First,load-Second,load-First'); "
+                + "assert(foreignStarts == 1 and foreignLoads == nil); "
+                + "assert(LuaBuddy.refresh()); assert(#lifecycle == 4)");
+        System.out.println("PASS: runtime scoped startup/load callbacks follow native batch order after hooks, without foreign replay or duplicate refresh");
+        runtimeStart("runtime-removal-config");
+        runtimeMod("removal-first", "RemoveFirst", "", "client/Remove/First.lua",
+                "Events.OnGameStart.Add(function() Events.OnGameStart.Remove(removeLater); removedFirstRan = true end)");
+        runtimeMod("removal-second", "RemoveSecond", "", "client/Remove/Second.lua",
+                "removeLater = function() error('removed later callback must not run') end; Events.OnGameStart.Add(removeLater)");
+        write("runtime-removal-config/a.properties", "id=RemoveFirst\npath=../removal-first\nreplay=OnGameStart\n");
+        write("runtime-removal-config/b.properties", "id=RemoveSecond\npath=../removal-second\nreplay=OnGameStart\n");
+        lua("local ok, message = LuaBuddy.refresh(); assert(ok, message); assert(removedFirstRan); "
+                + "assert(LuaBuddy.mods.RemoveSecond == 'loaded')");
+        System.out.println("PASS: runtime replay skips a later owned callback removed by an earlier callback");
     }
 
     private static void quickBuildFavoriteCases(Path repo) throws Exception {
@@ -253,12 +384,15 @@ public final class EngineCheck {
                 frame.push(new zombie.ui.UIElement()));
         lua("settingsLoads = 0; builds = 0; NeatInventory = {enabled = true}; "
                 + "PZAPI = {ModOptions = {load = function() settingsLoads = settingsLoads + 1 end}}; "
+                + "ISLayoutManager = {TryRestore = function() end}; "
                 + "function page(width, height, pinned) "
                 + "local root = newNativeUI(); root:setWidth(455); root:setHeight(300); root:onResize(); "
                 + "root:setWidth(width); root:setHeight(height); "
-                + "return {root = root, pin = pinned, clearChildren = function(self) self.root:ClearChildren() end, "
+                + "return {root = root, pin = pinned, visible = true, "
+                + "getIsVisible = function(self) return self.visible end, setVisible = function(self, value) self.visible = value end, "
+                + "clearChildren = function(self) self.root:ClearChildren() end, "
                 + "recalcSize = function(self) self.root:onResize() end, "
-                + "setPinned = function(self) self.pin = true end, "
+                + "setPinned = function(self) self.pin = true end, collapse = function(self) self.pin = false end, "
                 + "createChildren = function(self) builds = builds + 1; self.pin = false; self.ninvSearch = {}; "
                 + "local pin = newNativeUI(); pin:setWidth(16); pin:setHeight(16); "
                 + "pin:setAnchorLeft(false); pin:setAnchorRight(true); pin:setX(self.root:getWidth() - 17); "
@@ -275,7 +409,7 @@ public final class EngineCheck {
         Object[] result = LuaManager.caller.pcall(LuaManager.thread, chunk, new Object[]{});
         if (!Boolean.TRUE.equals(result[0])) throw new AssertionError(result[1]);
         LuaManager.env.rawset("neatHook", result[1]);
-        lua("neatHook.after(); inventoryPage.root:onResize(); lootPage.root:onResize(); "
+        lua("neatHook.after({runtime = false}); inventoryPage.root:onResize(); lootPage.root:onResize(); "
                 + "assert(builds == 2 and settingsLoads == 1); "
                 + "assert(inventoryPage.pin == true and lootPage.pin == false, 'Saved pin state changed'); "
                 + "assert(inventoryPage.root:getWidth() == 460 and inventoryPage.root:getHeight() == 300); "
@@ -284,9 +418,9 @@ public final class EngineCheck {
                 + "assert(lootPage.root:getWidth() == 620 and lootPage.root:getHeight() == 420); "
                 + "assert(lootPage.pinButton:getX() == 603, 'Loot pin moved beyond saved window'); "
                 + "assert(lootPage.resizeWidget:getX() == 608 and lootPage.resizeWidget:getY() == 408, 'Loot grip moved beyond saved window'); "
-                + "inventoryPage.pin = false; neatHook.after(); assert(builds == 2 and inventoryPage.pin == false); "
+                + "inventoryPage.pin = false; neatHook.after({runtime = false}); assert(builds == 2 and inventoryPage.pin == false); "
                 + "NeatInventory.enabled = false; inventoryPage.ninvSearch = nil; lootPage.ninvSearch = nil; "
-                + "neatHook.after(); assert(builds == 2 and settingsLoads == 3)");
+                + "neatHook.after({runtime = false}); assert(builds == 2 and settingsLoads == 3)");
         System.out.println("PASS: NeatUI native deferred resize/anchors, saved geometry and pin state, existing/disabled page preservation");
     }
 
@@ -307,7 +441,7 @@ public final class EngineCheck {
         write("replay/42/media/lua/client/Ready.lua", "assert(loadRuns == nil); clientReady = true");
         write("replay-config/a.properties", "id=Replay\npath=../replay\nmount=true\nreplay=OnGameBoot;OnLoad\nplugin=ready.lua\n");
         write("replay-config/z.properties", "id=Foreign\npath=../foreign\n");
-        write("replay-config/ready.lua", "return { after = function() assert(bootRuns == 1 and loadRuns == 2 and nestedRuns == 1 and foreignRuns == nil) end }");
+        write("replay-config/ready.lua", "return { after = function() assert(bootRuns == 1 and loadRuns == nil and nestedRuns == nil and foreignRuns == nil) end }");
         System.setProperty("luabuddy.config", root.resolve("replay-config").toString());
         fresh();
         LuaEventManager.register(LuaManager.platform, LuaManager.env);
@@ -318,14 +452,14 @@ public final class EngineCheck {
         }
         Bootstrap.load();
         lua("assert(LuaBuddy.mods.Replay == 'loaded' and LuaBuddy.mods.Foreign == 'loaded', tostring(LuaBuddy.mods.Replay) .. '; ' .. tostring(LuaBuddy.mods.Foreign)); "
-                + "assert(foreignRuns == nil); assert(bootRuns == 1 and loadRuns == 2 and nestedRuns == 1)");
+                + "assert(foreignRuns == nil); assert(bootRuns == 1 and loadRuns == nil and nestedRuns == nil)");
         String mounted = ZomboidFileSystem.instance.getString("media/ui/replay.png");
         if (!Files.readString(Path.of(mounted)).equals("version") || !ZomboidFileSystem.instance.getModIDs().isEmpty()) {
             throw new AssertionError("Native mount uses the selected version without activating a mod");
         }
         LuaEventManager.triggerEvent("OnLoad");
-        lua("assert(foreignRuns == 1 and loadRuns == 4 and nestedRuns == 2)");
-        write("replay/42/media/lua/shared/A.lua", "Events.OnLoad.Add(function() error('replay fixture failure') end)");
+        lua("assert(foreignRuns == 1 and loadRuns == 2 and nestedRuns == 1)");
+        write("replay/42/media/lua/shared/A.lua", "Events.OnGameBoot.Add(function() error('replay fixture failure') end)");
         write("replay-config/ready.lua", "return {}");
         fresh();
         LuaEventManager.register(LuaManager.platform, LuaManager.env);
@@ -336,7 +470,7 @@ public final class EngineCheck {
         }
         Bootstrap.load();
         JSONObject failed = report().getJSONObject("mods").getJSONObject("Replay");
-        if (!failed.getString("stage").equals("replay-OnLoad") || !failed.getString("source").endsWith("A.lua")
+        if (!failed.getString("stage").equals("replay-OnGameBoot") || !failed.getString("source").endsWith("A.lua")
                 || !failed.getString("error").contains("replay fixture failure")) {
             throw new AssertionError("Replay failures retain native callback source attribution");
         }

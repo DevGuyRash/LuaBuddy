@@ -29,7 +29,7 @@ import zombie.network.GameClient;
 import zombie.network.GameServer;
 
 public final class Bootstrap {
-    private record Mod(ModProfile profile, ChooseGameInfo.Mod info, List<String> required, Set<String> after) {}
+    private record Mod(ModProfile profile, ChooseGameInfo.Mod info, List<String> required, Set<String> after, Set<String> before) {}
 
     private Bootstrap() {}
 
@@ -140,7 +140,8 @@ public final class Bootstrap {
                         if ("loaded".equals(existing.getValue())) available.add(String.valueOf(existing.getKey()));
                     }
                     Map<String, Mod> mods = new LinkedHashMap<>();
-                    for (ModProfile profile : ModProfile.read(Path.of(directory))) {
+                    List<ModProfile> profiles = ModProfile.read(Path.of(directory));
+                    for (ModProfile profile : profiles) {
                         if (replacing && !profile.id().equals(target)) continue;
                         Object previous = statuses.rawget(profile.id());
                         if (replacing && (!"loaded".equals(previous) || active.contains(profile.id()) || !profile.enabled())) {
@@ -169,16 +170,27 @@ public final class Bootstrap {
                             Set<String> after = new LinkedHashSet<>(required);
                             after.addAll(orEmpty(info.getLoadAfter()));
                             after.addAll(profile.list("after"));
-                            mods.put(profile.id(), new Mod(profile, info, required, after));
+                            Set<String> before = new LinkedHashSet<>(orEmpty(info.getLoadBefore()));
+                            before.addAll(profile.list("before"));
+                            mods.put(profile.id(), new Mod(profile, info, required, after, before));
                         } catch (IOException | RuntimeException e) {
                             if (replacing) throw e;
                             diagnostics.failed(profile.id(), detail, e);
                         }
                     }
+                    for (String id : active) {
+                        Set<String> after = new LinkedHashSet<>();
+                        ChooseGameInfo.Mod info = ChooseGameInfo.getModDetails(id);
+                        if (info != null) after.addAll(orEmpty(info.getLoadAfter()));
+                        for (ModProfile profile : profiles) {
+                            if (profile.enabled() && profile.id().equals(id)) after.addAll(profile.list("after"));
+                        }
+                        for (String predecessor : after) {
+                            if (mods.containsKey(predecessor)) mods.get(predecessor).before().add(id);
+                        }
+                    }
                     for (Mod mod : mods.values()) {
-                        Set<String> before = new LinkedHashSet<>(orEmpty(mod.info().getLoadBefore()));
-                        before.addAll(mod.profile().list("before"));
-                        for (String id : before) {
+                        for (String id : mod.before()) {
                             if (mods.containsKey(id)) mods.get(id).after().add(mod.profile().id());
                         }
                     }
@@ -223,9 +235,7 @@ public final class Bootstrap {
                                 entry.rawset("replay", array(mod.profile().list("replay")));
                                 entry.rawset("required", array(mod.required()));
                                 entry.rawset("after", array(new ArrayList<>(mod.after())));
-                                Set<String> before = new LinkedHashSet<>(orEmpty(mod.info().getLoadBefore()));
-                                before.addAll(mod.profile().list("before"));
-                                entry.rawset("before", array(new ArrayList<>(before)));
+                                entry.rawset("before", array(new ArrayList<>(mod.before())));
                                 entry.rawset("detail", detail);
                                 detail.rawset("stage", "plugin-read");
                                 entry.rawset("plugin", mod.profile().plugin());
