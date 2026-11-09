@@ -26,6 +26,7 @@ AGENT = "-javaagent:.luabuddy/ZombieBuddy.jar=patches_jar=.luabuddy/LuaBuddy.jar
 CONFIG_PREFIX = "-Dluabuddy.config="
 LEGACY_PREFIX = "-Dpzclientmods.config="
 DEBUG_PROPERTY = "-Dluabuddy.debug"
+EARLY_UI_PROPERTY = "-Dluabuddy.earlyUI"
 REPORT_LIMIT = 4 * 1024 * 1024
 METADATA_LIMIT = 64 * 1024
 UPDATE_INTERVAL = 60 * 60
@@ -531,8 +532,13 @@ def debug_value(args: list[str]) -> str | None:
     return values[-1] if values else None
 
 
+def early_ui_argument(argument: str) -> bool:
+    return argument == EARLY_UI_PROPERTY or argument.startswith(EARLY_UI_PROPERTY + "=")
+
+
 def configure(game: Path, launcher: Path, directory: Path, ids: list[str], remove: bool,
-              debug: bool | None = None, offline: bool = False, force: bool = False) -> None:
+              debug: bool | None = None, offline: bool = False, force: bool = False,
+              early_ui: bool | None = None) -> None:
     original, config, args = launcher_data(launcher)
     if remove and any(buddy_agent(arg) and "LuaBuddy.jar:luabuddy" in arg and not owned_agent(arg) for arg in args):
         raise ValueError("LuaBuddy shares a ZombieBuddy agent with other options. Remove its patch manually; launcher unchanged.")
@@ -540,6 +546,8 @@ def configure(game: Path, launcher: Path, directory: Path, ids: list[str], remov
     pending = {}
     if remove or debug is not None:
         updated = [arg for arg in updated if not debug_argument(arg)]
+    if remove or early_ui is not None:
+        updated = [arg for arg in updated if not early_ui_argument(arg)]
     if not remove:
         updated = [arg for arg in updated if not arg.startswith(LEGACY_PREFIX) and not owned_agent(arg, legacy=True)]
         if any(buddy_agent(arg) for arg in updated):
@@ -550,6 +558,8 @@ def configure(game: Path, launcher: Path, directory: Path, ids: list[str], remov
             raise ValueError("The profile directory must not contain a line break")
         if debug:
             updated.append(DEBUG_PROPERTY + "=true")
+        if early_ui:
+            updated.append(EARLY_UI_PROPERTY + "=true")
         updated.extend([CONFIG_PREFIX + config_path, AGENT])
         prepared = prepare_build(game, select_dependency(offline=offline, force=force))
         pending.update(build_files(prepared))
@@ -582,7 +592,7 @@ def status(game: Path, launcher: Path) -> None:
     enabled = any(owned_agent(arg) for arg in args)
     print(f"LuaBuddy {'enabled' if enabled else 'not enabled'} in {launcher}")
     for arg in args:
-        if arg.startswith(CONFIG_PREFIX) or owned_agent(arg):
+        if arg.startswith(CONFIG_PREFIX) or owned_agent(arg) or early_ui_argument(arg):
             print(arg)
     value = debug_value(args)
     print(f"Debug property: {value!r}" if value is not None else "Debug property: unset (false)")
@@ -810,6 +820,8 @@ def main() -> int:
         if name == "install":
             command.add_argument("--mod", action="append", default=[])
             command.add_argument("--debug", action=argparse.BooleanOptionalAction, default=None)
+            command.add_argument("--early-ui", action=argparse.BooleanOptionalAction, default=None,
+                                 help="Restore before native player UI creation on the next launch; off by default")
     args = parser.parse_args()
     try:
         if args.command == "diagnostics":
@@ -841,7 +853,8 @@ def main() -> int:
             configure(game, launcher, args.config_dir.expanduser().resolve(),
                       args.mod if args.command == "install" else [], args.command == "remove",
                       args.debug if args.command == "install" else None,
-                      args.offline if args.command == "install" else False)
+                      args.offline if args.command == "install" else False,
+                      early_ui=args.early_ui if args.command == "install" else None)
     except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         print(f"LuaBuddy: {error}", file=sys.stderr)
         return 1

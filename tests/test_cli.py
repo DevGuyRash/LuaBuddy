@@ -139,7 +139,8 @@ class CliCheck(unittest.TestCase):
         ids = ("WalkLootForage", "LootSenseStorage", "LootSenseQuickStack", "CraftPlanner",
                "NeatUI_Framework", "NeatUI_Inventory", "SuperOl3gContextMenuIcons", "WhatItDoes", "P4AlarmSyndrome",
                "ReloadAllAmmo", "AutoFishing", "KADropnLoot", "AreaTasks", "LootTrackerB42", "TrueLineOfSight",
-               "vac_mod_b42_10", "NutritionHelper", "QuickBuildMenu")
+               "vac_mod_b42_10", "NutritionHelper", "QuickBuildMenu", "NeatUI_Mechanics",
+               "EURY_CRAFTING", "RetroDashboard", "MMReforgedC")
         for mod_id in ids:
             with self.subTest(mod=mod_id):
                 directory = self.root / mod_id
@@ -153,7 +154,7 @@ class CliCheck(unittest.TestCase):
         self.run_cli("install", *(argument for mod_id in ids for argument in ("--mod", mod_id)))
         for name, content in original.items():
             self.assertEqual((self.root / "config" / name).read_bytes(), content)
-        self.assertEqual(len(list((self.root / "config").glob("*.properties"))), 20)
+        self.assertEqual(len(list((self.root / "config").glob("*.properties"))), len(ids) + 2)
 
     def test_legacy_windows_argument_migration(self):
         self.original["vmArgs"] += [r"-Dpzclientmods.config=C:\Old Adapter\adapter.properties",
@@ -275,6 +276,31 @@ class CliCheck(unittest.TestCase):
         self.run_cli("install")
         self.assertIn("-Dluabuddy.debug=false", self.current()["vmArgs"])
         self.assertIn("'false'", self.run_cli("status").stdout)
+        self.run_cli("remove")
+        self.assertEqual(self.current(), self.original)
+
+    def test_early_ui_is_optional_preserved_and_removable(self):
+        unrelated = "-Dluabuddy.earlyUIExtra=unchanged"
+        self.original["vmArgs"].append(unrelated)
+        self.save(self.original)
+        self.run_cli("install")
+        self.assertFalse(any(arg == "-Dluabuddy.earlyUI=true" for arg in self.current()["vmArgs"]))
+        config = self.current()
+        config["vmArgs"].extend(["-Dluabuddy.earlyUI", "-Dluabuddy.earlyUI=false"])
+        self.save(config)
+        self.run_cli("install", "--early-ui")
+        self.assertEqual([arg for arg in self.current()["vmArgs"] if arg == "-Dluabuddy.earlyUI"
+                          or arg.startswith("-Dluabuddy.earlyUI=")], ["-Dluabuddy.earlyUI=true"])
+        installed = self.launcher.read_bytes()
+        self.run_cli("install")
+        self.run_cli("install", "--early-ui")
+        self.assertEqual(self.launcher.read_bytes(), installed)
+        self.assertEqual(list((self.root / "config").iterdir()), [])
+        self.assertIn("-Dluabuddy.earlyUI=true", self.run_cli("status").stdout)
+        self.run_cli("install", "--no-early-ui")
+        self.assertNotIn("-Dluabuddy.earlyUI=true", self.current()["vmArgs"])
+        self.assertIn(unrelated, self.current()["vmArgs"])
+        self.run_cli("install", "--early-ui")
         self.run_cli("remove")
         self.assertEqual(self.current(), self.original)
 

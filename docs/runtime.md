@@ -2,6 +2,8 @@
 
 LuaBuddy provides manual runtime loading through the game's existing Mod Options. It keeps one Lua module registry and require resolver per multiplayer environment. It uses Project Zomboid for discovery, metadata, mounting and translations, and ZombieBuddy for callback ownership. There is no additional service, file watcher, network listener or dependency.
 
+Initial restoration normally runs immediately before native `OnGameStart`. Opt in with `python3 luabuddy.py install --early-ui` to restore the same selected batch before native `OnCreateUI`, after the multiplayer Lua reset and before `OnCreatePlayer` constructs player windows. Upstream constructors and player callbacks then run through their normal paths. The option applies to every selected profile; custom hooks must tolerate absent player UI. `OnGameStart` remains a fallback if an environment omits the earlier event. Runtime requests remain unavailable until the real `OnGameStart` callbacks finish. Adding a profile during play still requires any integration-specific setup for already existing objects. `install --no-early-ui` removes the opt-in; an ordinary reinstall or update preserves it. Changing this launcher option requires a normal game restart.
+
 ## Load a new selection
 
 1. Install the upstream mod and select its profile using the existing installer or configuration files.
@@ -21,9 +23,9 @@ id=Example
 replay=OnGameStart
 ```
 
-During normal initial restoration, the real event runs once. During runtime loading, only callbacks from that mod's restored upstream source files run, after the entire new batch's client scripts and `after` hooks. No global startup event is triggered. Other events, arguments and earlier game state are not reconstructed. Profile-hook and shared-helper registrations are outside this automatic ownership set; initialize those explicitly in hooks and clean up their exact registrations when needed.
+During initial restoration, the real `OnGameStart` and following `OnLoad` events run normally. Runtime loading replays opted-in callbacks from the new batch's restored source files after all new client scripts and `after` hooks, first `OnGameStart`, then `OnLoad`. Each event uses its native callback-registration order, including shared files that registered before client files from another profile. No global event is triggered. Callback snapshots exclude foreign sources, and a failed owner skips its remaining callbacks. Other events, arguments and earlier game state are not reconstructed. Profile-hook and shared-helper registrations are outside this automatic ownership set; initialize those explicitly in hooks and clean up their exact registrations when needed.
 
-The bundled Loot Tracker and Nutrition Helper profiles request this runtime initialization. A previously installed profile needs the additive `replay=OnGameStart` opt-in before loading Loot Tracker mid-session. Add it only after starting a runtime-capable loader; older loaded helpers reject that new replay value. An already-loaded Loot Tracker is skipped by refresh.
+Bundled profiles opt in where current upstream initialization requires it, including Auto All, AllTheInfo, LootSense Storage, Easy Pickings, the context-menu icons, What It Does, Loot Tracker and Nutrition Helper. Mod Manager requests its persistence bootstrap too. Alarm Syndrome additionally requests `OnLoad`; that event follows startup callbacks and is not replayed during initial restoration. Existing profiles are preserved by installation, so template corrections need an additive profile update before first runtime loading. An already-loaded profile is skipped by refresh. Older helpers retain their own lifecycle behavior until a normal game restart.
 
 ## Reload a cooperating profile
 
@@ -66,6 +68,8 @@ local ok, message = LuaBuddy.reload("Example")
 Each returns a boolean and a result message. Requests are refused before mutation during startup, from another thread, through a retired Lua environment, while an operation is already running, or while Options has pending changes. Native controls use these same functions. Loading is synchronous and may briefly pause the client while files compile.
 
 Dependencies already running locally remain available. A newly requested `before` relationship or another declared order that would need to precede running code requires reconnecting. Runtime loading also refuses to replace an existing module path or change an existing effective import provider. It preserves shared/client identity, shared-preferred aliases, cached tables, `nil` and `false`, and require closures captured by already-running code.
+
+Initial restoration also refuses ordering that would require local code to precede an already loaded native mod. Native `loadModAfter` metadata and enabled native profiles' reciprocal `after` rules are retained even when their source is skipped. Reconnecting with the same native selection cannot reorder that code; use a compatible local selection or normal native loading for the affected integrations. The loader does not rerun native mods to repair unknown wrapper chains.
 
 Diagnostics retain the environment session and actual mod records, while recording the latest operation, reload target, timing and errors. A preflight refusal leaves the old generation callable. The report describes initialization operations, not every later gameplay callback.
 
