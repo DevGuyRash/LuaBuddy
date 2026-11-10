@@ -66,7 +66,10 @@ struct Options {
 
 impl Options {
     fn parse() -> Result<Self> {
-        let mut args = env::args().skip(1);
+        Self::parse_args(env::args().skip(1))
+    }
+
+    fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let mut values = BTreeMap::new();
         let mut deciding = false;
         let mut auto_ui = false;
@@ -201,13 +204,11 @@ impl Options {
         }) {
             return Err("Extra JVM arguments cannot replace benchmark ownership, agents, or empty profile selection".into());
         }
-        if result.deciding
-            && (result.single.is_some()
-                || result.rounds < 5
-                || result.seconds < 30
-                || !result.runtime.to_string_lossy().contains("release"))
+        if result.deciding && (result.single.is_some() || result.rounds < 5 || result.seconds < 30)
         {
-            return Err("Deciding evidence needs five paired runs, at least30 measured seconds, and a release runtime path".into());
+            return Err(
+                "Deciding evidence needs five paired runs and at least 30 measured seconds".into(),
+            );
         }
         if result.growth
             && (result.deciding
@@ -1364,6 +1365,58 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deciding_inputs_accept_packaged_and_resolved_cache_paths_and_keep_workload_gates() {
+        let fixture = OwnedDirectory::new().unwrap();
+        let game = fixture.0.join("game");
+        let packaged = fixture.0.join("dist/LuaBuddy-linux-x86_64/runtime.so");
+        let cached = fixture.0.join("cache/runtime.so");
+        let observer = fixture.0.join("observer.so");
+        for path in [
+            game.join("projectzomboid.jar"),
+            game.join("jre64/bin/java"),
+            packaged.clone(),
+            cached.clone(),
+            observer.clone(),
+        ] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"argument validation fixture").unwrap();
+        }
+        let args = |runtime: &Path| {
+            vec![
+                "--game-dir".to_owned(),
+                game.to_string_lossy().into_owned(),
+                "--runtime".into(),
+                runtime.to_string_lossy().into_owned(),
+                "--observer".into(),
+                observer.to_string_lossy().into_owned(),
+                "--out".into(),
+                fixture.0.join("out").to_string_lossy().into_owned(),
+                "--deciding".into(),
+            ]
+        };
+        let options = Options::parse_args(args(&packaged).into_iter()).unwrap();
+        assert!(options.deciding);
+        assert_eq!(options.runtime, packaged.canonicalize().unwrap());
+        assert_eq!((options.rounds, options.seconds), (5, 30));
+
+        let release_link = fixture.0.join("release/runtime.so");
+        fs::create_dir(release_link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&cached, &release_link).unwrap();
+        let options = Options::parse_args(args(&release_link).into_iter()).unwrap();
+        assert_eq!(options.runtime, cached.canonicalize().unwrap());
+
+        for (key, value) in [
+            ("--rounds", "4"),
+            ("--seconds", "29"),
+            ("--single", "baseline"),
+        ] {
+            let mut arguments = args(&packaged);
+            arguments.extend([key.to_owned(), value.to_owned()]);
+            assert!(Options::parse_args(arguments.into_iter()).is_err());
+        }
+    }
 
     #[test]
     fn a_late_cleanup_fault_is_rechecked_from_the_complete_log() {
