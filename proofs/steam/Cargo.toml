@@ -1,0 +1,11 @@
+[package]
+name = "luabuddy-steam-proof"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+jni = { version = "=0.21.1", features = ["invocation"] }
+libloading = "=0.8.9"

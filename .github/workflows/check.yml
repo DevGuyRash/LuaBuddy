@@ -1,20 +1,31 @@
-name: Portable installer
+name: Rust verification
 
 on:
   push:
   pull_request:
 
 jobs:
-  installer:
+  portable:
+    name: Portable Rust checks (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python: ['3.10', '3.14']
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-python@v7.1.0
-        with:
-          python-version: ${{ matrix.python }}
-      - run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Read pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Fetch locked workspace dependencies
+        run: cargo fetch --locked
+      - name: Check source, behavior, extensions, and package
+        run: cargo xtask check --portable
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install pinned advisory checker
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Check portable behavior and dependency advisories
+        run: cargo xtask check --portable --audit

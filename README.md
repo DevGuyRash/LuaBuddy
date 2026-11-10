@@ -1,91 +1,45 @@
 # LuaBuddy
 
-LuaBuddy restores locally installed Project Zomboid client and shared Lua when a multiplayer connection resets the Lua environment to the server's mod list. Add a profile for a mod ID to load it. The loader has no built-in list of mod IDs. Bundled compatibility profiles and Lua hooks are optional; a fresh installation selects no mods.
+LuaBuddy is a Rust-native client/shared Lua loader, in-game mod manager, and reusable JVM patcher for Project Zomboid. The native runtime uses the game's existing Java classes and Kahlua interpreter. It has no ZombieBuddy, Python, extra interpreter, or runtime compiler dependency.
 
-LuaBuddy is a general-purpose **late client Lua loader**. It cannot make every kind of mod work on an arbitrary server. Mods that need server code, earlier startup events, maps, item definitions, Java patches, or assets registered during normal mod loading still need their normal installation. Auto All's worn-clothing repair synchronization requires its server component. A profile cannot supply that component.
+A fresh installation selects no mods. Bundled profiles are optional integrations. Workshop subscription, download, installation, native activation, profile selection, and live loading are separate states.
 
-Version 1.4 adds opt-in early restoration with `install --early-ui`. It restores the selected batch before native `OnCreateUI`, ahead of player UI construction and `OnCreatePlayer`, while retaining `OnGameStart` as a fallback. This lets upstream constructors and player callbacks initialize normally instead of requiring startup UI repairs. The default remains restoration before `OnGameStart`. The option affects all selected profiles, so custom hooks must tolerate player UI that has not been constructed. Use `install --no-early-ui` to return to the default. Installing this core update requires your next normal game restart; reconnecting alone cannot replace the running Java helper.
+The native adapter and installer currently target Linux x86_64. Windows and macOS game execution remain unverified. Steam Workshop delivery does not yet provide a demonstrated subscribe-only activation route for this native runtime. [Compatibility](docs/compatibility.md) records that gate without treating an installer as one-click Workshop setup.
 
-The loader and native startup hook have been verified against Project Zomboid **42.21.0 Stable** and **42.22.0 Pre-Release** with **ZombieBuddy 2.3.4** and Java **25**. The 42.22 check uses official preview binaries; a full preview client/server play test remains unverified. See [compatibility](docs/compatibility.md) for the exact scope. Workshop source updates do not require rebuilding LuaBuddy.
+## Build and install
 
-## Install on Linux
-
-Install Python 3.10 or newer and JDK 25 or newer. Install the mods through Steam Workshop or the game's local mods directory. Run these commands from this repository.
+Build with the pinned Rust toolchain and lockfile, then create an integrity-checked package. Do not copy proprietary game files into a package.
 
 ```sh
-python3 luabuddy.py install
-python3 luabuddy.py status
+cargo build --release --locked
+target/release/luabuddy package --runtime target/release/libluabuddy_host.so --profiles-dir profiles --out dist/LuaBuddy-linux-x86_64
+target/release/luabuddy verify-package --package dist/LuaBuddy-linux-x86_64
+dist/LuaBuddy-linux-x86_64/luabuddy install --package dist/LuaBuddy-linux-x86_64 --game-dir /path/to/ProjectZomboid
 ```
 
-Installation downloads the current stable ZombieBuddy JAR when needed, builds LuaBuddy, and verifies the candidate through the real game classes and instrumented startup event before installing it. The JAR is cached locally and is not embedded in this repository. `build` prepares a verified local build without installing it.
+Quit and relaunch the game through its normal native launcher. Installation writes a reversible `ProjectZomboid64.site.json` override and leaves Steam's base launcher JSON intact. A running JVM keeps its current library until exit. See [installation, migration, repair, rollback, and uninstall](docs/evolution/install.md).
 
-The installer discovers Steam libraries. If discovery is ambiguous or the game lives elsewhere, pass `--game-dir` to each command. Both flat `projectzomboid.jar` and `java/projectzomboid.jar` layouts are supported, including a `projectzomboid` child directory.
+The installer copies the full declarative template catalog into an immutable generation. It copies only explicitly selected profiles into the active configuration.
 
 ```sh
-python3 luabuddy.py install --game-dir /path/to/ProjectZomboid --mod AllInfo --mod AutoAll
+luabuddy install --package dist/LuaBuddy-linux-x86_64 --mod AllInfo --mod AutoAll
 ```
 
-## Install on Windows
+Use `--game-dir` or `PZ_GAME_DIR` when Steam discovery does not identify one installation. `luabuddy discover`, `verify`, `doctor`, and `diagnostics` return JSON. File verification establishes installation integrity; the runtime report and actual game checks establish whether loading succeeded.
 
-Install Python 3.10 or newer and JDK 25 or newer, with `javac` and `jar` available through `JAVA_HOME` or `PATH`. Open PowerShell in this repository.
+## Manage mods in the game
 
-```powershell
-py -3 luabuddy.py install
-py -3 luabuddy.py status
-```
+Open **Options > Mods > LuaBuddy > Manage mods**. Browse installed content or search Workshop through the initialized game Steam context. Details show identity, available metadata, dependencies, source, and observed delivery and activation states. Network failures and unavailable items remain visible as failures.
 
-Pass `--game-dir 'D:\SteamLibrary\steamapps\common\ProjectZomboid'` when the installer cannot find the game. Use the game's normal 64-bit launch mode. The alternative launch scripts do not read the launcher's JSON configuration.
+An explicit Add or Download action requests the corresponding Steam operation. A subscribed item remains distinct from an installed item, and installed content remains distinct from a loaded profile. Closing a download view stops observation where native cancellation is unavailable; Steam can continue downloading.
 
-## Start and update the game
+Use **Enable late** for an eligible client/shared profile and **Startup enable** for the game's next normal native loading path. These selections have separate persisted states. Apply or discard pending Options edits before changing either selection. **Load new profiles** restores eligible multiplayer client/shared content; repeated refresh preserves loaded module objects and callbacks. [Runtime behavior](docs/runtime.md) defines native-startup, missing-server-code, ordering, and lifecycle limits.
 
-After installation, quit the game normally and relaunch through Steam. Changes apply to the next launch. A running game keeps its current adapter until it exits.
+**Reload a profile** requires explicit upstream cleanup cooperation. LuaBuddy compiles and validates the replacement before calling the running generation's captured cleanup function. A refusal retains the old generation. Uncertain cleanup or failed activation quarantines it and requires reconnecting. Bundled profiles do not gain safe reload simply because they load successfully.
 
-The installer replaces the legacy `PZClientMods` adapter arguments when present and preserves unrelated launcher settings. It saves the previous launcher configuration before changing it. Running `install` again is safe. After rebuilding LuaBuddy or after a game update resets the launcher configuration, run `install` again.
+## Select optional integrations
 
-If another ZombieBuddy agent or a combined patch list is already configured, installation stops before changing the launcher. Combine those patches manually rather than adding a second agent. Removal also leaves a combined agent untouched and reports that it needs manual editing.
-
-Keep your `config` directory at the path printed by `status`. The launcher points to that directory. The installer stages runtime JARs beside the game so ZombieBuddy can use a relative patch path on Windows.
-
-## Update ZombieBuddy
-
-Check the installed JAR against the latest stable official release, then update when needed.
-
-```sh
-python3 luabuddy.py update --check
-python3 luabuddy.py update
-```
-
-On Windows, use `py -3`. `update --check` fetches fresh release metadata without changing files. It returns `0` when current, `2` when an update is available, and `1` on error. The updater selects stable releases containing exactly `ZombieBuddy.jar`; GitHub's general latest release can instead be a Windows installer.
-
-`build` and `install` check automatically when the verified local selection is missing or more than one hour old. Downloads must match GitHub's published SHA-256, asset size, and JAR manifest version. The candidate helper/framework pair must compile and pass the native startup-hook and game-API checks before promotion. A failed download, integrity check, or compatibility check leaves the installed files unchanged.
-
-Verified JARs and release metadata are cached under `.local/dependencies/zombiebuddy/`. The build record ties the helper to its source inputs, game JARs, selected Java executable and runtime release metadata, and framework hash. An unchanged verified build is reused. Changes to that Java runtime trigger a new native compatibility check even when the game JAR is unchanged. For offline use, pass `--offline` to `build`, `install`, or `compatibility`. An automatic network failure can use a verified cached release with a warning. Explicit `update` fails if it cannot check the current release.
-
-Checks happen when you run these commands. The Steam launch flow is unchanged, and a running JVM keeps its loaded agent until a full restart. The diagnostic report records the ZombieBuddy version loaded in that JVM when available. `doctor` shows installed and cached version information without contacting GitHub. `status` reports configured paths and file presence.
-
-## Add another mod
-
-Use the exact `id=` value from the mod's `mod.info`.
-
-```sh
-python3 luabuddy.py install --mod AnotherModID
-```
-
-For an unknown mod, the installer creates `config/AnotherModID.properties` containing `id=AnotherModID`. IDs with spaces, punctuation, Unicode, or Windows reserved names use a stable `mod-<hash>.properties` filename while preserving the mod ID inside. Quote such IDs on the command line, for example `--mod 'Spiffo Knew [B42]'`. For a bundled profile, the installer copies the profile and its Lua hook. Existing profiles stay intact. With the runtime-capable loader already running, use **Options > Mods > LuaBuddy > Load new profiles** to load newly enabled profiles. Otherwise reconnect or restart. To disable one profile for the next connection, set `enabled=false` in that file.
-
-### Load and reload during play
-
-After installing this loader version and starting the game with it, **Load new profiles** reads the existing configuration and loads only new selections. Loaded mods retain their module objects, event registrations, and settings. Apply or discard pending Options edits first; the action rebuilds the native Mods page so newly registered preferences appear there. It does not add missing server code or make every mod safe to initialize late.
-
-**Reload a profile** accepts one configured mod ID in a native dialog. It requires the running profile's explicit `unload(context)` hook, checks dependencies and ordering, and compiles replacement Lua before cleanup. Existing bundled profiles do not claim safe reload automatically. See [runtime loading](docs/runtime.md) for the API, cleanup contract, refusal behavior, and verification scope.
-
-### Optional bundled profiles
-
-Subscribe to the upstream Workshop items separately, then select only the profiles you want with `--mod`. Neither these mods nor their dependencies are selected automatically. For example, to add AllTheInfo and Auto All:
-
-```sh
-python3 luabuddy.py install --mod AllInfo --mod AutoAll
-```
+Install the upstream content and choose only the integrations you want. Native dependency metadata remains authoritative. Select additional dependency profiles only when the server or native loader does not already supply them.
 
 | Workshop mod | `--mod` ID | Integration |
 | --- | --- | --- |
@@ -114,138 +68,40 @@ python3 luabuddy.py install --mod AllInfo --mod AutoAll
 | [Mod Manager Reforged (Client)](https://steamcommunity.com/sharedfiles/filedetails/?id=3737874810) | `MMReforgedC` | Mount images and run its missed boot patch registration. Enable it normally in the game's Mods menu for the main-menu manager. |
 | [NeatUI Framework](https://steamcommunity.com/sharedfiles/filedetails/?id=3508537032) | `NeatUI_Framework` | Optional dependency profile for NeatUI Inventory and Mechanics; mount the framework's UI images. |
 
-For NeatUI Inventory, subscribe to both Workshop items and select both profiles unless the server already loads the framework:
+Existing profiles and settings survive adding another selection. Auto All and AllTheInfo remain independent optional integrations. The integration code lives in `profiles/hooks.rs`; generic loader and patcher code does not select a default mod set.
 
-```sh
-python3 luabuddy.py install --mod NeatUI_Framework --mod NeatUI_Inventory
-```
+Late client loading cannot register every native asset, execute missing server code, or reconstruct earlier world state. Auto Fishing's custom animation and sandbox-page setup require normal loading. Alarm Syndrome's server-synchronized custom action needs its server component. Better Crafting's server fixes are not supplied by its client profile. Mod Manager Reforged's own initial-menu integration requires normal native activation. LuaBuddy's manager edits LuaBuddy selections rather than replacing that mod's presets.
 
-For NeatUI Mechanics, select `NeatUI_Framework` and `NeatUI_Mechanics` instead, or select both NeatUI integrations with the shared framework. Mechanics requires game version 42.21 or newer. Its action buttons use the native part menu, including Auto All's additions.
+Declared order also applies to already running mods. Nutrition Helper must precede AllTheInfo. NeatUI Inventory must precede the wrappers named by its profile. An incompatible runtime addition is refused before mutation. Use a compatible new connection or normal native loading.
 
-On Windows, use `py -3` in these examples. Existing selections remain when adding another profile. No new integration disables Auto All or AllTheInfo features. Other combinations and custom profiles continue to use native dependency metadata and explicit ordering. These profiles do not fix upstream gameplay bugs or provide missing server components; QuickStack keeps its upstream multiplayer transfer implementation.
+Upstream gameplay limitations remain upstream. File mounting does not register maps, item definitions, animation sets, or every texture cache. The profiles preserve the game's active server list and do not bypass checksums or server authority.
 
-Auto Fishing reads `SandboxVars.AutoFishing` when the world supplies it and otherwise uses its upstream defaults. Late client loading does not register its sandbox-options page or change the server's sandbox settings. Its custom seated bait-changing animation also requires normal animation-set loading; file mounting alone does not register that animation node. ReloadAllAmmo uses the game's ordinary magazine load/unload actions; Gunworks remains an optional upstream integration.
+## Configure a profile
 
-Loot Tracker uses the server's sandbox settings and synchronized world time for its vanilla respawn-wave countdown. The countdown does not guarantee a particular container refills: server eligibility rules still apply, and the mod infers restocks from item counts in loaded containers. Custom server respawn schedules require support from that server's mod. Loot Tracker's own sandbox options use upstream defaults when absent.
-
-Batch Craft Recipe also adds `InHandCraft` and removes `AnySurfaceCraft` on client craft recipes. The profile retains those upstream changes; they do not supply missing server-side recipe changes. Nutrition Helper must precede AllTheInfo, so adding it after AllTheInfo requires a compatible new connection. Load both locally in that order, or normally through the native loader; reconnecting with AllTheInfo still loaded by the server cannot satisfy the declared local ordering. Missing Nutrition Helper sandbox values use upstream defaults, and late loading does not register a server sandbox-options page.
-
-Quick Build Menu currently declares support for game versions 42.20 through 42.21.99. Its startup cleanup uses the shared recipe-favorites namespace with a build-only allowlist. When LuaBuddy restores the mod, its profile preserves valid handcraft favorites while retaining that cleanup. Adding the profile during play does not replay the startup cleanup. Server-loaded copies are skipped by LuaBuddy and retain upstream startup behavior.
-
-Better Crafting's current version also includes a server-side fish-fillet synchronization fix. Client loading retains its UI and client features but cannot supply that server fix. Its optional cross-save favorites import runs on native `OnCreatePlayer`. Enable `install --early-ui`, restart normally to apply that launcher option, then join with cross-save favorites enabled. If early mode is already running, reconnect after adding the profile during play. XP rewards use upstream audited indexes, so unaudited mod recipes can show an unknown reward.
-
-Alarm Syndrome's current custom alarm-unsetting action uses the native server-synchronized timed-action path. Manual and automatic unsetting need its action definition installed normally on the server. Client restoration supplies its overlay, preferences and menu initialization without replacing that action.
-
-Mod Manager Reforged manages the game's native mod selections and presets. It does not edit LuaBuddy profiles. LuaBuddy runs after connecting to multiplayer, so its profile cannot provide a mod manager on the initial main menu. Subscribe and enable `MMReforgedC` normally for that screen; the optional profile restores its client modules after the multiplayer Lua reset.
-
-The installer rejects filename collisions before writing, including names that differ only by case on Windows. When using `--mod`, existing profiles must have one unindented `id=` entry with plain text, escaped spaces, or escaped backslashes. The runtime accepts Java properties syntax, but the installer refuses advanced or ambiguous identity syntax instead of guessing. Manage those profiles manually or use the conventional `id=` form.
-
-The game's own mod discovery finds installed mods and chooses their `common` and version directories. To select a mod outside those directories, add `path=/absolute/path/to/mod` to its profile. Point at the directory above `42`, `42.20`, and `common`, so version selection can continue to follow upstream updates. Use forward slashes in Windows properties paths, such as `path=D:/Mods/Example`. Relative paths resolve against the profile's directory.
-
-## Profile reference
-
-Profiles are UTF-8 Java properties files in `config`. Each file has one mod ID. Lists use semicolons. Duplicate IDs, unknown options, missing required mods, and cyclic load order produce diagnostics in the game log. Install each required dependency as a profile too, unless the server already enables it.
-
-| Option | Meaning |
-| --- | --- |
-| `id` | Required mod ID matching `mod.info`. |
-| `enabled` | `true` by default. Set `false` to skip this profile. |
-| `path` | Optional mod root. Otherwise use native installed-mod discovery. |
-| `workshop` | Optional numeric Workshop item ID for a mod packaged directly at the item root. Native mod-ID discovery takes precedence; otherwise Steam locates the item and the native parser reads its root `mod.info`. Set `path` as well when Steam is unavailable. |
-| `requires` | Additional required mod IDs. Native `require=` dependencies always apply. |
-| `after` | Optional ordering after other configured IDs. Native `loadModAfter` also applies. |
-| `before` | Optional ordering before other configured IDs. Native `loadModBefore` also applies. |
-| `exclude` | Glob patterns relative to `media/lua`, such as `client/Example/SelfTest.lua`. |
-| `excludeWhen.ModID` | Additional exclusions when that mod is active on the server. |
-| `preload` | Modules to require before this mod's shared and client files execute. |
-| `plugin` | Optional Lua hook file relative to this profile's directory. |
-| `mount` | `false` by default. Set `true` to publish the mod's common/version file paths through the game's native `loadMod` API, including loose UI images. Does not activate the mod or execute its server Lua. |
-| `replay` | Optional `OnGameBoot`, `OnGameStart`, and/or `OnLoad`. Missed boot callbacks run after client files and before the profile's `after` hook. During runtime loading, opted-in startup callbacks run after all new files/hooks, first `OnGameStart`, then `OnLoad`, preserving native registration order within each event. Initial restoration uses the real startup/load events. Only opted-in restored-source callbacks run, without arguments. |
-
-For example, a mod with no special compatibility rules needs only its ID. Add the other options only when the mod requires them.
+Use the exact native `id=` from the mod's `mod.info`. An arbitrary mod starts with a declarative ID-only profile.
 
 ```properties
 id=Example
-exclude=client/Example/SelfTest.lua
-preload=Vehicles/ISUI/ISVehicleMechanics
-plugin=Example.lua
 ```
 
-A plugin returns a table with optional `before(context)`, `after(context)`, and `unload(context)` functions. Keep imports and initialization inside those hooks. `before` runs before the shared phase. `after` runs after that mod's client phase, before dependent client files. `context.id` is the mod ID, `context.active` contains server-loaded and successfully loaded local IDs, and `context.state.mods` holds each profile's status. `context.runtime` and `context.operation` (`startup`, `refresh`, or `reload`) describe that generation's activation. Its `unload` hook receives the same original context; see the [cooperative-reload contract](docs/runtime.md). Plugins run trusted local code in the game's Lua environment.
+Profiles support native-root discovery or an explicit `path`, dependency and optional ordering metadata, source exclusions, preloads, scoped replay, opt-in mounting, explicit live-loading policy, Rust hook identifiers, and a bounded upstream cleanup path. See the [profile and lifecycle reference](docs/runtime.md).
 
-```lua
-return {
-    after = function(context)
-        print("Initialized " .. context.id)
-    end,
-}
-```
+Reviewed original bundled Lua hooks migrate only when their exact filename and SHA256 match the package's migration catalog. Original files and recovery copies remain intact. Modified or unknown executable hooks receive a precise migration error and are never silently executed as first-party compatibility code.
 
-## Loading behavior
+## Develop patches and extensions
 
-ZombieBuddy applies one event patch that normally restores before `OnGameStart`, or before `OnCreateUI` when early mode is enabled. LuaBuddy runs only on multiplayer clients. Single player and dedicated servers use their normal loading paths. A mod already present in the server's active list is skipped. Declared ordering still applies to skipped native mods; an impossible order is refused before hooks, source execution or mounts. Each Lua environment initializes one session, including after disconnecting and rejoining in the same JVM. Runtime requests reuse that session and its require resolver after the native startup event finishes.
+The reusable Rust registry provides exact targets and fingerprints, ownership, deterministic priority and dependencies, explicit capability negotiation, receipt-based installation, conflict diagnostics, and scoped disable. The JVM backend currently supports entry observation, integer argument changes, and integer-like replacement. It rejects unsupported after, around, reference-replacement, and result-edit operations.
 
-LuaBuddy reads upstream files without editing them. Version-specific files replace matching common files. It compiles a mod's sources before executing them, loads the shared phase before the client phase, and orders mods using native dependency metadata. Files with the same relative path follow that mod order, with later mods taking precedence. Shared and client files with the same module name remain distinct scripts. `require` prefers shared modules and caches the first return value, including `nil` and `false`.
+Compiled Rust extensions use a versioned C ABI. Loading requires exact artifact, provenance, privilege, install, and enable approval. A downloaded Workshop library has no automatic native execution permission. Native extensions have the process's OS privileges. Read the [Rust patcher API and ABI](docs/evolution/patcher.md) and [JVM backend contract](docs/evolution/jvm-patcher.md).
 
-An environment-local `require` resolver remains available for imports from later callbacks and other configured mods. Imports outside the local registry go to the game's original `require`. LuaBuddy uses the game's translation parser for language fallback and placeholders. It does not change the server mod list or the checksum calculation.
+## Verify a checkout
 
-Failures appear in `console.txt` under `[LuaBuddy]`, and in `LuaBuddy.mods` inside Lua. A failed mod is not retried in the same environment because Lua side effects cannot be rolled back. Unrelated mods can continue. A dependent mod fails when its required mod fails. Fix the cause and reconnect or restart.
-
-Late loading does not replay the game's startup lifecycle. A profile can opt into `replay` for its own missed callbacks when they are safe to run late. Runtime-only `OnGameStart` replay occurs after all new client scripts and `after` hooks; initial restoration lets the native event run normally. Other mods' callbacks are not triggered. Native event subscriptions remain intact; use replay only for initialization that is safe if the game later emits the event again. Replay does not reproduce event arguments, earlier game state, or callbacks registered outside that mod's restored sources, including profile and shared-helper callbacks.
-
-Opt-in file mounting exposes the upstream mod's files through the native virtual filesystem, with normal common/version precedence and later mounted mods winning path collisions. Images remain subject to the game's path validation: use native-discovered mod roots for assets. An explicit external `path` can supply Lua without making that path valid for native image loading. Mounting does not load texture packs, animation sets, item definitions, maps, or server code, invalidate previously cached textures, or change the server's active mod list. Files mounted or callbacks registered before a failure can remain in that environment. Reconnect or restart after fixing a failure. Calls that require full mod activation and mods that replace `require` may still need additional integration. LuaBuddy does not automatically turn client code into server code.
-
-Easy Pickings currently packages `mod.info` and `media` directly at its Workshop item root. Its profile's `workshop` fallback handles that layout without moving or copying its files. Native versioned discovery takes over if upstream adopts the normal mod layout. With Steam disabled, set this profile's `path` to the installed item's root.
-
-## Diagnose loading problems
-
-Run the read-only installation check and inspect the last loader initialization report.
+Run the portable aggregate without proprietary game files, or supply a supported installed game for native proofs.
 
 ```sh
-python3 luabuddy.py doctor
-python3 luabuddy.py diagnostics
-python3 luabuddy.py diagnostics --json
+cargo xtask check --portable --offline
+cargo xtask check --offline --game-dir /path/to/ProjectZomboid
+cargo xtask check --offline --audit --game-dir /path/to/ProjectZomboid
 ```
 
-On Windows, use `py -3` instead of `python3`. `doctor` checks launcher arguments, the configured debug value, runtime files, profiles, and the last initialization report. A missing report produces a warning. It does not mean the current game has loaded the mods successfully. The JSON forms support scripts and return a nonzero exit code for diagnosed failures or invalid data.
-
-Each multiplayer Lua environment writes one `LuaBuddy/diagnostics.json` file beneath the game's cache directory. The default is `~/Zomboid/LuaBuddy/diagnostics.json` on Linux and `%USERPROFILE%\Zomboid\LuaBuddy\diagnostics.json` on Windows. If you launch the game with a custom `-cachedir`, pass that directory to either diagnostic command.
-
-```sh
-python3 luabuddy.py doctor --cache-dir /path/to/game-cache
-python3 luabuddy.py diagnostics --cache-dir /path/to/game-cache --json
-```
-
-The report records the environment session ID, latest operation and optional reload target, UTC timestamps, loader/game/Java versions, selected profile and source paths, loaded/skipped/disabled/failed counts, initialization stages, and available Lua/Java error traces. Runtime operations retain the session and actual running-mod records. A refused replacement can report an operation error while the old mod remains loaded. Later gameplay callbacks continue through the game's normal error logging. An old successful report can remain if a later launch never reaches LuaBuddy, so check its session and completion time.
-
-Normal logging writes a startup summary, per-mod result, and report location to the game's existing console logs under `[LuaBuddy]`. To record each initialization stage and source filename, enable debug logging and restart the game.
-
-```sh
-python3 luabuddy.py install --debug
-```
-
-Use `install --no-debug` to turn detailed logging off. Ordinary reinstallations preserve the chosen setting. Report-write failures appear as warnings and do not prevent healthy mods from loading. Reports stay local and contain selected file paths and unredacted error text. The collector does not read complete game logs, unrelated launcher settings, environment variables, or player/server/save records.
-
-## Remove LuaBuddy
-
-```sh
-python3 luabuddy.py remove
-```
-
-On Windows, use `py -3 luabuddy.py remove`. Restart the game afterward. Removal preserves unrelated launcher settings and your profiles.
-
-## Build and verify
-
-`luabuddy.py build` downloads or reuses a verified stable ZombieBuddy JAR, compiles against the selected game's classes, and runs the native compatibility gate. It emits Java 25 bytecode in `dist/LuaBuddy.jar` and provenance in `dist/LuaBuddy.build.json`. There is no Maven, Gradle, Python package installation, or replacement Java patch framework.
-
-To verify another game installation without installing the helper or replacing the current build, run:
-
-```sh
-python3 luabuddy.py compatibility --game-dir /path/to/preview --offline
-```
-
-The compatibility check uses temporary files inside that game directory and writes its last log to `.local/compatibility.log`. It verifies native APIs and the actual instrumented `OnGameStart` event. It does not join a multiplayer server or establish compatibility with every server anti-cheat or mod combination.
-
-Installation prepares every changed file before replacing runtime files and activates the launcher last. Ordinary replacement failures attempt to restore the previous files. The original launcher backup is published atomically. This protects failed writes; it is not a transaction across a power loss or filesystem failure.
-
-See [verification](docs/verification.md) for checks, evidence, and runtime limits. See [third-party software](THIRD_PARTY.md) for upstream references and licenses.
+An offline build needs the locked dependencies and advisory database already cached. [Verification](docs/verification.md) describes fetching those development inputs, evidence, exact proof scope, and separate graphical and performance gates. The [behavior ledger](docs/evolution/behavior.md) maps the old functionality to its Rust replacement. The [original evolution request](docs/evolution/request.md) remains the acceptance source.

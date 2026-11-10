@@ -1,0 +1,12 @@
+ts	phase	decision	why	evidence	result
+2026-11-09T22:09:47Z	frame	Retain original request and verify the existing implementation before replacing it	The acceptance gates must come from the user's plan	docs/evolution/request.md;84d495a	baseline passed
+2026-11-09T22:09:47Z	model	Use GPT models for all work including UI	The user explicitly said no claude at all this time	docs/evolution/status.md	applied
+2026-11-09T22:09:47Z	native	Investigate an existing host callable with selective native interception	Rust needs a real Kahlua callable without generated foreign helpers	crates/luabuddy-host/src/proof.rs	initial identity proof passed
+2026-11-09T22:09:47Z	installation	Investigate a complete site launcher override	The actual launcher accepted it in a disposable probe while leaving the base configuration untouched	docs/evolution/status.md	Linux bootstrap mechanism proved; native activation pending
+2026-11-10T01:30:53Z	native	Select declaration-only native binding for existing host callable	Actual JVM tests proved values identity reentrancy and exceptions without foreign helpers	crates/luabuddy-host/src/bridge.rs	verified
+2026-11-10T01:30:54Z	parity	Preserve original profile-file scan and same-pass dependency order	ID-sorted batches changed the winner for overlapping user modules	crates/luabuddy-core/tests/contracts.rs	core and actual runtime regressions passed
+2026-11-10T01:30:54Z	migration	Port all 24 profiles and 16 hooks to Rust and declarative data	The actual inventory and recognized user hook hashes determine migration	profiles/migration.json	exact hook migration passed
+2026-11-10T01:30:54Z	review	Fix independently reproduced ownership and workflow defects	Classloaders callbacks approvals and native controls need actual counterexamples	docs/evolution/verification-report.md	independent reruns passed
+2026-11-10T01:30:54Z	release	Use direct pinned compilers and actual rustc dependency inputs	The cached Cargo dispatcher could not prove independent code generation	docs/evolution/reproducible.md	two-path binaries package and archive identical
+2026-11-10T01:30:54Z	verification	Verify exact optimized runtime and CLI through immutable snapshots	Debug builds and a manifest alone do not establish release behavior	docs/verification.md	44 aggregate checks passed
+2026-11-10T01:30:54Z	workshop	Keep account mutations unrun and one-click activation unmet	The user chose read-only checks and the inspected host lacks a native Workshop activation action	docs/evolution/workshop.md	external acceptance gates open

@@ -1,80 +1,89 @@
-# Load profiles during play
+# Runtime loading and profile reference
 
-LuaBuddy provides manual runtime loading through the game's existing Mod Options. It keeps one Lua module registry and require resolver per multiplayer environment. It uses Project Zomboid for discovery, metadata, mounting and translations, and ZombieBuddy for callback ownership. There is no additional service, file watcher, network listener or dependency.
+LuaBuddy restores selected shared and client Lua through Project Zomboid's existing compiler, Kahlua interpreter, mod discovery, translation parser, and file mounting APIs. First-party lifecycle and integration behavior is Rust. Third-party Workshop Lua remains managed host content.
 
-Initial restoration normally runs immediately before native `OnGameStart`. Opt in with `python3 luabuddy.py install --early-ui` to restore the same selected batch before native `OnCreateUI`, after the multiplayer Lua reset and before `OnCreatePlayer` constructs player windows. Upstream constructors and player callbacks then run through their normal paths. The option applies to every selected profile; custom hooks must tolerate absent player UI. `OnGameStart` remains a fallback if an environment omits the earlier event. Runtime requests remain unavailable until the real `OnGameStart` callbacks finish. Adding a profile during play still requires any integration-specific setup for already existing objects. `install --no-early-ui` removes the opt-in; an ordinary reinstall or update preserves it. Changing this launcher option requires a normal game restart.
+## Activation and session ownership
 
-## Load a new selection
+The native JVM agent creates the management interface for a valid client menu environment. Live client/shared restoration remains a multiplayer-client operation. Dedicated servers retain normal native loading. Native server-loaded mods are skipped, and their declared ordering remains a constraint.
 
-1. Install the upstream mod and select its profile using the existing installer or configuration files.
-2. While connected, open **Options > Mods > LuaBuddy**. Apply or discard pending Options edits.
-3. Select **Load new profiles** and read the result. New native mod preferences appear on the rebuilt Mods page.
+Initial restoration runs before the real `OnGameStart` dispatch. `install --early-ui` opts into restoration before `OnCreateUI`; `OnGameStart` remains a fallback. The early option applies to the selected batch and takes effect after a normal game restart. Hooks must tolerate player UI that does not exist yet.
 
-The loader skips mods already loaded locally or by the server. Repeating a refresh does not reexecute them or replace cached module values. Removing or disabling a running profile does not unload it; those changes take effect in the next environment. A failed execution remains blocked until reconnecting because its effects cannot be rolled back.
+Runtime commands remain unavailable until actual startup dispatch finishes. The adapter hooks the synchronous `Event.trigger` boundary, including owner-thread queued dispatch. A method entry/exit pair around the public queueing API would not establish that timing. An exceptional completion does not falsely mark startup ready.
 
-Framework and JAR updates still require a full manual game restart. Installing the new helper cannot replace classes in an already-running JVM. Existing profiles and hook files are preserved by reinstalling; template changes do not overwrite local edits.
+Each Lua environment owns a session, one retained require resolver, module values, generation metadata, and callback ownership. Reconnect creates a fresh environment. A captured resolver from a retired environment is refused. Foreign-thread and reentrant operations are refused before mutation.
 
-## Initialize a mod after startup
+## Profile fields
 
-Code registered on `OnGameStart` has missed that event when a new profile loads during play. If upstream initialization is safe at that point, the profile can opt in:
+A profile is a UTF-8 Java-properties file with one native mod ID. Empty installations select no profiles. The Rust reader preserves Java escaping, continuations, and ASCII trimming semantics. Unknown keys, duplicate IDs, invalid booleans, cycles, and invalid metadata receive source-scoped errors.
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Exact native mod ID. |
+| `enabled` | `true` by default. `false` prevents activation in a new session. It does not unload an existing generation. |
+| `path` | Optional mod root relative to this profile's directory, or an absolute root. Native discovery remains the default. |
+| `workshop` | Positive Workshop item ID used for the documented flat-root discovery fallback. |
+| `requires` | Additional required IDs. Native `require=` metadata still applies. |
+| `before`, `after` | Optional coexistence order, combined with native metadata. These do not create requirements. |
+| `exclude` | Semicolon-separated globs relative to `media/lua`. |
+| `excludeWhen.ModID` | Additional exclusions while that ID is natively active. |
+| `preload` | Native or registered modules required before this profile's sources execute. |
+| `mount` | `false` by default. Opts into publishing common/version file paths through the native virtual filesystem. |
+| `replay` | Opt-in `OnGameBoot`, `OnGameStart`, or `OnLoad` callbacks from this profile's restored source files. |
+| `hook` | A supported compiled Rust integration identifier. Unknown identifiers are refused. |
+| `cleanup` | Bounded dotted path to an existing upstream callable, such as `Example.cleanup`. It is metadata, not evaluated source. |
+| `live` | `auto`, `client-shared`, or `startup`. Controls whether source restoration is eligible or native startup is required. |
+| `plugin` | Legacy executable Lua hook reference. Preserved and detected for exact migration or a precise refusal. The Rust runtime never executes it. |
+
+For example, a cooperating upstream mod can declare its native cleanup function without supplying first-party executable Lua.
 
 ```properties
 id=Example
 replay=OnGameStart
+cleanup=Example.cleanup
 ```
 
-During initial restoration, the real `OnGameStart` and following `OnLoad` events run normally. Runtime loading replays opted-in callbacks from the new batch's restored source files after all new client scripts and `after` hooks, first `OnGameStart`, then `OnLoad`. Each event uses its native callback-registration order, including shared files that registered before client files from another profile. No global event is triggered. Callback snapshots exclude foreign sources, and a failed owner skips its remaining callbacks. Other events, arguments and earlier game state are not reconstructed. Profile-hook and shared-helper registrations are outside this automatic ownership set; initialize those explicitly in hooks and clean up their exact registrations when needed.
+Bundled integration rules and Rust hook behavior remain under `profiles/`. Adding a bundled template does not enable it in an existing user configuration.
 
-Bundled profiles opt in where current upstream initialization requires it, including Auto All, AllTheInfo, LootSense Storage, Easy Pickings, the context-menu icons, What It Does, Loot Tracker and Nutrition Helper. Mod Manager requests its persistence bootstrap too. Alarm Syndrome additionally requests `OnLoad`; that event follows startup callbacks and is not replayed during initial restoration. Existing profiles are preserved by installation, so template corrections need an additive profile update before first runtime loading. An already-loaded profile is skipped by refresh. Older helpers retain their own lifecycle behavior until a normal game restart.
+`live=auto` is conservative. Content with native definitions, maps, animation assets, texture packs, or server Lua requires normal startup. `live=client-shared` explicitly requests only the client/shared portion and reports the native components that remain outside LuaBuddy's activation. `live=startup` refuses late restoration. The bundled profiles declare their partial client/shared scope explicitly; that does not claim complete activation of their server or startup-only features.
 
-## Reload a cooperating profile
+**Startup enable** and **Startup disable** edit the native default selection for the next ordinary loading path, with native dependency and dependent checks. They preserve the running world's selection and multiplayer server IDs. Restart confirmation uses the game's ordinary exit flow. Saving a future selection is distinct from activating the content in the current session.
 
-Select **Reload a profile** and enter its configured mod ID. The loader validates and compiles the replacement before calling the running generation's cleanup hook. It rejects missing or disabled selections, server-loaded targets, failed generations, active declared dependents, incompatible ordering, and conflicts with other loaded module providers.
+## Source and require behavior
 
-An integration must provide an explicit cleanup hook using upstream APIs. For example:
+Native metadata selects common and version roots. Version files replace matching common files. The scanner reads shared and client Lua, excludes server Lua and shared translations, and recognizes case-insensitive Lua extensions. It reads upstream files in place without editing or vendoring them.
 
-```lua
-return {
-    after = function(context)
-        Example.restorePreferences()
-    end,
-    unload = function(context)
-        if not Example.canStop() then
-            return false, "Finish the current action first."
-        end
-        Example.stop()
-        return true
-    end,
-}
-```
+Dependencies and order are resolved before activation. All selected shared phases precede client phases. Each profile's post-load Rust hook completes before dependent client phases. Native preloads and scoped boot replay retain their defined positions.
 
-The **running** generation's hook receives its original activation context and owns stopping actions, closing windows, restoring wrappers, disposing owned globals, updating external references, and removing callbacks registered by the profile or shared helpers. Its `context.runtime` and `context.operation` still describe how it was activated, so cleanup of a startup-loaded generation sees `false` and `startup`. Return `false, reason` before changing anything to refuse cleanup. Return `true` only after successful cleanup. An exception or another return value makes cleanup uncertain and requires reconnecting.
+Paths normalize slash, case, and the optional Lua extension. Shared and client scripts with the same module name remain distinct execution entries. Later ordered providers win logical-path collisions, while each owned source executes at most once in its generation. Shared aliases take precedence over client aliases. Unknown imports delegate to the game's captured original require function.
 
-After successful cooperation, LuaBuddy removes callbacks originating in that generation's uniquely owned upstream Lua files using ZombieBuddy's by-file callback snapshots and native event removal. It evicts only that generation's own registry entries and executes the replacement through the ordinary compiler and phase pipeline. Shared profile/helper callbacks require explicit native `Events.Name.Remove(callback)` calls in `unload`; the loader cannot assign their source filename to one profile safely.
+The first returned value is cached, including nil and false. Tables and closures keep object identity. Circular imports and failed modules do not retry in the same environment. Unrelated healthy profiles can continue, while a required profile's failure propagates to its dependents.
 
-If cleanup or activation fails, there is no automatic rollback or retry. The affected generation is marked failed and requires reconnecting. Unknown cross-mod references and wrapper chains remain the integration author's responsibility. Compilation alone does not prove that an arbitrary Workshop mod can reload. Bundled profiles do not gain cleanup hooks automatically.
+## Refresh and reload
 
-Reload replaces client/shared Lua. It does not reverse native mounts, clear every texture cache, remove old asset mappings, load server code, or register startup-only maps, item scripts or animation sets. Use normal installation and startup paths for those components.
+**Load new profiles** validates the selected configuration, discovers native metadata, and compiles candidate sources before publishing mappings. Existing loaded generations, resolver identity, and cached values remain intact. Removing or disabling a running profile changes the next session's selection and does not claim an arbitrary unload.
 
-## Lua API
+A runtime addition cannot replace a running logical path or an effective import provider. It cannot require code to precede an already loaded native or local profile. Those cases require a compatible new connection or native startup.
 
-Trusted code on the owning game thread can use the same operations:
+Reload requires an enabled, locally loaded cooperating profile. The runtime captures the upstream cleanup callable and original activation context after successful activation. The context records the ID, original operation, runtime flag, shared session state, and activation IDs. A replacement does not substitute its context for the original generation's cleanup context.
 
-```lua
-local ok, message = LuaBuddy.refresh()
-local ok, message = LuaBuddy.reload("Example")
-```
+The runtime prepares and compiles the replacement before cleanup. It refuses active dependents and any source filename shared by either the old or candidate generation with another running profile. It rejects a missing cleanup contract and unsupported native-loaded targets.
 
-Each returns a boolean and a result message. Requests are refused before mutation during startup, from another thread, through a retired Lua environment, while an operation is already running, or while Options has pending changes. Native controls use these same functions. Loading is synchronous and may briefly pause the client while files compile.
+Cleanup must return exactly `false` with a reason before changing anything to refuse. The old generation and its diagnostic record remain intact. Returning exactly `true` permits replacement only after cleanup completed. An exception, nil, or another value makes cleanup uncertain. The generation is quarantined, further attempts are refused, and reconnect is required.
 
-Dependencies already running locally remain available. A newly requested `before` relationship or another declared order that would need to precede running code requires reconnecting. Runtime loading also refuses to replace an existing module path or change an existing effective import provider. It preserves shared/client identity, shared-preferred aliases, cached tables, `nil` and `false`, and require closures captured by already-running code.
+After accepted cleanup, LuaBuddy removes only callbacks from the old generation's uniquely owned upstream filenames through native event removal. Removal is verified. Foreign callbacks remain intact. Profile/helper callbacks and external references require upstream cooperation. The loader cannot generally roll back arbitrary third-party globals, wrappers, actions, or other side effects.
 
-Initial restoration also refuses ordering that would require local code to precede an already loaded native mod. Native `loadModAfter` metadata and enabled native profiles' reciprocal `after` rules are retained even when their source is skipped. Reconnecting with the same native selection cannot reorder that code; use a compatible local selection or normal native loading for the affected integrations. The loader does not rerun native mods to repair unknown wrapper chains.
+## Scoped replay and assets
 
-Diagnostics retain the environment session and actual mod records, while recording the latest operation, reload target, timing and errors. A preflight refusal leaves the old generation callable. The report describes initialization operations, not every later gameplay callback.
+Only opted-in callbacks originating in restored upstream files are replayed. Profile/helper callbacks and foreign sources are excluded. Native registration order is preserved. Callbacks removed after a snapshot are skipped. Runtime startup replay occurs after the new batch's client phases and hooks, in `OnGameStart` then `OnLoad` order. Initial restoration uses the real events still ahead.
 
-## Design choices
+Replay does not reproduce event arguments, previous world state, the entire startup lifecycle, or missing server code. Successful source initialization does not establish safe whole-mod reload.
 
-The implementation extends the existing loader rather than adding a second registry or mod-specific core branches. Native Mod Options supply the interface and preference rendering. The native watcher is deliberately unavailable in ordinary non-debug multiplayer; a CLI mailbox would add polling, request lifetimes and dispatch code. ZombieBuddy's experimental HTTP subsystem is unnecessary for two local actions.
+Opt-in mounting exposes loose upstream files with native common/version precedence. It does not register every texture pack, map, animation set, item definition, sandbox page, or server component. It does not change the server's active mod IDs or checksum policy. The interface must distinguish eligible client/shared loading from required native startup, reconnect, or restart.
 
-The game's native file-reload path helps development but cannot undo a whole mod's UI, globals, wrappers or LuaBuddy's cache. Cooperative reload therefore reuses the existing compile/load pipeline and explicit cleanup. See the [ZombieBuddy Lua API](https://github.com/zed-0xff/ZombieBuddy/blob/v2.3.4/doc/LuaAPI.md) and [Project Zomboid Lua API](https://projectzomboid.com/modding/zombie/Lua/LuaManager.GlobalObject.html) for the reused primitives.
+## Interface and diagnostics
+
+The native Options controls preserve pending edits. Apply or discard those edits before profile mutation or loading. The manager uses the game's controls and owner-thread update callbacks. Repeated opening, dismissal, and no-op refresh preserve appropriate identity and focus. A new environment retires the old interface.
+
+The environment writes `LuaBuddy/diagnostics.json` beneath the actual game cache. Reports retain the session identity and actual running generations while recording the latest operation, timings, target, source, stage, native game/JVM versions, profile metadata, and available Lua/Java traces. A refused replacement records an operation error without replacing the old loaded record. A write failure is logged without stopping healthy profiles.
+
+Use `luabuddy diagnostics --cache-dir /path/to/cache` for the last report. Missing, stale, incomplete, or failed reports are distinct from a verified successful game action. Installed files alone do not establish runtime success.

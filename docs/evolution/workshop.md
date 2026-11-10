@@ -1,0 +1,44 @@
+# Workshop adapter and activation evidence
+
+The Rust Workshop adapter is implemented in `crates/luabuddy-host/src/steam.rs`. It attaches to the game's existing Steam context and exposes search, details, subscribed-item enumeration, subscription changes, downloads, progress, installed paths, and item-state observations. It never initializes or shuts down Steam and never runs, drains, or replaces Steam's callback queue. These operations need the host's ordinary callback loop to keep running.
+
+The adapter currently enables its native ABI only on Linux x86_64. Other platforms return an unsupported-platform error. Windows and macOS runtime behavior has not been verified. The selected interfaces are the actual host's `SteamAPI_SteamUGC_v021` and `SteamAPI_SteamUtils_v010` exports. Interface pointers, the current Steam user handle, and application ID 108600 are checked on the owner thread before operations. The adapter opens an already loaded library with `RTLD_NOLOAD`; it cannot activate native code from a downloaded Workshop folder.
+
+## Operations and safety
+
+`SteamWorkshop::attach_existing` checks the game's native Steam-mode API before accessing the shared library. `start_search` and `start_details` return owned `Query` values. `Query::poll` checks only that query's Steam API-call handle through `IsAPICallCompleted` and `GetAPICallResult`. A query releases its UGC handle once on completion, cancellation, timeout, error, or drop. At most eight queries may be outstanding. Results retain Workshop identity, title, description, tags, dependency item IDs, update time, known size, and observed Steam state. Unavailable, banned, and foreign-application results appear separately in `SearchResults.unavailable`, with their index, returned item identity when present, and native failure metadata. One such result does not hide healthy rows. Invalid query handles, overall callback results, and incompatible native layouts still fail the query. Workshop child IDs are delivery dependencies; the game adapter must still inspect installed mod metadata for actual mod IDs, version restrictions, and load ordering.
+
+Subscription and download writes require a matching item-scoped `UserIntent`. The in-game action that obtained that intent owns authorization. Native extension installation requires its own separate consent. Subscribing to unrelated Workshop content does not authorize executing native libraries. No development probe in this change subscribes, unsubscribes, or starts a download on the user's account.
+
+Subscription requests retain their own API-call handle and verify the resulting subscription bit. Download requests retain an observation ticket and require a successful native completion callback, installed state, and a native install folder before reporting readiness. The JVM adapter in `download_events.rs` verifies the defining classloader, descriptors, and bytecode fingerprints of the game's existing `SteamWorkshop.onItemDownloaded` and `onItemNotDownloaded` methods before observing their entry. It records the native result and observation time without changing the callback body or taking over Steam's callback loop. The owner-thread ticket consumes only notifications observed after its request began. Download requests fail before calling Steam when those verified observers are unavailable. A timeout remains unconfirmed and is never labeled cancellation or success. Synthetic callback proofs and actual account download tests are separate evidence.
+
+Steam's item API does not offer cancellation of one accepted download or subscription change. Closing an observation ticket stops LuaBuddy's observation while Steam may finish the request. `cancel_download` returns that limitation explicitly. Search cancellation releases only the owned query. Subscribed, installed, downloading, pending, and needs-update bits remain distinct. Enabling a profile and loading it in the running Lua environment are separate core/runtime operations.
+
+## ABI evidence
+
+Valve documents the [UGC operations](https://partner.steamgames.com/doc/api/ISteamUGC) and [API-call polling](https://partner.steamgames.com/doc/api/ISteamUtils). Its [UGC021 header in Proton's Steamworks SDK 1.62](https://github.com/ValveSoftware/Proton/blob/proton_11.0/lsteamclient/steamworks_sdk_162/isteamugc.h) supplies the current ABI declarations, including the additional subscription-enumeration boolean and trailing total-content-size field that older web documentation omits. The packed-four UGC result occupies 9772 bytes, with the total-size field at offset 9764. The installed Linux game's `libZNetJNI64.so` independently corroborates callback 3401 and its 280-byte result, the 12-byte subscription result, and several UGC field offsets. Its `CCallResult<SteamUGCQueryCompleted_t>::GetCallbackSizeBytes` returns `0x118`. Its query construction stores callback ID `0xd49`. Its `GetQueryUGCResult` implementation reads the title at offset 24, creation time at 8164, file size at 9484, and child count at 9760. The adapter's layout tests check the header layout and those independently observed offsets. Static layout evidence does not replace a live completed query.
+
+## Reproduce the isolated host proof
+
+Set `PZ_GAME_DIR` to the installed game root containing `projectzomboid.jar` and `natives`. The proof resolves the current host's 22 required Workshop symbols without invoking account APIs, creates a disposable JVM with the actual game JAR, and verifies that native Steam-mode checks reject access before Steam initialization.
+
+```sh
+JAVA_HOME="$PZ_GAME_DIR/jre64" cargo run --locked --offline --manifest-path proofs/steam/Cargo.toml -- "$PZ_GAME_DIR"
+cargo test --locked --offline --manifest-path proofs/steam/Cargo.toml
+```
+
+The initial build needs the lockfile's declared Cargo dependencies in its cache. A normal Cargo fetch is a development dependency operation. The installed product does not download crates or invoke a compiler.
+
+On November 9, 2026, the symbol and unavailable-context proof passed against the installed Linux x86_64 game and its bundled Java 25.0.5. The aggregate repository baseline reports game 42.22.2, revision `3d39148846`. Adapter checks cover ABI layout, distinct subscription/install states, invalid result strings, item IDs and action intent, deadline overflow, missing-library refusal, per-item native failures, incompatible success layouts, and request-time-scoped notifications. A separate owned graphical client completed public title search and subscribed-item detail pages through the actual initialized Steam context. One native result 15 appeared as an explicit unavailable row while healthy rows and later pages remained usable. That real mixed-page check preceded the focused new failure tests. The isolated symbol proof alone does not establish those live operations. Subscription changes and actual downloads remain unrun because the user authorized read-only checks and explicitly left new subscription testing blocked. No subscription, unsubscribe, or download mutation was initiated by LuaBuddy during these checks.
+
+## Native activation and one-click target
+
+The inspected game Workshop path discovers installed mod directories and mounts their files. It has no inspected metadata action that activates a delivered Rust library as a JVM agent. A native library present in a Workshop item therefore establishes delivery only. An actual clean subscribe, ordinary launch, offline relaunch, update, and removal sequence has not established subscribe-only native activation.
+
+The real Linux launcher does support a complete `ProjectZomboid64.site.json` override. A disposable launcher probe supplied different base and site properties and an intentionally missing main class. It selected the site property, created the bundled JVM, and failed at the missing class without starting the game. This proves a reversible extra activation mechanism for the installer. It does not prove one-click Workshop setup. The installer must preserve unrelated effective launcher settings and account for later changes to Steam's base configuration.
+
+| Platform | Native bootstrap | Workshop APIs | Subscribe-only activation | Live management |
+| --- | --- | --- | --- | --- |
+| Linux x86_64 | Site override selected by real launcher; Rust agent proof is separate. | Actual host symbols resolved; uninitialized context rejected; initialized search and subscribed details exercised. | Unproven; inspected mod loader has no activation action. | Read-only browser and mixed result pages exercised in an owned client. Account writes remain unrun. |
+| Windows | Unverified. | Native adapter disabled pending ABI and runtime proof. | Unverified. | Not run. |
+| macOS | Unverified. | Native adapter disabled pending ABI and runtime proof. | Unverified. | Not run. |
