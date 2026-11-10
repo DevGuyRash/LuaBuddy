@@ -18,19 +18,17 @@ Successful output includes a native package directory, `LuaBuddy-linux-x86_64.ta
 
 ## Observed scope
 
-The final November 10, 2026 build used Rust 1.99.1 on Linux x86_64 after the Steam fixes, installer rollback correction, and test-only platform configuration fix. Two fresh builds through the direct pinned toolchain produced identical runtime and CLI bytes, all 32 package files, and the normalized archive. The product-input digest is `e65ade59864f4a86745ea458a98808f29c0174592da09a5318335a9e3b3af220`. The resulting runtime requires GLIBC 2.34. Other Linux C-library baselines and other operating systems have not been established by this check.
+The native-only purge used Rust 1.99.1 on Linux x86_64. Two fresh direct-toolchain builds produced identical runtime and CLI bytes, all 31 package files, and normalized archives. The product-input digest is `15b984c60e29d5de9a34f391bbc0f238be6471819f1e4af2a1ae33af6f432ee3`. The package contains direct native profile templates and no executable Lua-hook migration catalog.
 
 | Artifact | SHA256 |
 | --- | --- |
-| Native runtime | `1d44f599e042c3b8ca02574cb4143a16b09ecc9fdfd909ac56e76b516c243697` |
-| Installer CLI | `e4aa550b7d5d1b301c4cdccdb2fc6d6979bd4f398f9539007b98b72b61d6c0da` |
-| Normalized archive | `365fcade214fbcb11d6c0365e3d30910c8d35c356ce76d0765d7afc89da0fae4` |
-| Package manifest | `42fa1fbb45a932db48e533ac1bdd5916621db00e039ee6bb22370032368bb8bf` |
+| Native runtime | `1207d5d6498dcf799c4b8f4a331be606c6f1338d463d221a6b40154691ad5764` |
+| Installer CLI | `cdc7896e6b6fd3fc50b70ea4331a0cbde868b5113e71938230946fa17b9afcf7` |
+| Normalized archive | `843c92d254c948060b028fd04dd1f8d18ff8dfd3fe40cca802251b894395f197` |
+| Package manifest | `c1dd0207836e0fa2520eb2ed81fe3819906a588d32edb2491baa9f05c2616d32` |
 
-The earlier November 10 Steam-tested runtime `17ffaedb4f2d0a59002a536e408f53628d3a6d9d2b47f6b18a8b07951205c64a` used the same installer CLI, product-input digest `de345a31b760dca33acef91ae1c8e715ee0a31ea2926aecfcf68557294ad5883`, and archive `3d35be1aa2920e589d78d8075c78d4493cfe0e6afa6bf75e016bf349962ed4f1`. Portable CI then found an unused mock variant on Windows and macOS. Its variant and match arm now use the same Linux x86_64 test condition as their constructors. No production algorithm changed, but recompilation produced the new runtime identity above. The current package passed the 44-check native aggregate. Actual Steam delivery, normal-game startup, and GPU observations remain evidence for `17ffaedb`, not this new binary. The installed update selects `1d44f599` on the next normal launch while the existing game continues with `17ffaedb`.
+The native-only package passed the 44-check offline native aggregate, with four explicitly separate workflows not run by that command. Its actual CLI also completed a disposable install, update, rollback, repair, verification, uninstall, and repeated uninstall sequence while preserving current profiles and unrelated JVM settings.
 
-The preceding November 9 candidate `832d2d86` has its own immutable reproducibility and gameplay evidence. Its performance and integration results remain labeled with that original identity; this later build does not retroactively replace those bytes.
+Earlier `17ffaedb` and `1d44f599` gameplay, Steam, and GPU observations remain tied to those artifacts. The current normal session's 24-profile startup used `1d44f599`; the newly installed native-only build applies on the next normal launch. No graphical or performance result is inferred from this rebuild.
 
-An earlier exploratory run passed through the host's cached Cargo dispatcher. Its equal bytes do not establish independent code generation. That run was discarded as acceptance evidence before the check using the direct toolchain.
-
-This check establishes reproducibility within the recorded build environment. It does not establish runtime acceptance, Workshop account operations, performance, or compatibility with another compiler or operating system. Those checks use the separate verification workflows.
+The preceding `832d2d86` software-rendered comparison and integration matrix retain their own evidence scope. An earlier exploratory comparison through a cached Cargo dispatcher was discarded before the direct-toolchain procedure. This procedure proves reproducibility in its recorded build environment; other compilers, operating systems, and runtime acceptance require their separate checks.

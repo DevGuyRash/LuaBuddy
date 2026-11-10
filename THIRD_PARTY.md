@@ -4,7 +4,7 @@ LuaBuddy implements its runtime, installer, hooks, interface, and patch engine i
 
 Project Zomboid, its JVM and Kahlua runtime, Steam, and third-party Workshop mods remain external host content. Their proprietary files, Lua sources, and assets are not redistributed by LuaBuddy. Optional integrations read installed upstream content in place.
 
-LuaBuddy no longer builds against, downloads, installs, or executes ZombieBuddy. Legacy migration identifies only LuaBuddy-owned launcher arguments and preserves shared installations. The earlier integration's attribution is retained in [the historical MIT notice](https://github.com/DevGuyRash/LuaBuddy/blob/84d495a288610de2a07a8685474cebb91eb6c1a3/lib/ZombieBuddy-LICENSE.txt).
+The current package supports native Rust profiles and launcher integration. It contains no Java-agent or executable Lua-hook migration layer. Attribution for earlier Java-agent distributions remains with those versions in repository history.
 
 The Rust standard library's complete bundled copyright notices are retained in [Rust-standard-library.txt](licenses/Rust-standard-library.txt).
 

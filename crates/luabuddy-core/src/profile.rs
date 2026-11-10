@@ -134,7 +134,6 @@ pub struct Profile {
     pub cleanup: Option<String>,
     #[serde(default)]
     pub live: Option<LivePolicy>,
-    pub legacy_plugin: Option<PathBuf>,
 }
 
 impl Profile {
@@ -143,8 +142,8 @@ impl Profile {
         let parse = || -> Result<Self, CoreError> {
             let values = parse_properties(text)?;
             const KEYS: &[&str] = &[
-                "id", "path", "enabled", "exclude", "preload", "plugin", "hook", "requires",
-                "after", "before", "mount", "replay", "workshop", "cleanup", "live",
+                "id", "path", "enabled", "exclude", "preload", "hook", "requires", "after",
+                "before", "mount", "replay", "workshop", "cleanup", "live",
             ];
             for key in values.keys() {
                 if !KEYS.contains(&key.as_str()) && !key.starts_with("excludeWhen.") {
@@ -218,12 +217,6 @@ impl Profile {
                     exclude_when.insert(ModId::new(id)?, split_list(value));
                 }
             }
-            if !value("plugin").is_empty() && !value("hook").is_empty() {
-                return Err(CoreError::new(
-                    "profile",
-                    "Specify hook or legacy plugin, never both",
-                ));
-            }
             let hook = if value("hook").is_empty() {
                 None
             } else {
@@ -286,14 +279,9 @@ impl Profile {
                 hook,
                 cleanup,
                 live,
-                legacy_plugin: relative("plugin"),
             })
         };
         parse().map_err(|e| e.at(file))
-    }
-
-    pub fn hook_migration_error(&self) -> Option<CoreError> {
-        self.legacy_plugin.as_ref().map(|path| CoreError::new("hook-migration", format!("Profile {} references executable Lua hook {}. Preserve the file and port its before/after/unload behavior to a reviewed Rust extension, then replace the plugin setting. The Rust runtime will not execute this file.", self.id, path.display())).at(&self.file))
     }
 
     pub fn exclusions(&self, active: &BTreeSet<ModId>) -> Vec<String> {

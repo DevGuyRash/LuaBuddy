@@ -176,13 +176,7 @@ fn execute(args: &Arguments) -> Result<Value, String> {
             args.allow(&["--profiles-dir"], &[], false)?;
             let directory = args.required_path("--profiles-dir")?;
             let profiles = luabuddy_core::read_profiles(&directory).map_err(|e| e.to_string())?;
-            let migration: Vec<_> = profiles
-                .iter()
-                .filter_map(|p| p.hook_migration_error().map(|e| e.to_string()))
-                .collect();
-            Ok(
-                json!({"ok":migration.is_empty(), "profiles":profiles, "migrationRequired":migration}),
-            )
+            Ok(json!({"ok":true, "profiles":profiles}))
         }
         "diagnostics" => {
             args.allow(&["--cache-dir"], &[], false)?;

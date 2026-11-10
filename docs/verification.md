@@ -81,7 +81,7 @@ cargo xtask check --offline --audit --game-dir /path/to/ProjectZomboid --runtime
 
 `--runtime` selects the exact library for native callable, patcher, runtime, and normal-product extension proofs. `--cli` selects the executable for discovery, profile inspection, packaging, and extension approval. Helper consumers for metadata, native preference APIs, and classloader interleaving compile from the current source and use the selected game's JVM. They are distinct evidence from execution of the selected library.
 
-The installer verifies every manifest entry and the native artifact architecture. The aggregate also requires package runtime and CLI hashes to match the exact tested artifact snapshots. A release package paired with default debug inputs fails that identity check. To inspect package integrity alone, use `luabuddy verify-package --package DIR`. The aggregate additionally refuses symlinks and executable `.lua`, `.java`, `.class`, `.jar`, `.py`, `.js`, or `.wasm` payload files in the package. Migration catalog strings and preserved historical references are not a runtime dependency on ZombieBuddy.
+The installer verifies every manifest entry and the native artifact architecture. Entries beneath `profiles/` must be direct `.properties` templates. Nested entries and non-template catalog files are rejected. The aggregate also requires package runtime and CLI hashes to match the exact tested artifact snapshots. A release package paired with default debug inputs fails that identity check. To inspect package integrity alone, use `luabuddy verify-package --package DIR`. The aggregate additionally refuses symlinks and executable `.lua`, `.java`, `.class`, `.jar`, `.py`, `.js`, or `.wasm` payload files in the package. Current verification checks strict profile-option rejection and native installation behavior without a legacy conversion layer.
 
 ## Exercise the graphical product
 
@@ -106,6 +106,8 @@ Choose a fixed workload and acceptance budget before collecting deciding baselin
 A callback microbenchmark is not a game frame-time result. Cross-compilation is not platform gameplay evidence. Report passed, failed, and not-run checks separately, with actual game/JVM/OS versions, artifact hashes, and limits.
 
 ## Evidence scope during the Rust migration
+
+The current source accepts only the supported native profile format. Historical Java-agent and Lua-hook migration checks describe earlier implementations and do not define current compatibility.
 
 The old implementation at commit `84d495a` passed its offline aggregate before replacement. That historical result is a baseline, not verification of Rust behavior. The Rust implementation run used Project Zomboid `42.22.2 3d39148846 integrity=pending`, bundled Azul Java `25.0.5+8-LTS`, and Linux x86_64.
 

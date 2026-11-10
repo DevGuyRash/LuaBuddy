@@ -197,7 +197,10 @@ pub fn run(env: &mut JNIEnv<'_>, fixture: &Fixture) -> Result<()> {
         ("cooperative reload", cooperative_reload),
         ("cleanup quarantine", cleanup_failure),
         ("replay failure", replay_failure),
-        ("custom hook refusal", custom_hook_refusal),
+        (
+            "configuration preflight refusal",
+            configuration_preflight_refusal,
+        ),
         ("lifecycle guards", lifecycle_guards),
         ("runtime rejection", runtime_rejection),
         ("replay ordering", replay_ordering),
@@ -443,35 +446,68 @@ fn replay_failure(env: &mut JNIEnv<'_>, fixture: &Fixture) -> Result<()> {
     Ok(())
 }
 
-fn custom_hook_refusal(env: &mut JNIEnv<'_>, fixture: &Fixture) -> Result<()> {
+fn configuration_preflight_refusal(env: &mut JNIEnv<'_>, fixture: &Fixture) -> Result<()> {
     fixture.clear_profiles()?;
     fixture.module(
-        "LegacyHook",
-        "client/LegacyHook.lua",
-        "legacyModuleRan = true",
+        "ConfigurationResident",
+        "client/ConfigurationResident.lua",
+        "configurationResidentRuns = (configurationResidentRuns or 0) + 1; Events.OnTick.Add(function() configurationResidentTicks = (configurationResidentTicks or 0) + 1 end)",
     )?;
-    fixture.module(
-        "LegacyUnrelated",
-        "client/LegacyUnrelated.lua",
-        "legacyUnrelatedRan = true",
-    )?;
-    fixture.profile("LegacyHook", "plugin=custom.lua\n")?;
-    fixture.profile("LegacyUnrelated", "")?;
-    fixture.write("config/custom.lua", "legacyHookRan = true; return {}")?;
-    let original =
-        std::fs::read(fixture.root.join("config/custom.lua")).map_err(|e| e.to_string())?;
+    fixture.profile("ConfigurationResident", "")?;
     let mut context = fresh(env)?;
     trigger(&mut context, "OnGameStart")?;
+    trigger(&mut context, "OnTick")?;
     lua(
         &mut context,
-        "assert(LuaBuddy.mods.LegacyHook:find('custom.lua', 1, true)); assert(not legacyModuleRan and not legacyHookRan); assert(LuaBuddy.mods.LegacyUnrelated == 'loaded' and legacyUnrelatedRan)",
+        "assert(LuaBuddy.mods.ConfigurationResident == 'loaded' and configurationResidentRuns == 1 and configurationResidentTicks == 1); heldConfigurationNamespace = LuaBuddy",
     )?;
-    if std::fs::read(fixture.root.join("config/custom.lua")).map_err(|e| e.to_string())? != original
+    let loaded_record = report(fixture)?["mods"]["ConfigurationResident"].clone();
+    fixture.module(
+        "UnsupportedOption",
+        "client/UnsupportedOption.lua",
+        "unsupportedOptionRuns = (unsupportedOptionRuns or 0) + 1",
+    )?;
+    fixture.module(
+        "ConfigurationNew",
+        "client/ConfigurationNew.lua",
+        "configurationNewRuns = (configurationNewRuns or 0) + 1",
+    )?;
+    fixture.profile("UnsupportedOption", "unexpectedOption=true\n")?;
+    fixture.profile("ConfigurationNew", "")?;
+    let (ok, reason) = refresh(&mut context)?;
+    if ok
+        || !reason.contains("Unknown profile option unexpectedOption")
+        || !reason.contains("UnsupportedOption.properties")
     {
-        return Err("Unmigrated custom hook file changed".into());
+        return Err(format!(
+            "Unsupported profile option did not refuse before mutation: {ok} {reason}"
+        ));
     }
-    println!("PASS exact unmigrated custom hook refusal, preserved source and unrelated loading");
-    fixture.snapshot("legacy-hook")?;
+    trigger(&mut context, "OnTick")?;
+    lua(
+        &mut context,
+        "assert(LuaBuddy == heldConfigurationNamespace); assert(LuaBuddy.mods.ConfigurationResident == 'loaded' and configurationResidentRuns == 1 and configurationResidentTicks == 2); assert(not unsupportedOptionRuns and not configurationNewRuns and LuaBuddy.mods.ConfigurationNew == nil)",
+    )?;
+    if report(fixture)?["mods"]["ConfigurationResident"] != loaded_record {
+        return Err("Invalid profile changed an unrelated loaded generation's diagnostics".into());
+    }
+    fixture.snapshot("configuration-preflight-refused")?;
+    fixture.profile("UnsupportedOption", "")?;
+    let (ok, reason) = refresh(&mut context)?;
+    if !ok {
+        return Err(format!(
+            "Corrected profile did not resume pending loads: {reason}"
+        ));
+    }
+    trigger(&mut context, "OnTick")?;
+    lua(
+        &mut context,
+        "assert(LuaBuddy == heldConfigurationNamespace); assert(LuaBuddy.mods.ConfigurationResident == 'loaded' and configurationResidentRuns == 1 and configurationResidentTicks == 3); assert(LuaBuddy.mods.UnsupportedOption == 'loaded' and unsupportedOptionRuns == 1); assert(LuaBuddy.mods.ConfigurationNew == 'loaded' and configurationNewRuns == 1)",
+    )?;
+    println!(
+        "PASS unsupported profile preflight, preserved unrelated generation and callbacks, and corrected pending loads"
+    );
+    fixture.snapshot("configuration-preflight-recovered")?;
     Ok(())
 }
 

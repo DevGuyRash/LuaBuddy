@@ -264,9 +264,6 @@ impl Session {
             if replacing.is_none() && previous.is_some() {
                 continue;
             }
-            if let Some(error) = candidate.profile.profile.hook_migration_error() {
-                return Err(error);
-            }
             if let Some(target) = replacing {
                 let old = previous.ok_or_else(|| {
                     CoreError::new(

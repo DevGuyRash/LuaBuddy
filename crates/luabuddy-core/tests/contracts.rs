@@ -119,7 +119,7 @@ fn java_properties_escapes_continuation_unicode_and_duplicate_keys() {
 }
 
 #[test]
-fn profile_validation_is_strict_and_legacy_hooks_are_preserved_as_migration_errors() {
+fn profile_validation_is_strict_and_rust_hooks_preserve_replay_settings() {
     for settings in [
         "enabled=yes",
         "mount=1",
@@ -129,30 +129,27 @@ fn profile_validation_is_strict_and_legacy_hooks_are_preserved_as_migration_erro
         "unknown=true",
         "excludeWhen.=x",
         "hook=bad/path",
-        "hook=RustHook\nplugin=custom.lua",
     ] {
         assert!(
             Profile::parse("example.properties", &format!("id=A\n{settings}")).is_err(),
             "{settings}"
         );
     }
-    let parsed = profile(
-        "A",
-        "plugin=custom.lua\nreplay=OnGameBoot;OnGameStart;OnLoad",
-    );
-    assert_eq!(parsed.legacy_plugin, Some(PathBuf::from("custom.lua")));
-    assert!(
-        parsed
-            .hook_migration_error()
-            .unwrap()
-            .to_string()
-            .contains("custom.lua")
-    );
-    assert_eq!(parsed.replay.len(), 3);
-    assert!(parsed.replay.contains(&ReplayEvent::OnLoad));
+    for settings in ["plugin=", "plugin=custom.lua", "hook=RustHook\nplugin="] {
+        let error = Profile::parse("example.properties", &format!("id=A\n{settings}")).unwrap_err();
+        assert_eq!(error.stage, "profile");
+        assert_eq!(error.path, Some(PathBuf::from("example.properties")));
+        assert!(error.message.contains("Unknown profile option plugin"));
+    }
+    let parsed = profile("A", "hook=RustHook\nreplay=OnGameBoot;OnGameStart;OnLoad");
+    assert_eq!(parsed.hook.as_deref(), Some("RustHook"));
     assert_eq!(
-        profile("A", "hook=RustHook").hook.as_deref(),
-        Some("RustHook")
+        parsed.replay,
+        BTreeSet::from([
+            ReplayEvent::OnGameBoot,
+            ReplayEvent::OnGameStart,
+            ReplayEvent::OnLoad,
+        ])
     );
 }
 

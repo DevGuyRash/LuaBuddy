@@ -798,9 +798,6 @@ fn apply_inner(
             game::log(&format!("{}: {explanation}", profile.profile.id));
         }
         let prepare = (|| {
-            if let Some(error) = profile.profile.hook_migration_error() {
-                return Err(error.to_string());
-            }
             if let Some(hook) = &profile.profile.hook
                 && !hooks::IDS.contains(&hook.as_str())
             {

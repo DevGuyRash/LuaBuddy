@@ -6,7 +6,7 @@ Build the Rust workspace with the pinned toolchain and locked dependencies. An o
 cargo build --release --locked --offline
 ```
 
-Create a package using the native runtime and the migrated declarative profile catalog. The package command copies the current LuaBuddy executable, native runtime, license, profile templates, and optional hook migration metadata. It creates a versioned integrity manifest without copying game files or executable Lua hooks.
+Create a package using the native runtime and declarative profile catalog. The package command copies the current LuaBuddy executable, native runtime, license, and profile templates. It creates a versioned integrity manifest without copying game files or executable Lua hooks. Package entries beneath `profiles/` must be direct `.properties` files.
 
 ```sh
 target/release/luabuddy package --runtime target/release/libluabuddy_host.so --profiles-dir profiles --out dist/LuaBuddy-linux-x86_64
@@ -43,13 +43,17 @@ luabuddy diagnostics --cache-dir /path/to/disposable-or-normal-game-cache
 
 The commands return JSON. A failed inspection returns exit code 1. Invalid input or an operation failure returns exit code 2. Package and installation integrity results do not establish that an in-game workflow succeeded. Inspect the actual runtime diagnostics and the release verification report for that evidence.
 
-## Migrate existing profiles
+## Use current native profiles
 
-Installation recognizes original bundled Lua hook files only when both the source filename and SHA256 match a reviewed entry in the package's `profiles/migration.json`. It preserves the original Lua file, stores the original profile under `.luabuddy/recovery/profiles/`, and appends an empty `plugin` setting plus the corresponding Rust `hook` identifier. Existing settings and comments remain in the profile.
+Profiles contain a native mod `id`, supported declarative fields, and optional compiled Rust `hook` identifiers. Validate the selected directory before installation.
 
-A modified, unknown, or missing custom hook receives a precise migration error before launcher activation. Preserve that file and port its behavior to an explicitly enabled Rust extension or supported declarative configuration. The native runtime does not execute first-party Lua hooks as a compatibility fallback.
+```sh
+luabuddy profiles --profiles-dir /path/to/profiles
+```
 
-A shared ZombieBuddy agent remains installed for its other consumers. An argument containing only LuaBuddy's old patch entry is removed from the selected launcher configuration. If LuaBuddy shares one agent argument with other patch entries, installation refuses and names the combined argument's migration requirement. Remove only LuaBuddy's entry before retrying. Uninstall does not reactivate an old LuaBuddy Java agent hidden in the base launcher configuration.
+The current profile format rejects unknown options, including every `plugin` assignment. The installer does not convert Lua hook files or classify obsolete Java-agent arguments. Remove obsolete LuaBuddy launcher entries and unsupported profile settings before installation. Unrelated JVM arguments remain preserved.
+
+Use supported declarative behavior or an explicitly enabled [Rust extension](patcher.md) for custom integration logic. Native update, repair, rollback, transaction recovery, and uninstall remain available for current installations.
 
 ## Update, repair, or roll back
 
@@ -84,6 +88,6 @@ Remove the owned integration and unchanged native generation files.
 luabuddy uninstall --game-dir /path/to/ProjectZomboid
 ```
 
-Uninstall preserves selected profiles, original hook files, migration and repair recovery copies, Workshop content, shared ZombieBuddy installations, and user-modified native files. It restores the original site override when safe. If the override has unrelated user changes, it removes only recorded LuaBuddy arguments and retains the changes. A repeated uninstall succeeds without additional changes.
+Uninstall preserves selected profiles, native repair recovery copies, Workshop content, and user-modified native files. It restores the original site override when safe. If the override has unrelated user changes, it removes only recorded LuaBuddy arguments and retains the changes. A repeated uninstall succeeds without additional changes.
 
 Native launcher activation is currently evidenced on Linux. Windows and macOS runtime and installer behavior require native tests before a release can claim support. Workshop delivery alone does not activate this native runtime. Consult the platform capability report for the remaining one-click activation gate.

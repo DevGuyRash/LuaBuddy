@@ -160,59 +160,6 @@ pub struct Package {
     pub digest: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HookMigration {
-    sha256: String,
-    source: String,
-    hook: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MigrationManifest {
-    #[serde(rename = "schemaVersion")]
-    schema: u32,
-    hooks: Vec<HookMigration>,
-}
-
-fn migration_manifest(directory: &Path) -> Result<Option<MigrationManifest>> {
-    let path = directory.join("profiles/migration.json");
-    let Some(data) = optional_bytes(&path, METADATA_LIMIT)? else {
-        return Ok(None);
-    };
-    let manifest: MigrationManifest = serde_json::from_slice(&data)
-        .map_err(|e| invalid(format!("Invalid hook migration manifest: {e}")))?;
-    if manifest.schema != SCHEMA {
-        return Err(invalid("Unsupported hook migration schema"));
-    }
-    let mut entries = BTreeSet::new();
-    for entry in &manifest.hooks {
-        if portable_path(&entry.source)?.components().count() != 1
-            || entry.sha256.len() != 64
-            || !entry
-                .sha256
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        {
-            return Err(invalid("Invalid hook migration source or SHA256"));
-        }
-        let checked = Profile::parse(
-            "migration.properties",
-            &format!("id=Migration\nhook={}\n", entry.hook),
-        )?;
-        if checked.hook.as_deref() != Some(&entry.hook) {
-            return Err(invalid(
-                "Invalid stable hook identifier in migration metadata",
-            ));
-        }
-        if !entries.insert((&entry.source, &entry.sha256)) {
-            return Err(invalid("Duplicate hook migration identity"));
-        }
-    }
-    Ok(Some(manifest))
-}
-
 fn walk_files(root: &Path, directory: &Path, result: &mut BTreeSet<String>) -> Result<()> {
     for entry in fs::read_dir(directory).map_err(|e| io_error("Read directory", directory, e))? {
         let entry = entry.map_err(|e| io_error("Read directory entry", directory, e))?;
@@ -280,6 +227,16 @@ pub fn verify_package(directory: &Path) -> Result<Package> {
         {
             return Err(invalid(format!("Invalid package file entry {name:?}")));
         }
+        if relative.starts_with("profiles")
+            && (relative.components().count() != 2
+                || !relative
+                    .extension()
+                    .is_some_and(|extension| extension == "properties"))
+        {
+            return Err(invalid(format!(
+                "Unsupported profile template entry {name:?}; expected a direct .properties file",
+            )));
+        }
         let file = bytes(&directory.join(relative), RUNTIME_LIMIT)?;
         if file.len() as u64 != expected_file.size || sha256(&file) != expected_file.sha256 {
             return Err(invalid(format!("Package integrity failed for {name}")));
@@ -302,12 +259,7 @@ pub fn verify_package(directory: &Path) -> Result<Package> {
             "Runtime binary architecture does not match its manifest",
         ));
     }
-    for profile in read_profiles_if_exists(&directory.join("profiles"))? {
-        if let Some(error) = profile.hook_migration_error() {
-            return Err(error.into());
-        }
-    }
-    migration_manifest(&directory)?;
+    read_profiles_if_exists(&directory.join("profiles"))?;
     Ok(Package {
         directory,
         manifest,
@@ -404,11 +356,6 @@ pub fn make_package(runtime: &Path, templates: &Path, output: &Path) -> Result<P
         ));
     }
     let profiles = read_profiles(templates)?;
-    for profile in &profiles {
-        if let Some(error) = profile.hook_migration_error() {
-            return Err(error.into());
-        }
-    }
     let output = absolute(output)?;
     let parent = output
         .parent()
@@ -468,9 +415,6 @@ pub fn make_package(runtime: &Path, templates: &Path, output: &Path) -> Result<P
                 &bytes(&profile.file, METADATA_LIMIT)?,
                 false,
             )?;
-        }
-        if let Some(data) = optional_bytes(&templates.join("migration.json"), METADATA_LIMIT)? {
-            add_package_file(&stage, &mut files, "profiles/migration.json", &data, false)?;
         }
         let manifest = PackageManifest {
             schema: SCHEMA,
@@ -705,53 +649,12 @@ fn launcher_config(data: &[u8]) -> Result<Value> {
     Ok(value)
 }
 
-fn owned_legacy_agent(argument: &str) -> bool {
-    let Some((agent, options)) = argument
-        .strip_prefix("-javaagent:")
-        .and_then(|s| s.split_once('='))
-    else {
-        return false;
-    };
-    if !agent
-        .replace('\\', "/")
-        .rsplit('/')
-        .next()
-        .is_some_and(|n| n.eq_ignore_ascii_case("ZombieBuddy.jar"))
-    {
-        return false;
-    }
-    let Some(patches) = options.strip_prefix("patches_jar=") else {
-        return false;
-    };
-    if patches.contains([',', ';']) {
-        return false;
-    }
-    let normalized = patches.replace('\\', "/");
-    normalized == "LuaBuddy.jar:luabuddy"
-        || normalized.ends_with("/LuaBuddy.jar:luabuddy")
-        || normalized == "PZClientMods.jar:localmods"
-        || normalized.ends_with("/PZClientMods.jar:localmods")
-}
-
-fn refuse_shared_legacy(argument: &str) -> Result<()> {
-    if argument.starts_with("-javaagent:")
-        && argument.contains("LuaBuddy.jar:luabuddy")
-        && !owned_legacy_agent(argument)
-    {
-        return Err(invalid(
-            "LuaBuddy shares a ZombieBuddy agent argument with other patches. Remove only its patches_jar entry manually before migrating; no files changed.",
-        ));
-    }
-    Ok(())
-}
-
 fn owned_property(argument: &str) -> bool {
     [
         "luabuddy.config",
         "luabuddy.templates",
         "luabuddy.debug",
         "luabuddy.earlyUI",
-        "localmods.config",
     ]
     .iter()
     .any(|name| argument == format!("-D{name}") || argument.starts_with(&format!("-D{name}=")))
@@ -769,7 +672,6 @@ fn without_integration(data: &[u8], record: &InstallRecord) -> Result<Value> {
         .filter(|value| {
             value.as_str().is_none_or(|arg| {
                 !owned_property(arg)
-                    && !owned_legacy_agent(arg)
                     && !generations
                         .iter()
                         .any(|generation| arg == generation.agent_argument)
@@ -1258,89 +1160,13 @@ fn selected_profile_files(
             )
             .into_bytes()
         };
-        let profile = Profile::parse(
+        Profile::parse(
             &target,
             std::str::from_utf8(&content).map_err(|_| invalid("Profile is not UTF-8"))?,
         )?;
-        if let Some(error) = profile.hook_migration_error() {
-            return Err(error.into());
-        }
         result.push((target, content));
     }
     Ok(result)
-}
-
-fn migrate_profiles(game: &Path, directory: &Path, package: &Package) -> Result<Vec<Change>> {
-    let manifest = migration_manifest(&package.directory)?;
-    let mut changes = Vec::new();
-    for profile in read_profiles_if_exists(directory)? {
-        let Some(hook_file) = &profile.legacy_plugin else {
-            continue;
-        };
-        let hook = bytes(hook_file, METADATA_LIMIT).map_err(|error| {
-            invalid(format!(
-                "{}; {}",
-                profile
-                    .hook_migration_error()
-                    .map(|error| error.to_string())
-                    .unwrap_or_default(),
-                error
-            ))
-        })?;
-        let digest = sha256(&hook);
-        let name = hook_file.file_name().and_then(|name| name.to_str());
-        let matched = manifest.as_ref().and_then(|manifest| {
-            manifest
-                .hooks
-                .iter()
-                .find(|entry| Some(entry.source.as_str()) == name && entry.sha256 == digest)
-        });
-        let Some(matched) = matched else {
-            return Err(invalid(format!(
-                "{} The supplied package has no exact source-name and SHA256 migration for this hook; custom or modified hooks require a Rust port.",
-                profile
-                    .hook_migration_error()
-                    .map(|error| error.to_string())
-                    .unwrap_or_default()
-            )));
-        };
-        let original = bytes(&profile.file, METADATA_LIMIT)?;
-        let backup = game
-            .join(INSTALL_DIR)
-            .join("recovery/profiles")
-            .join(format!("{}.properties", sha256(&original)));
-        let before_backup = optional_bytes(&backup, METADATA_LIMIT)?;
-        if before_backup.as_ref().is_some_and(|data| data != &original) {
-            return Err(invalid(
-                "Profile migration recovery filename has conflicting contents",
-            ));
-        }
-        changes.push(Change {
-            path: backup,
-            before: before_backup,
-            after: Some(original.clone()),
-            executable: false,
-        });
-        let mut migrated = original.clone();
-        migrated.extend_from_slice(format!("\n\nplugin=\nhook={}\n", matched.hook).as_bytes());
-        let checked = Profile::parse(
-            &profile.file,
-            std::str::from_utf8(&migrated)
-                .map_err(|_| invalid("Profile migration input is not UTF-8"))?,
-        )?;
-        if checked.legacy_plugin.is_some() || checked.hook.as_deref() != Some(&matched.hook) {
-            return Err(invalid(
-                "Profile migration did not produce its declared Rust hook",
-            ));
-        }
-        changes.push(Change {
-            path: profile.file,
-            before: Some(original),
-            after: Some(migrated),
-            executable: false,
-        });
-    }
-    Ok(changes)
 }
 
 pub use luabuddy_core::profile::profile_filename;
@@ -1382,9 +1208,6 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect();
-    for arg in &old_args {
-        refuse_shared_legacy(arg)?;
-    }
     let old_profile = old_args
         .iter()
         .rev()
@@ -1403,7 +1226,6 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
             "Profile directory contains a forbidden control character",
         ));
     }
-    let migration_changes = migrate_profiles(game, &profiles, &package)?;
     let profile_files = selected_profile_files(&options.mods, &profiles, &package)?;
     plain_directory(&profiles)?;
     let runtime_content = bytes(
@@ -1453,10 +1275,8 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
                 || r.previous.as_ref().is_some_and(|p| arg == p.agent_argument)
         });
         if prior_agent
-            || owned_legacy_agent(&arg)
             || arg.starts_with("-Dluabuddy.config=")
             || arg.starts_with("-Dluabuddy.templates=")
-            || arg.starts_with("-Dlocalmods.config=")
         {
             continue;
         }
@@ -1560,12 +1380,6 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
         jvm,
     };
     let mut changes = Vec::new();
-    let migrated_profiles: Vec<_> = migration_changes
-        .iter()
-        .filter(|change| change.path.parent() == Some(profiles.as_path()))
-        .map(|change| change.path.clone())
-        .collect();
-    changes.extend(migration_changes);
     if options.repair
         && let Some(content) = runtime_before
             .as_ref()
@@ -1649,7 +1463,7 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
     let changed = transact(game, &profiles, changes)?;
     lock.release()?;
     Ok(
-        json!({"operation": if options.repair { "repair" } else { "install" }, "changed":changed, "recoveredInterruptedOperation":recovered, "profiles":profiles, "migratedProfiles":migrated_profiles, "modifiedRetiredFilesPreserved":retained_modified, "runtime":record.current.runtime, "runtimeVerified":false, "nextStep":"Fully restart Project Zomboid through its normal launcher. Package integrity is verified; in-game operation requires its own runtime evidence."}),
+        json!({"operation": if options.repair { "repair" } else { "install" }, "changed":changed, "recoveredInterruptedOperation":recovered, "profiles":profiles, "modifiedRetiredFilesPreserved":retained_modified, "runtime":record.current.runtime, "runtimeVerified":false, "nextStep":"Fully restart Project Zomboid through its normal launcher. Package integrity is verified; in-game operation requires its own runtime evidence."}),
     )
 }
 
@@ -1680,11 +1494,7 @@ pub fn verify_install(game: &Path) -> Result<Value> {
             record.profiles.display()
         ));
     }
-    for profile in read_profiles_if_exists(&record.profiles)? {
-        if let Some(error) = profile.hook_migration_error() {
-            problems.push(error.to_string());
-        }
-    }
+    read_profiles_if_exists(&record.profiles)?;
     if game.join(INSTALL_DIR).join(JOURNAL_FILE).exists() {
         problems.push("An interrupted operation awaits recover, install, or uninstall".into());
     }
@@ -1850,7 +1660,7 @@ pub fn uninstall(game: &Path) -> Result<Value> {
     let changed = transact(game, &record.profiles, changes)?;
     lock.release()?;
     Ok(
-        json!({"operation":"uninstall", "changed":changed, "profilesPreserved":record.profiles, "modifiedFilesPreserved":retained, "sharedZombieBuddyPreserved":true, "restartRequired":true}),
+        json!({"operation":"uninstall", "changed":changed, "profilesPreserved":record.profiles, "modifiedFilesPreserved":retained, "restartRequired":true}),
     )
 }
 

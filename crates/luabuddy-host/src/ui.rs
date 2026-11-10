@@ -1841,9 +1841,6 @@ fn persist(context: &mut Context<'_, '_>, ids: &[ModId], enabled: bool) -> Resul
                 path.display()
             ));
         }
-        if let Some(error) = candidate.hook_migration_error() {
-            return Err(error.to_string());
-        }
         changes.push((path, original, content.into_bytes()));
     }
     write_profiles(changes)?;
