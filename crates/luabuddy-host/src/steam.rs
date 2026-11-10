@@ -3,7 +3,10 @@
 //! This adapter never initializes Steam or runs its callback queue. It owns only
 //! query handles and polls its own API calls on the attaching game thread.
 
-use jni::JNIEnv;
+use jni::{
+    JNIEnv, JavaVM,
+    objects::{GlobalRef, JValue},
+};
 use libloading::Library;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -29,6 +32,43 @@ const MAX_SUBSCRIPTIONS: u32 = 100_000;
 const MAX_CHILDREN: u32 = 10_000;
 const MAX_QUERIES: usize = 8;
 const INVALID_QUERY: u64 = u64::MAX;
+macro_rules! required_exports {
+    ($($variant:ident => $name:literal),* $(,)?) => {
+        enum Export {
+            $($variant),*
+        }
+        pub(crate) const REQUIRED_EXPORTS: &[(&str, &[u8])] = &[
+            $(($name, concat!($name, "\0").as_bytes())),*
+        ];
+    };
+}
+
+required_exports! {
+    Ugc => "SteamAPI_SteamUGC_v021",
+    Utils => "SteamAPI_SteamUtils_v010",
+    AppId => "SteamAPI_ISteamUtils_GetAppID",
+    User => "SteamAPI_GetHSteamUser",
+    CreateQuery => "SteamAPI_ISteamUGC_CreateQueryAllUGCRequestPage",
+    CreateDetails => "SteamAPI_ISteamUGC_CreateQueryUGCDetailsRequest",
+    SetSearch => "SteamAPI_ISteamUGC_SetSearchText",
+    SetLongDescription => "SteamAPI_ISteamUGC_SetReturnLongDescription",
+    SetChildren => "SteamAPI_ISteamUGC_SetReturnChildren",
+    SendQuery => "SteamAPI_ISteamUGC_SendQueryUGCRequest",
+    ReleaseQuery => "SteamAPI_ISteamUGC_ReleaseQueryUGCRequest",
+    QueryResult => "SteamAPI_ISteamUGC_GetQueryUGCResult",
+    QueryChildren => "SteamAPI_ISteamUGC_GetQueryUGCChildren",
+    ApiCompleted => "SteamAPI_ISteamUtils_IsAPICallCompleted",
+    ApiResult => "SteamAPI_ISteamUtils_GetAPICallResult",
+    ApiFailure => "SteamAPI_ISteamUtils_GetAPICallFailureReason",
+    ItemState => "SteamAPI_ISteamUGC_GetItemState",
+    Subscribe => "SteamAPI_ISteamUGC_SubscribeItem",
+    Unsubscribe => "SteamAPI_ISteamUGC_UnsubscribeItem",
+    DownloadInfo => "SteamAPI_ISteamUGC_GetItemDownloadInfo",
+    InstallInfo => "SteamAPI_ISteamUGC_GetItemInstallInfo",
+    SubscriptionCount => "SteamAPI_ISteamUGC_GetNumSubscribedItems",
+    SubscribedItems => "SteamAPI_ISteamUGC_GetSubscribedItems",
+}
+
 static DOWNLOAD_OBSERVER: AtomicBool = AtomicBool::new(false);
 static DOWNLOAD_NOTIFICATIONS: OnceLock<Mutex<BTreeMap<ItemId, (Instant, i32)>>> = OnceLock::new();
 
@@ -216,6 +256,163 @@ impl UserIntent {
 #[derive(Clone)]
 pub struct SteamWorkshop {
     api: Rc<Api>,
+    download_request: Rc<Result<DownloadRequester>>,
+}
+
+enum DownloadRequester {
+    Host(HostDownload),
+    #[cfg(test)]
+    Test(fn(ItemId) -> Result<bool>),
+}
+
+impl DownloadRequester {
+    fn request(&self, item: ItemId) -> Result<bool> {
+        match self {
+            Self::Host(host) => host.request(item),
+            #[cfg(test)]
+            Self::Test(request) => request(item),
+        }
+    }
+}
+
+pub(crate) struct HostDownload {
+    vm: JavaVM,
+    instance: GlobalRef,
+    owner: ThreadId,
+}
+
+fn host_jni_error(error: jni::errors::Error) -> SteamError {
+    SteamError(error.to_string())
+}
+
+fn host_jni_result<T>(env: &mut JNIEnv<'_>, result: Result<T>, stage: &str) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if env.exception_check().map_err(host_jni_error)? {
+                env.exception_clear().map_err(host_jni_error)?;
+            }
+            Err(SteamError(format!("{stage}: {error}")))
+        }
+    }
+}
+
+impl HostDownload {
+    pub(crate) fn bind(env: &mut JNIEnv<'_>) -> Result<Self> {
+        let result = Self::bind_checked(env);
+        host_jni_result(env, result, "Resolving the game's Workshop download route")
+    }
+
+    fn bind_checked(env: &mut JNIEnv<'_>) -> Result<Self> {
+        let class = env
+            .find_class("zombie/core/znet/SteamWorkshop")
+            .map_err(host_jni_error)?;
+        let loader = env
+            .call_method(&class, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .and_then(|value| value.l())
+            .map_err(host_jni_error)?;
+        let system = env
+            .call_static_method(
+                "java/lang/ClassLoader",
+                "getSystemClassLoader",
+                "()Ljava/lang/ClassLoader;",
+                &[],
+            )
+            .and_then(|value| value.l())
+            .map_err(host_jni_error)?;
+        if !env.is_same_object(loader, system).map_err(host_jni_error)? {
+            return Err(SteamError(
+                "Unapproved Workshop download classloader".into(),
+            ));
+        }
+        let instance = env
+            .get_static_field(&class, "instance", "Lzombie/core/znet/SteamWorkshop;")
+            .and_then(|value| value.l())
+            .map_err(host_jni_error)?;
+        if instance.is_null() {
+            return Err(SteamError(
+                "The host Workshop instance is unavailable".into(),
+            ));
+        }
+        let instance_class = env
+            .call_method(&instance, "getClass", "()Ljava/lang/Class;", &[])
+            .and_then(|value| value.l())
+            .map_err(host_jni_error)?;
+        if !env
+            .is_same_object(&class, instance_class)
+            .map_err(host_jni_error)?
+        {
+            return Err(SteamError(
+                "Unexpected Workshop download instance class".into(),
+            ));
+        }
+        let long_type = env
+            .get_static_field("java/lang/Long", "TYPE", "Ljava/lang/Class;")
+            .and_then(|value| value.l())
+            .map_err(host_jni_error)?;
+        let bool_type = env
+            .get_static_field("java/lang/Boolean", "TYPE", "Ljava/lang/Class;")
+            .and_then(|value| value.l())
+            .map_err(host_jni_error)?;
+        let parameters = env
+            .new_object_array(2, "java/lang/Class", jni::objects::JObject::null())
+            .map_err(host_jni_error)?;
+        env.set_object_array_element(&parameters, 0, long_type)
+            .map_err(host_jni_error)?;
+        env.set_object_array_element(&parameters, 1, &bool_type)
+            .map_err(host_jni_error)?;
+        let name = env.new_string("n_DownloadItem").map_err(host_jni_error)?;
+        let method = env
+            .call_method(
+                &class,
+                "getDeclaredMethod",
+                "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
+                &[JValue::Object(&name), JValue::Object(&parameters)],
+            )
+            .and_then(|value| value.l())
+            .map_err(host_jni_error)?;
+        let modifiers = env
+            .call_method(&method, "getModifiers", "()I", &[])
+            .and_then(|value| value.i())
+            .map_err(host_jni_error)?;
+        let returned = env
+            .call_method(&method, "getReturnType", "()Ljava/lang/Class;", &[])
+            .and_then(|value| value.l())
+            .map_err(host_jni_error)?;
+        if modifiers & 0x010a != 0x0102
+            || !env
+                .is_same_object(returned, bool_type)
+                .map_err(host_jni_error)?
+        {
+            return Err(SteamError(
+                "Expected private native instance method SteamWorkshop.n_DownloadItem(JZ)Z".into(),
+            ));
+        }
+        Ok(Self {
+            vm: env.get_java_vm().map_err(host_jni_error)?,
+            instance: env.new_global_ref(instance).map_err(host_jni_error)?,
+            owner: thread::current().id(),
+        })
+    }
+
+    pub(crate) fn request(&self, item: ItemId) -> Result<bool> {
+        if thread::current().id() != self.owner {
+            return Err(SteamError(
+                "Run native Workshop downloads on the attaching game thread".into(),
+            ));
+        }
+        let mut env = self.vm.get_env().map_err(host_jni_error)?;
+        let result = env
+            .call_method(
+                self.instance.as_obj(),
+                "n_DownloadItem",
+                "(JZ)Z",
+                &[JValue::Long(item.get() as i64), JValue::Bool(0)],
+            )
+            .and_then(|value| value.z())
+            .map_err(host_jni_error);
+        host_jni_result(&mut env, result, "Requesting a native Workshop download")
+    }
 }
 
 impl SteamWorkshop {
@@ -243,7 +440,11 @@ impl SteamWorkshop {
         // library. Exact flat-API symbols are resolved below and held by `Api`.
         let api = unsafe { Api::load(library)? };
         api.check_owner()?;
-        Ok(Self { api: Rc::new(api) })
+        let download_request = HostDownload::bind(env).map(DownloadRequester::Host);
+        Ok(Self {
+            api: Rc::new(api),
+            download_request: Rc::new(download_request),
+        })
     }
 
     pub fn start_search(&self, search: &str, page: u32, timeout: Duration) -> Result<Query> {
@@ -425,7 +626,7 @@ impl SteamWorkshop {
             item: intent.item,
             subscribing: action == IntentAction::Subscribe,
             deadline,
-            finished: false,
+            phase: SubscriptionPhase::AwaitingResult,
         })
     }
 
@@ -453,10 +654,14 @@ impl SteamWorkshop {
             ));
         }
         let started = Instant::now();
-        // SAFETY: Valid owner-thread interface and explicit item-scoped intent.
-        let accepted = unsafe { (self.api.download)(self.api.ugc, intent.item.get(), false) };
+        let accepted = self
+            .download_request
+            .as_ref()
+            .as_ref()
+            .map_err(Clone::clone)?
+            .request(intent.item)?;
         if !accepted {
-            return Err(SteamError("Steam refused this Workshop download".into()));
+            return Err(SteamError("The game's Workshop downloader refused this request; another host download may be active".into()));
         }
         self.api
             .download_outcomes
@@ -639,52 +844,66 @@ pub struct Subscription {
     item: ItemId,
     subscribing: bool,
     deadline: Instant,
-    finished: bool,
+    phase: SubscriptionPhase,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubscriptionPhase {
+    AwaitingResult,
+    AwaitingState,
+    Finished,
 }
 
 impl Subscription {
     pub fn poll(&mut self) -> Result<Poll<ItemState>> {
-        self.api.check_owner()?;
-        if self.finished {
+        if let Err(error) = self.api.check_owner() {
+            self.phase = SubscriptionPhase::Finished;
+            self.release_pending();
+            return Err(error);
+        }
+        if self.phase == SubscriptionPhase::Finished {
             return Err(SteamError(
                 "Subscription request has already completed".into(),
             ));
         }
         if Instant::now() >= self.deadline {
-            self.finished = true;
+            self.phase = SubscriptionPhase::Finished;
             self.release_pending();
             return Err(SteamError("Subscription result is unconfirmed after timeout. Refresh item state before retrying; Steam may still finish the request".into()));
         }
-        match self.api.call_completed(self.call) {
-            Ok(false) => return Ok(Poll::Pending),
-            Ok(true) => (),
-            Err(error) => {
-                self.finished = true;
-                self.release_pending();
-                return Err(error);
-            }
+        let outcome = self.poll_pending();
+        if !matches!(&outcome, Ok(Poll::Pending)) {
+            self.phase = SubscriptionPhase::Finished;
+            self.release_pending();
         }
-        let mut response = SubscriptionResult { result: 0, item: 0 };
-        let callback = if self.subscribing {
-            SUBSCRIBE_CALLBACK
-        } else {
-            UNSUBSCRIBE_CALLBACK
-        };
-        // SAFETY: RemoteStorage subscription result is packed4 size12 on Linux;
-        // exact callback ID is selected for this request's action.
-        let completed = unsafe { self.api.call_result(self.call, callback, &mut response) };
-        self.finished = true;
-        self.release_pending();
-        completed?;
-        if response.result != RESULT_OK || response.item != self.item.get() {
-            return Err(SteamError(format!(
-                "Workshop subscription change failed with Steam result {}",
-                response.result
-            )));
+        outcome
+    }
+
+    fn poll_pending(&mut self) -> Result<Poll<ItemState>> {
+        if self.phase == SubscriptionPhase::AwaitingResult {
+            if !self.api.call_completed(self.call)? {
+                return Ok(Poll::Pending);
+            }
+            let mut response = SubscriptionResult { result: 0, item: 0 };
+            let callback = if self.subscribing {
+                SUBSCRIBE_CALLBACK
+            } else {
+                UNSUBSCRIBE_CALLBACK
+            };
+            // SAFETY: RemoteStorage subscription result is packed4 size12 on Linux;
+            // exact callback ID is selected for this request's action.
+            unsafe { self.api.call_result(self.call, callback, &mut response) }?;
+            if response.result != RESULT_OK || response.item != self.item.get() {
+                return Err(SteamError(format!(
+                    "Workshop subscription change failed with Steam result {}",
+                    response.result
+                )));
+            }
+            self.phase = SubscriptionPhase::AwaitingState;
         }
         let state = self.api.item_state(self.item)?;
         if state.subscribed != self.subscribing {
-            return Err(SteamError("Steam acknowledged the request but subscription state is not yet confirmed. Refresh before retrying".into()));
+            return Ok(Poll::Pending);
         }
         Ok(Poll::Ready(state))
     }
@@ -827,7 +1046,6 @@ type ApiResult = unsafe extern "C" fn(*mut c_void, u64, *mut c_void, i32, i32, *
 type ApiFailure = unsafe extern "C" fn(*mut c_void, u64) -> i32;
 type ItemStateFn = unsafe extern "C" fn(*mut c_void, u64) -> u32;
 type ItemAction = unsafe extern "C" fn(*mut c_void, u64) -> u64;
-type DownloadFn = unsafe extern "C" fn(*mut c_void, u64, bool) -> bool;
 type DownloadInfo = unsafe extern "C" fn(*mut c_void, u64, *mut u64, *mut u64) -> bool;
 type InstallInfo =
     unsafe extern "C" fn(*mut c_void, u64, *mut u64, *mut c_char, u32, *mut u32) -> bool;
@@ -857,7 +1075,6 @@ struct Api {
     item_state: ItemStateFn,
     subscribe: ItemAction,
     unsubscribe: ItemAction,
-    download: DownloadFn,
     download_info: DownloadInfo,
     install_info: InstallInfo,
     subscription_count: SubscriptionCount,
@@ -876,16 +1093,17 @@ impl Api {
     /// retain its Steam context for this owner thread until all handles drop.
     unsafe fn load(library: Library) -> Result<Self> {
         macro_rules! symbol {
-            ($name:literal, $ty:ty) => {{
+            ($export:ident, $ty:ty) => {{
+                let (name, bytes) = REQUIRED_EXPORTS[Export::$export as usize];
                 // SAFETY: Caller establishes the Steam library and supported ABI;
-                // the literal names bind each symbol to its flat API signature.
-                unsafe { library.get::<$ty>(concat!($name, "\0").as_bytes()) }
+                // the shared declaration binds each export name to this typed lookup.
+                unsafe { library.get::<$ty>(bytes) }
                     .map(|symbol| *symbol)
-                    .map_err(|e| SteamError(format!("Missing Steam capability {}: {e}", $name)))?
+                    .map_err(|e| SteamError(format!("Missing Steam capability {name}: {e}")))?
             }};
         }
-        let ugc_getter = symbol!("SteamAPI_SteamUGC_v021", Interface);
-        let utils_getter = symbol!("SteamAPI_SteamUtils_v010", Interface);
+        let ugc_getter = symbol!(Ugc, Interface);
+        let utils_getter = symbol!(Utils, Interface);
         // SAFETY: Accessors belong to the already initialized host library.
         let (ugc, utils) = unsafe { (ugc_getter(), utils_getter()) };
         if ugc.is_null() || utils.is_null() {
@@ -897,39 +1115,29 @@ impl Api {
             ugc,
             utils,
             owner: thread::current().id(),
-            app_id: symbol!("SteamAPI_ISteamUtils_GetAppID", AppId),
-            steam_user: symbol!("SteamAPI_GetHSteamUser", SteamUser),
+            app_id: symbol!(AppId, AppId),
+            steam_user: symbol!(User, SteamUser),
             ugc_getter,
             utils_getter,
-            create_query: symbol!(
-                "SteamAPI_ISteamUGC_CreateQueryAllUGCRequestPage",
-                CreateQuery
-            ),
-            create_details: symbol!(
-                "SteamAPI_ISteamUGC_CreateQueryUGCDetailsRequest",
-                CreateDetails
-            ),
-            set_search: symbol!("SteamAPI_ISteamUGC_SetSearchText", SetSearch),
-            set_long_description: symbol!("SteamAPI_ISteamUGC_SetReturnLongDescription", SetFlag),
-            set_children: symbol!("SteamAPI_ISteamUGC_SetReturnChildren", SetFlag),
-            send_query: symbol!("SteamAPI_ISteamUGC_SendQueryUGCRequest", SendQuery),
-            release_query: symbol!("SteamAPI_ISteamUGC_ReleaseQueryUGCRequest", ReleaseQuery),
-            query_result: symbol!("SteamAPI_ISteamUGC_GetQueryUGCResult", QueryResult),
-            query_children: symbol!("SteamAPI_ISteamUGC_GetQueryUGCChildren", QueryChildren),
-            api_completed: symbol!("SteamAPI_ISteamUtils_IsAPICallCompleted", ApiCompleted),
-            api_result: symbol!("SteamAPI_ISteamUtils_GetAPICallResult", ApiResult),
-            api_failure: symbol!("SteamAPI_ISteamUtils_GetAPICallFailureReason", ApiFailure),
-            item_state: symbol!("SteamAPI_ISteamUGC_GetItemState", ItemStateFn),
-            subscribe: symbol!("SteamAPI_ISteamUGC_SubscribeItem", ItemAction),
-            unsubscribe: symbol!("SteamAPI_ISteamUGC_UnsubscribeItem", ItemAction),
-            download: symbol!("SteamAPI_ISteamUGC_DownloadItem", DownloadFn),
-            download_info: symbol!("SteamAPI_ISteamUGC_GetItemDownloadInfo", DownloadInfo),
-            install_info: symbol!("SteamAPI_ISteamUGC_GetItemInstallInfo", InstallInfo),
-            subscription_count: symbol!(
-                "SteamAPI_ISteamUGC_GetNumSubscribedItems",
-                SubscriptionCount
-            ),
-            subscribed_items: symbol!("SteamAPI_ISteamUGC_GetSubscribedItems", SubscribedItems),
+            create_query: symbol!(CreateQuery, CreateQuery),
+            create_details: symbol!(CreateDetails, CreateDetails),
+            set_search: symbol!(SetSearch, SetSearch),
+            set_long_description: symbol!(SetLongDescription, SetFlag),
+            set_children: symbol!(SetChildren, SetFlag),
+            send_query: symbol!(SendQuery, SendQuery),
+            release_query: symbol!(ReleaseQuery, ReleaseQuery),
+            query_result: symbol!(QueryResult, QueryResult),
+            query_children: symbol!(QueryChildren, QueryChildren),
+            api_completed: symbol!(ApiCompleted, ApiCompleted),
+            api_result: symbol!(ApiResult, ApiResult),
+            api_failure: symbol!(ApiFailure, ApiFailure),
+            item_state: symbol!(ItemState, ItemStateFn),
+            subscribe: symbol!(Subscribe, ItemAction),
+            unsubscribe: symbol!(Unsubscribe, ItemAction),
+            download_info: symbol!(DownloadInfo, DownloadInfo),
+            install_info: symbol!(InstallInfo, InstallInfo),
+            subscription_count: symbol!(SubscriptionCount, SubscriptionCount),
+            subscribed_items: symbol!(SubscribedItems, SubscribedItems),
             download_outcomes: RefCell::new(BTreeMap::new()),
             pending_subscriptions: RefCell::new(BTreeMap::new()),
             active_queries: Cell::new(0),
@@ -1387,5 +1595,499 @@ mod tests {
     fn native_attachment_never_loads_a_missing_library() {
         assert!(open_existing(Path::new("relative.so")).is_err());
         assert!(open_existing(Path::new("/luabuddy-nonexistent-library-for-test.so")).is_err());
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod subscription_tests {
+    use super::*;
+
+    struct NativeState {
+        active: bool,
+        completed: bool,
+        transport_failed: bool,
+        result_accepted: bool,
+        result_code: i32,
+        response_item: u64,
+        subscribed: bool,
+        item_bits: u32,
+        host_accepts: bool,
+        host_error: bool,
+        host_requests: Vec<u64>,
+        folder: Option<&'static str>,
+        actions: Vec<(bool, u64)>,
+        result_reads: usize,
+        unexpected_calls: usize,
+    }
+
+    impl Default for NativeState {
+        fn default() -> Self {
+            Self {
+                active: true,
+                completed: false,
+                transport_failed: false,
+                result_accepted: true,
+                result_code: 1,
+                response_item: 42,
+                subscribed: false,
+                item_bits: 0,
+                host_accepts: true,
+                host_error: false,
+                host_requests: Vec::new(),
+                folder: None,
+                actions: Vec::new(),
+                result_reads: 0,
+                unexpected_calls: 0,
+            }
+        }
+    }
+
+    thread_local! {
+        static NATIVE: RefCell<NativeState> = RefCell::new(NativeState::default());
+    }
+
+    extern "C" fn interface() -> *mut c_void {
+        std::ptr::dangling_mut::<u8>().cast()
+    }
+
+    extern "C" fn app_id(_: *mut c_void) -> u32 {
+        108_600
+    }
+
+    extern "C" fn steam_user() -> i32 {
+        NATIVE.with(|s| i32::from(s.borrow().active))
+    }
+
+    /// # Safety
+    /// A non-null `failed` must be the adapter's writable bool output.
+    unsafe extern "C" fn completed(_: *mut c_void, _: u64, failed: *mut bool) -> bool {
+        NATIVE.with(|s| {
+            let state = s.borrow();
+            if !failed.is_null() {
+                // SAFETY: The adapter supplies its writable bool output.
+                unsafe { failed.write(state.transport_failed) };
+            }
+            state.completed
+        })
+    }
+
+    /// # Safety
+    /// The adapter supplies disjoint writable callback and bool outputs.
+    /// The callback buffer holds the declared packed subscription result.
+    unsafe extern "C" fn result(
+        _: *mut c_void,
+        _: u64,
+        value: *mut c_void,
+        size: i32,
+        callback: i32,
+        failed: *mut bool,
+    ) -> bool {
+        NATIVE.with(|s| {
+            let mut state = s.borrow_mut();
+            state.result_reads += 1;
+            let expected = if state.actions.last().is_some_and(|a| a.0) {
+                1313
+            } else {
+                1315
+            };
+            if value.is_null() || failed.is_null() || size != 12 || callback != expected {
+                return false;
+            }
+            // SAFETY: The checked output is the adapter's packed subscription result.
+            unsafe {
+                failed.write(false);
+                value
+                    .cast::<SubscriptionResult>()
+                    .write_unaligned(SubscriptionResult {
+                        result: state.result_code,
+                        item: state.response_item,
+                    });
+            }
+            state.result_accepted
+        })
+    }
+
+    extern "C" fn failure(_: *mut c_void, _: u64) -> i32 {
+        2
+    }
+
+    extern "C" fn item_state(_: *mut c_void, _: u64) -> u32 {
+        NATIVE.with(|s| {
+            let state = s.borrow();
+            u32::from(state.subscribed) | state.item_bits
+        })
+    }
+
+    fn action(subscribing: bool, item: u64) -> u64 {
+        NATIVE.with(|s| {
+            let mut state = s.borrow_mut();
+            state.actions.push((subscribing, item));
+            state.actions.len() as u64
+        })
+    }
+
+    extern "C" fn subscribe(_: *mut c_void, item: u64) -> u64 {
+        action(true, item)
+    }
+
+    extern "C" fn unsubscribe(_: *mut c_void, item: u64) -> u64 {
+        action(false, item)
+    }
+
+    fn request_download(item: ItemId) -> Result<bool> {
+        NATIVE.with(|s| {
+            let mut state = s.borrow_mut();
+            state.host_requests.push(item.get());
+            if state.host_error {
+                Err(SteamError("Host JNI download request failed".into()))
+            } else {
+                Ok(state.host_accepts)
+            }
+        })
+    }
+
+    extern "C" fn download_info(_: *mut c_void, _: u64, _: *mut u64, _: *mut u64) -> bool {
+        false
+    }
+
+    /// # Safety
+    /// Outputs are the adapter's disjoint buffers with the supplied capacity.
+    unsafe extern "C" fn install_info(
+        _: *mut c_void,
+        _: u64,
+        size: *mut u64,
+        folder: *mut c_char,
+        capacity: u32,
+        timestamp: *mut u32,
+    ) -> bool {
+        NATIVE.with(|s| {
+            let state = s.borrow();
+            let Some(path) = state.folder else {
+                return false;
+            };
+            if size.is_null()
+                || folder.is_null()
+                || timestamp.is_null()
+                || capacity as usize <= path.len()
+            {
+                return false;
+            }
+            // SAFETY: The caller supplies writable outputs; the path fits in capacity.
+            unsafe {
+                size.write(4);
+                timestamp.write(1);
+                std::ptr::copy_nonoverlapping(path.as_ptr(), folder.cast(), path.len());
+                folder.add(path.len()).write(0);
+            }
+            true
+        })
+    }
+
+    macro_rules! unused {
+        ($name:ident($($arg:ident: $ty:ty),* $(,)?) -> $output:ty, $value:expr) => {
+            extern "C" fn $name($($arg: $ty),*) -> $output {
+                $(let _ = $arg;)*
+                NATIVE.with(|s| s.borrow_mut().unexpected_calls += 1);
+                $value
+            }
+        };
+    }
+
+    unused!(
+        query(a: *mut c_void, b: i32, c: i32, d: u32, e: u32, f: u32) -> u64,
+        0
+    );
+    unused!(details(a: *mut c_void, b: *mut u64, c: u32) -> u64, 0);
+    unused!(
+        search(a: *mut c_void, b: u64, c: *const c_char) -> bool,
+        false
+    );
+    unused!(flag(a: *mut c_void, b: u64, c: bool) -> bool, false);
+    unused!(send(a: *mut c_void, b: u64) -> u64, 0);
+    unused!(release(a: *mut c_void, b: u64) -> bool, false);
+    unused!(
+        query_result(a: *mut c_void, b: u64, c: u32, d: *mut SteamDetails) -> bool,
+        false
+    );
+    unused!(
+        children(a: *mut c_void, b: u64, c: u32, d: *mut u64, e: u32) -> bool,
+        false
+    );
+    unused!(subscription_count(a: *mut c_void, b: bool) -> u32, 0);
+    unused!(
+        subscribed_items(a: *mut c_void, b: *mut u64, c: u32, d: bool) -> u32,
+        0
+    );
+
+    fn workshop(subscribed: bool) -> SteamWorkshop {
+        NATIVE.with(|s| {
+            *s.borrow_mut() = NativeState {
+                subscribed,
+                ..NativeState::default()
+            }
+        });
+        SteamWorkshop {
+            api: Rc::new(Api {
+                ugc: std::ptr::dangling_mut::<u8>().cast(),
+                utils: std::ptr::dangling_mut::<u8>().cast(),
+                owner: thread::current().id(),
+                app_id,
+                steam_user,
+                ugc_getter: interface,
+                utils_getter: interface,
+                create_query: query,
+                create_details: details,
+                set_search: search,
+                set_long_description: flag,
+                set_children: flag,
+                send_query: send,
+                release_query: release,
+                query_result,
+                query_children: children,
+                api_completed: completed,
+                api_result: result,
+                api_failure: failure,
+                item_state,
+                subscribe,
+                unsubscribe,
+                download_info,
+                install_info,
+                subscription_count,
+                subscribed_items,
+                active_queries: Cell::new(0),
+                pending_subscriptions: RefCell::new(BTreeMap::new()),
+                download_outcomes: RefCell::new(BTreeMap::new()),
+                _library: libloading::os::unix::Library::this().into(),
+                _not_send: PhantomData,
+            }),
+            download_request: Rc::new(Err(SteamError(
+                "No download requester in subscription fixture".into(),
+            ))),
+        }
+    }
+
+    fn start(workshop: &SteamWorkshop, subscribing: bool, timeout: Duration) -> Subscription {
+        let item = ItemId::new(42).unwrap();
+        if subscribing {
+            workshop.subscribe(UserIntent::subscribe(item), timeout)
+        } else {
+            workshop.unsubscribe(UserIntent::unsubscribe(item), timeout)
+        }
+        .unwrap()
+    }
+
+    fn downloading_workshop() -> SteamWorkshop {
+        DOWNLOAD_OBSERVER.store(true, Ordering::Release);
+        let mut workshop = workshop(true);
+        workshop.download_request = Rc::new(Ok(DownloadRequester::Test(request_download)));
+        workshop
+    }
+
+    #[test]
+    fn host_download_request_requires_fresh_success_and_verified_installation() {
+        let workshop = downloading_workshop();
+        let item = ItemId::new(900_001).unwrap();
+        record_download_result(item, RESULT_OK).unwrap();
+        let mut request = workshop
+            .download(UserIntent::download(item), Duration::from_secs(10))
+            .unwrap();
+        assert!(
+            workshop
+                .download(UserIntent::download(item), Duration::from_secs(10))
+                .is_err()
+        );
+        NATIVE.with(|s| {
+            let mut state = s.borrow_mut();
+            state.item_bits = 4;
+            state.folder = Some("/tmp/luabuddy-host-download-fixture");
+        });
+        assert_eq!(request.poll().unwrap(), Poll::Pending);
+        record_download_result(item, RESULT_OK).unwrap();
+        NATIVE.with(|s| s.borrow_mut().folder = None);
+        assert_eq!(request.poll().unwrap(), Poll::Pending);
+        NATIVE.with(|s| {
+            let mut state = s.borrow_mut();
+            state.item_bits = 4 | 16;
+            state.folder = Some("/tmp/luabuddy-host-download-fixture");
+        });
+        assert_eq!(request.poll().unwrap(), Poll::Pending);
+        NATIVE.with(|s| s.borrow_mut().item_bits = 4);
+        let Poll::Ready(progress) = request.poll().unwrap() else {
+            panic!("Fresh successful callback and installed path must complete the request");
+        };
+        assert_eq!(
+            progress.install_folder,
+            Some(PathBuf::from("/tmp/luabuddy-host-download-fixture"))
+        );
+        assert!(request.poll().is_err());
+        NATIVE.with(|s| {
+            let state = s.borrow();
+            assert_eq!(state.host_requests, [900_001]);
+            assert!(state.actions.is_empty());
+        });
+    }
+
+    #[test]
+    fn rejected_and_failed_host_downloads_do_not_create_an_observation() {
+        let workshop = downloading_workshop();
+        let item = ItemId::new(900_002).unwrap();
+        NATIVE.with(|s| s.borrow_mut().host_accepts = false);
+        assert!(
+            workshop
+                .download(UserIntent::download(item), Duration::from_secs(1))
+                .is_err()
+        );
+        assert!(workshop.api.download_outcomes.borrow().is_empty());
+        NATIVE.with(|s| s.borrow_mut().host_error = true);
+        assert!(
+            workshop
+                .download(UserIntent::download(item), Duration::from_secs(1))
+                .is_err()
+        );
+        assert!(workshop.api.download_outcomes.borrow().is_empty());
+        NATIVE.with(|s| {
+            let mut state = s.borrow_mut();
+            state.host_accepts = true;
+            state.host_error = false;
+        });
+        let mut request = workshop
+            .download(UserIntent::download(item), Duration::from_secs(1))
+            .unwrap();
+        record_download_result(item, 27).unwrap();
+        assert!(request.poll().unwrap_err().0.contains("27"));
+        drop(request);
+        let mut request = workshop
+            .download(UserIntent::download(item), Duration::from_secs(1))
+            .unwrap();
+        request.deadline = Instant::now();
+        assert!(request.poll().unwrap_err().0.contains("unconfirmed"));
+        drop(request);
+        assert!(workshop.api.download_outcomes.borrow().is_empty());
+        assert!(
+            workshop
+                .cancel_download(item)
+                .unwrap_err()
+                .0
+                .contains("cannot cancel")
+        );
+        NATIVE.with(|s| {
+            let state = s.borrow();
+            assert_eq!(state.host_requests, [900_002, 900_002, 900_002, 900_002]);
+            assert!(state.actions.is_empty());
+        });
+    }
+
+    #[test]
+    fn acknowledged_changes_wait_for_state_without_repeating_the_native_request_or_result() {
+        for subscribing in [true, false] {
+            let workshop = workshop(!subscribing);
+            let item = ItemId::new(42).unwrap();
+            let mut request = start(&workshop, subscribing, Duration::from_secs(10));
+            assert_eq!(request.poll().unwrap(), Poll::Pending);
+            NATIVE.with(|s| s.borrow_mut().completed = true);
+            assert_eq!(request.poll().unwrap(), Poll::Pending);
+            assert_eq!(request.poll().unwrap(), Poll::Pending);
+            assert!(
+                workshop
+                    .subscribe(UserIntent::subscribe(item), Duration::from_secs(1))
+                    .is_err()
+            );
+            assert!(
+                workshop
+                    .unsubscribe(UserIntent::unsubscribe(item), Duration::from_secs(1))
+                    .is_err()
+            );
+            NATIVE.with(|s| {
+                let mut state = s.borrow_mut();
+                assert_eq!(state.actions, [(subscribing, 42)]);
+                assert_eq!(state.result_reads, 1);
+                assert_eq!(state.unexpected_calls, 0);
+                state.subscribed = subscribing;
+            });
+            let Poll::Ready(state) = request.poll().unwrap() else {
+                panic!("Confirmed requested state must complete the operation");
+            };
+            assert_eq!(state.subscribed, subscribing);
+            assert!(request.poll().is_err());
+            let replacement = start(&workshop, subscribing, Duration::from_secs(1));
+            drop(request);
+            assert!(
+                workshop
+                    .subscribe(UserIntent::subscribe(item), Duration::from_secs(1))
+                    .is_err()
+            );
+            drop(replacement);
+            NATIVE.with(|s| {
+                let state = s.borrow();
+                assert_eq!(state.actions.len(), 2);
+                assert_eq!(state.result_reads, 1);
+                assert_eq!(state.unexpected_calls, 0);
+            });
+        }
+    }
+
+    #[test]
+    fn acknowledged_change_keeps_the_original_deadline_and_releases_on_timeout() {
+        let workshop = workshop(false);
+        let mut request = start(&workshop, true, Duration::from_secs(10));
+        let original_deadline = request.deadline;
+        NATIVE.with(|s| s.borrow_mut().completed = true);
+        assert_eq!(request.poll().unwrap(), Poll::Pending);
+        assert_eq!(request.deadline, original_deadline);
+        request.deadline = Instant::now();
+        assert!(request.poll().unwrap_err().0.contains("unconfirmed"));
+        assert!(request.poll().is_err());
+        drop(start(&workshop, true, Duration::from_secs(1)));
+        NATIVE.with(|s| {
+            let state = s.borrow();
+            assert_eq!(state.actions.len(), 2);
+            assert_eq!(state.result_reads, 1);
+            assert_eq!(state.unexpected_calls, 0);
+        });
+    }
+
+    #[test]
+    fn subscription_errors_release_ownership_without_repeating_account_writes() {
+        for failure in ["transport", "read", "result", "identity", "context"] {
+            let workshop = workshop(false);
+            let mut request = start(&workshop, true, Duration::from_secs(10));
+            NATIVE.with(|s| {
+                let mut state = s.borrow_mut();
+                state.completed = true;
+                match failure {
+                    "transport" => state.transport_failed = true,
+                    "read" => state.result_accepted = false,
+                    "result" => state.result_code = 15,
+                    "identity" => state.response_item = 43,
+                    "context" => state.active = false,
+                    _ => unreachable!(),
+                }
+            });
+            assert!(request.poll().is_err(), "{failure}");
+            NATIVE.with(|s| s.borrow_mut().active = true);
+            assert!(request.poll().is_err(), "{failure}");
+            drop(start(&workshop, true, Duration::from_secs(1)));
+            NATIVE.with(|s| {
+                let state = s.borrow();
+                assert_eq!(state.actions.len(), 2, "{failure}");
+                assert_eq!(state.unexpected_calls, 0, "{failure}");
+            });
+        }
+    }
+
+    #[test]
+    fn dropping_an_acknowledged_change_releases_ownership_without_cancelling_steam() {
+        let workshop = workshop(false);
+        let mut request = start(&workshop, true, Duration::from_secs(10));
+        NATIVE.with(|s| s.borrow_mut().completed = true);
+        assert_eq!(request.poll().unwrap(), Poll::Pending);
+        drop(request);
+        drop(start(&workshop, true, Duration::from_secs(1)));
+        NATIVE.with(|s| {
+            let state = s.borrow();
+            assert_eq!(state.actions, [(true, 42), (true, 42)]);
+            assert_eq!(state.result_reads, 1);
+            assert_eq!(state.unexpected_calls, 0);
+        });
     }
 }
