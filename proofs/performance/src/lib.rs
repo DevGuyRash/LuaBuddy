@@ -5,7 +5,9 @@ mod growth;
 #[allow(dead_code)]
 #[path = "../../../crates/luabuddy-host/src/jvmti.rs"]
 mod jvmti;
+mod mangohud;
 mod native_control;
+mod source;
 
 use jni::{
     JNIEnv,
@@ -14,6 +16,7 @@ use jni::{
 };
 use jvmti::{CallbackEnv, Jvmti};
 use serde::{Deserialize, Serialize};
+use source::FrameSource;
 use std::{
     ffi::{CStr, c_char, c_void},
     fs,
@@ -45,6 +48,14 @@ struct Configuration {
     account: Option<String>,
     hud: PathBuf,
     #[serde(default)]
+    frame_source: FrameSource,
+    #[serde(default)]
+    steam: bool,
+    #[serde(default)]
+    native_favorite: bool,
+    #[serde(default)]
+    require_focus: bool,
+    #[serde(default)]
     growth: bool,
     #[serde(default)]
     cache: Option<PathBuf>,
@@ -64,6 +75,7 @@ struct Ready {
     game_version: String,
     player_name: Option<String>,
     active_native_mods: usize,
+    steam_enabled: bool,
 }
 
 enum Readiness {
@@ -88,6 +100,7 @@ struct Report {
     frame_ms: Vec<f64>,
     target: &'static str,
     timing_source: String,
+    cadence: Option<mangohud::Cadence>,
     first_frame_index: usize,
     last_frame_index: usize,
     measure_start_unix_ms: f64,
@@ -106,6 +119,7 @@ struct State {
     end_ready: Option<Ready>,
     presentations: u64,
     frame_ms: Vec<f64>,
+    cadence: Option<mangohud::Cadence>,
     first_frame: Option<usize>,
     measure_at: Option<Instant>,
     measure_wall: Option<SystemTime>,
@@ -155,6 +169,10 @@ pub unsafe extern "system" fn Agent_OnLoad(
             || !config.output.is_absolute()
             || !config.progress.is_absolute()
             || !config.hud.is_absolute()
+            || config.native_favorite
+                && (!config.steam
+                    || !matches!(config.mode, Mode::World)
+                    || config.account.is_none())
             || config.native_control && (!config.growth || config.enabled)
             || config.growth
                 && ((!config.enabled && !config.native_control)
@@ -177,6 +195,7 @@ pub unsafe extern "system" fn Agent_OnLoad(
                 end_ready: None,
                 presentations: 0,
                 frame_ms: Vec::new(),
+                cadence: None,
                 first_frame: None,
                 measure_at: None,
                 measure_wall: None,
@@ -277,6 +296,15 @@ unsafe fn observe(raw: CallbackEnv, jni: *mut RawJni) -> Result<(), String> {
         .lock()
         .map_err(|_| "Observer lock poisoned")?
         .ready_at;
+    if config.require_focus
+        && ready_at.is_some()
+        && !env
+            .call_static_method("org/lwjglx/opengl/Display", "isActive", "()Z", &[])
+            .and_then(|value| value.z())
+            .map_err(|e| e.to_string())?
+    {
+        return Err("The owned hardware workload lost native window focus".into());
+    }
     if let Some(ready_at) = ready_at {
         if now.duration_since(ready_at) < Duration::from_secs(config.warmup_seconds) {
             return Ok(());
@@ -334,19 +362,31 @@ unsafe fn observe(raw: CallbackEnv, jni: *mut RawJni) -> Result<(), String> {
                 return Err("Ordinary fixture role or fixed player location changed".into());
             }
         }
-        let values = hud_values(&config.hud)?;
         let first = first.ok_or("Missing first frame")?;
-        if values.len() <= first + 1 {
-            return Err("Mesa did not record completed per-frame work".into());
-        }
+        let (values, last_frame, cadence) = match config.frame_source {
+            FrameSource::Mesa => {
+                let values = hud_values(&config.hud)?;
+                if values.len() <= first + 1 {
+                    return Err("Mesa did not record completed per-frame work".into());
+                }
+                (values[first..].to_vec(), values.len(), None)
+            }
+            FrameSource::MangoHud => {
+                let log = mangohud::Log::read(&config.hud)?;
+                let (values, cadence) =
+                    log.window(first, now.duration_since(measure_at).as_secs_f64() * 1000.0)?;
+                (values, log.len(), Some(cadence))
+            }
+        };
         let mut state = STATE
             .get()
             .ok_or("Missing state")?
             .lock()
             .map_err(|_| "Observer lock poisoned")?;
-        state.frame_ms = values[first..].to_vec();
-        state.last_frame = values.len();
-        state.presentations = values.len() as u64;
+        state.frame_ms = values;
+        state.cadence = cadence;
+        state.last_frame = last_frame;
+        state.presentations = last_frame as u64;
         state.end_ready = Some(end_ready);
         drop(state);
         return finish(None);
@@ -366,6 +406,12 @@ unsafe fn observe(raw: CallbackEnv, jni: *mut RawJni) -> Result<(), String> {
 }
 
 fn hud_values(path: &std::path::Path) -> Result<Vec<f64>, String> {
+    if CONFIG
+        .get()
+        .is_some_and(|config| config.frame_source == FrameSource::MangoHud)
+    {
+        return mangohud::Log::read(path).map(|log| log.values());
+    }
     let text = fs::read_to_string(path)
         .map_err(|e| format!("Reading Mesa per-frame dump {}: {e}", path.display()))?;
     hud_rows(&text)
@@ -598,6 +644,17 @@ fn controls(env: &mut JNIEnv<'_>, jvmti: &Jvmti, finished: bool) -> Result<(), S
         Ok(None)
     };
     let mut value = inspect().map_err(|e| format!("Observing native verification control: {e}"))?;
+    if !finished
+        && value.is_none()
+        && configuration.native_favorite
+        && STATE
+            .get()
+            .and_then(|state| state.lock().ok())
+            .is_some_and(|state| state.ready_at.is_none())
+        && growth::join_favorite(env, 1)?
+    {
+        return Ok(());
+    }
     if configuration.growth
         && let Some(value) = value.as_mut()
     {
@@ -710,6 +767,26 @@ fn readiness(
         if environment.is_null() {
             return Ok(Readiness::Pending("native Lua environment is absent"));
         }
+        let steam_enabled = env
+            .call_static_method(
+                "zombie/core/znet/SteamUtils",
+                "isSteamModeEnabled",
+                "()Z",
+                &[],
+            )?
+            .z()?;
+        if CONFIG.get().is_some_and(|config| config.steam) && !steam_enabled {
+            return Ok(Readiness::Pending(
+                "native Steam initialization is unavailable",
+            ));
+        }
+        if CONFIG.get().is_some_and(|config| config.require_focus)
+            && !env
+                .call_static_method("org/lwjglx/opengl/Display", "isActive", "()Z", &[])?
+                .z()?
+        {
+            return Ok(Readiness::Pending("owned native window is not focused"));
+        }
         let state = rawget(env, &environment, "LuaBuddy")?;
         let present = !state.is_null();
         let runtime_ready = if present {
@@ -773,6 +850,7 @@ fn readiness(
                     game_version,
                     player_name: None,
                     active_native_mods,
+                    steam_enabled,
                 }))
             }
             Mode::World => {
@@ -880,6 +958,7 @@ fn readiness(
                     game_version,
                     player_name: Some(name),
                     active_native_mods,
+                    steam_enabled,
                 }))
             }
         }
@@ -945,9 +1024,9 @@ fn finish(error: Option<String>) -> Result<(), String> {
         frame_count: state.frame_ms.len(),
         presentation_count: state.presentations,
         frame_ms: std::mem::take(&mut state.frame_ms),
-        target: "Mesa Gallium renderer per-frame presentation interval",
-        timing_source:
-            "Mesa26.2.6 Gallium frametime per-present query, zero-period line-buffered dump".into(),
+        target: config.frame_source.target(),
+        timing_source: config.frame_source.description().into(),
+        cadence: state.cadence.take(),
         first_frame_index: state.first_frame.unwrap_or(0),
         last_frame_index: state.last_frame,
         measure_start_unix_ms: state

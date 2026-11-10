@@ -18,13 +18,15 @@ Successful output includes a native package directory, `LuaBuddy-linux-x86_64.ta
 
 ## Observed scope
 
-The November 9, 2026 run used Rust 1.99.1 on Linux x86_64. Two fresh builds through the direct pinned toolchain produced identical runtime and CLI bytes, all 32 package files, and the normalized archive. The resulting runtime requires GLIBC 2.34. Other Linux C-library baselines and other operating systems have not been established by this check.
+The November 10, 2026 follow-up included the live Steam backend fixes and later installer rollback correction, and used Rust 1.99.1 on Linux x86_64. Two fresh builds through the direct pinned toolchain produced identical runtime and CLI bytes, all 32 package files, and the normalized archive. The product-input digest is `de345a31b760dca33acef91ae1c8e715ee0a31ea2926aecfcf68557294ad5883`. The resulting runtime requires GLIBC 2.34. Other Linux C-library baselines and other operating systems have not been established by this check.
 
 | Artifact | SHA256 |
 | --- | --- |
-| Native runtime | `832d2d869d648a5bd304e03831df6eca4ce78543301efceabab962141ff0178c` |
-| Installer CLI | `20f550a70c23b7976eeaf269bab2fd644097a6808a9201ec0d1dc7b6306d9e66` |
-| Normalized archive | `f28101dc1df66ca31d8558c25ea75b4d26d427e113323b673302ec1a007692a6` |
+| Native runtime | `17ffaedb4f2d0a59002a536e408f53628d3a6d9d2b47f6b18a8b07951205c64a` |
+| Installer CLI | `e4aa550b7d5d1b301c4cdccdb2fc6d6979bd4f398f9539007b98b72b61d6c0da` |
+| Normalized archive | `3d35be1aa2920e589d78d8075c78d4493cfe0e6afa6bf75e016bf349962ed4f1` |
+
+The preceding November 9 candidate `832d2d86` has its own immutable reproducibility and gameplay evidence. Its performance and integration results remain labeled with that original identity; this later build does not retroactively replace those bytes.
 
 An earlier exploratory run passed through the host's cached Cargo dispatcher. Its equal bytes do not establish independent code generation. That run was discarded as acceptance evidence before the check using the direct toolchain.
 

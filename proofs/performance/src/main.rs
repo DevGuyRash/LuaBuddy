@@ -1,12 +1,16 @@
+mod desktop;
+mod source;
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use source::FrameSource;
 use std::{
     collections::BTreeMap,
     env,
     ffi::OsString,
     fs::{self, File},
-    io::Read,
+    io::{Read, Write},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -39,7 +43,12 @@ fn fixture_credentials(path: &Path, expected: Option<&String>) -> Result<Fixture
     Ok(value)
 }
 
-const HELP: &str = "luabuddy-performance --game-dir DIR --runtime FILE --observer FILE --out DIR [--template-cache DIR] [--mode menu|world] [--rounds 5] [--warmup 10] [--seconds 30] [--deadline 300] [--single baseline|enabled] [--jvm-args JSONFILE] [--game-args JSONFILE] [--auto-ui] [--account NAME] [--fixture-credentials JSONFILE] [--prime-cache-out DIR] [--deciding] [--growth] [--native-reconnect-control]\nA deciding suite uses five alternating runs per arm, at least 30 seconds measured per run, and an immutable release runtime. Native automation clicks only observed controls in its own client.\n";
+const HELP: &str = "luabuddy-performance --game-dir DIR --runtime FILE --observer FILE --out DIR [--template-cache DIR] [--mode menu|world] [--rounds 5] [--warmup 10] [--seconds 30] [--deadline 300] [--single baseline|enabled] [--jvm-args JSONFILE] [--game-args JSONFILE] [--auto-ui] [--account NAME] [--fixture-credentials JSONFILE] [--prime-cache-out DIR] [--deciding] [--growth] [--native-reconnect-control] [--frame-source mesa|mango_hud] [--display DISPLAY --xauthority FILE] [--steam] [--native-favorite]\nA deciding suite uses five alternating runs per arm, at least 30 seconds measured per run, and an immutable release runtime. Native automation clicks only observed controls in its own client.\n";
+
+struct ExistingDisplay {
+    name: String,
+    authority: PathBuf,
+}
 
 struct Options {
     game: PathBuf,
@@ -62,6 +71,10 @@ struct Options {
     credentials: Option<FixtureCredentials>,
     growth: bool,
     native_control: bool,
+    frame_source: FrameSource,
+    existing_display: Option<ExistingDisplay>,
+    steam: bool,
+    native_favorite: bool,
 }
 
 impl Options {
@@ -75,6 +88,8 @@ impl Options {
         let mut auto_ui = false;
         let mut growth = false;
         let mut native_control = false;
+        let mut steam = false;
+        let mut native_favorite = false;
         while let Some(key) = args.next() {
             if matches!(key.as_str(), "--help" | "-h") {
                 print!("{HELP}");
@@ -97,6 +112,14 @@ impl Options {
                 growth = true;
                 continue;
             }
+            if key == "--steam" {
+                steam = true;
+                continue;
+            }
+            if key == "--native-favorite" {
+                native_favorite = true;
+                continue;
+            }
             if !matches!(
                 key.as_str(),
                 "--game-dir"
@@ -115,6 +138,9 @@ impl Options {
                     | "--prime-cache-out"
                     | "--account"
                     | "--fixture-credentials"
+                    | "--frame-source"
+                    | "--display"
+                    | "--xauthority"
             ) {
                 return Err(format!("Unknown argument {key}").into());
             }
@@ -146,6 +172,27 @@ impl Options {
         };
         let out = PathBuf::from(values.get("--out").ok_or("Missing --out")?);
         fs::create_dir_all(&out)?;
+        let existing_display = match (values.get("--display"), values.get("--xauthority")) {
+            (Some(name), Some(_))
+                if name.len() > 1
+                    && name.starts_with(':')
+                    && name[1..]
+                        .chars()
+                        .all(|value| value.is_ascii_digit() || value == '.') =>
+            {
+                Some(ExistingDisplay {
+                    name: name.clone(),
+                    authority: path("--xauthority")?,
+                })
+            }
+            (None, None) => None,
+            _ => {
+                return Err(
+                    "An existing local X11 display requires paired --display and --xauthority"
+                        .into(),
+                );
+            }
+        };
         let result = Self {
             game: path("--game-dir")?,
             runtime: path("--runtime")?,
@@ -179,7 +226,33 @@ impl Options {
                 .transpose()?,
             growth,
             native_control,
+            frame_source: match values
+                .get("--frame-source")
+                .map(String::as_str)
+                .unwrap_or("mesa")
+            {
+                "mesa" => FrameSource::Mesa,
+                "mango_hud" => FrameSource::MangoHud,
+                _ => return Err("--frame-source must be mesa or mango_hud".into()),
+            },
+            existing_display,
+            steam,
+            native_favorite,
         };
+        if result.frame_source == FrameSource::MangoHud && result.existing_display.is_none() {
+            return Err(
+                "The MangoHud workload requires an explicit existing hardware display".into(),
+            );
+        }
+        if result.native_favorite
+            && (!result.steam
+                || result.mode != "world"
+                || !result.auto_ui
+                || result.template.is_none()
+                || result.account.is_none())
+        {
+            return Err("Native Favorites startup requires Steam world mode, a primed private cache, UI automation, and an exact account".into());
+        }
         if !matches!(result.mode.as_str(), "menu" | "world")
             || !(1..=20).contains(&result.rounds)
             || !(1..=120).contains(&result.warmup)
@@ -484,6 +557,7 @@ fn native_cleanup(
     authority: &Path,
     actions: &mut std::collections::BTreeSet<String>,
     credentials: Option<&FixtureCredentials>,
+    desktop_guard: Option<&Path>,
 ) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(30);
     while child.0.try_wait()?.is_none() && Instant::now() < deadline {
@@ -494,6 +568,7 @@ fn native_cleanup(
             authority,
             actions,
             credentials,
+            desktop_guard,
         )?;
         thread::sleep(Duration::from_millis(200));
     }
@@ -741,6 +816,11 @@ fn run(
     let arm = if enabled { "enabled" } else { "baseline" };
     let out = options.out.join(format!("{index:02}-{arm}"));
     fs::create_dir_all(&out)?;
+    let desktop_guard = options
+        .existing_display
+        .as_ref()
+        .map(|_| out.join("desktop-checks.jsonl"));
+    desktop::require_unlocked(desktop_guard.as_deref(), "workload setup")?;
     let work = OwnedDirectory::new()?;
     let cache = work.0.join("cache");
     seed_cache(options, &cache)?;
@@ -761,9 +841,15 @@ fn run(
     let config = work.0.join("observer.json");
     write(
         &config,
-        &json!({"schema":1,"output":report,"enabled":enabled,"mode":options.mode,"warmup_seconds":options.warmup,"measure_seconds":options.seconds,"progress":out.join("controls.json"),"account":options.account,"hud":out.join("hud/frametime_(ms)"),"growth":options.growth,"cache":cache,"native_control":options.native_control}),
+        &json!({"schema":1,"output":report,"enabled":enabled,"mode":options.mode,"warmup_seconds":options.warmup,"measure_seconds":options.seconds,"progress":out.join("controls.json"),"account":options.account,"hud":if options.frame_source == FrameSource::Mesa {out.join("hud/frametime_(ms)")} else {out.join("hud")},"growth":options.growth,"cache":cache,"native_control":options.native_control,"frame_source":options.frame_source,"steam":options.steam,"native_favorite":options.native_favorite,"require_focus":options.existing_display.is_some()}),
     )?;
-    let (_display_process, display, authority) = display(&work.0, &out)?;
+    let (_display_process, display, authority) = match &options.existing_display {
+        Some(existing) => (None, existing.name.clone(), existing.authority.clone()),
+        None => {
+            let (process, name, authority) = display(&work.0, &out)?;
+            (Some(process), name, authority)
+        }
+    };
     let base: Value =
         serde_json::from_slice(&fs::read(options.game.join("ProjectZomboid64.json"))?)?;
     let mut arguments = strings(&base["vmArgs"])?;
@@ -783,7 +869,7 @@ fn run(
         arguments.push(format!("-agentpath:{}", runtime.display()));
     }
     arguments.extend([
-        "-Dzomboid.steam=0".into(),
+        format!("-Dzomboid.steam={}", if options.steam { 1 } else { 0 }),
         format!("-Duser.home={}", work.0.join("home").display()),
         format!("-Dluabuddy.config={}", work.0.join("profiles").display()),
     ]);
@@ -795,11 +881,13 @@ fn run(
             .as_str()
             .ok_or("Missing native main class")?
             .to_owned(),
-        "-nosteam".into(),
         "-nosound".into(),
         "-novoip".into(),
         format!("-cachedir={}", cache.display()),
     ]);
+    if !options.steam {
+        arguments.push("-nosteam".into());
+    }
     arguments.extend(options.game_args.clone());
     let log = File::create(out.join("client.log"))?;
     let mut path = OsString::from(options.game.join("jre64/bin"));
@@ -808,18 +896,58 @@ fn run(
     let mut libraries = OsString::from(options.game.join("natives"));
     libraries.push(":");
     libraries.push(env::var_os("LD_LIBRARY_PATH").unwrap_or_default());
-    let launched_wall = wall_ms()?;
-    let mut child = Process(
-        Command::new(options.game.join("jre64/bin/java"))
-            .args(&arguments)
-            .current_dir(&options.game)
-            .env("DISPLAY", &display)
-            .env("XAUTHORITY", &authority)
+    let mut command = if options.frame_source == FrameSource::MangoHud {
+        let version = Command::new("/usr/bin/mangohud")
+            .arg("--version")
+            .output()?;
+        if !version.status.success() || std::str::from_utf8(&version.stdout)?.trim() != "v0.8.4" {
+            return Err("This CSV observer is verified against installed MangoHud v0.8.4".into());
+        }
+        let mango_config = work.0.join("MangoHud.conf");
+        fs::write(
+            &mango_config,
+            format!(
+                "alpha=0\nbackground_alpha=0\nautostart_log=1\nlog_interval=0\nlog_duration=0\npermit_upload=0\noutput_folder={}\n",
+                out.join("hud").display()
+            ),
+        )?;
+        let mut command = Command::new("/usr/bin/mangohud");
+        command
+            .arg("--dlsym")
+            .arg(options.game.join("jre64/bin/java"))
+            .env("MANGOHUD_CONFIGFILE", &mango_config)
+            .env_remove("MANGOHUD_CONFIG")
+            .env_remove("MANGOHUD_FPS_LIMIT")
+            .env_remove("LIBGL_ALWAYS_SOFTWARE")
+            .env_remove("GALLIUM_HUD")
+            .env_remove("GALLIUM_HUD_PERIOD")
+            .env_remove("GALLIUM_HUD_VISIBLE")
+            .env_remove("GALLIUM_HUD_DUMP_DIR");
+        fs::copy(&mango_config, out.join("MangoHud.conf"))?;
+        command
+    } else {
+        let mut command = Command::new(options.game.join("jre64/bin/java"));
+        command
             .env("LIBGL_ALWAYS_SOFTWARE", "1")
             .env("GALLIUM_HUD", "frametime")
             .env("GALLIUM_HUD_PERIOD", "0")
             .env("GALLIUM_HUD_VISIBLE", "false")
-            .env("GALLIUM_HUD_DUMP_DIR", out.join("hud"))
+            .env("GALLIUM_HUD_DUMP_DIR", out.join("hud"));
+        command
+    };
+    if options.steam {
+        command
+            .env("SteamAppId", "108600")
+            .env("SteamGameId", "108600");
+    }
+    desktop::require_unlocked(desktop_guard.as_deref(), "game launch")?;
+    let launched_wall = wall_ms()?;
+    let mut child = Process(
+        command
+            .args(&arguments)
+            .current_dir(&options.game)
+            .env("DISPLAY", &display)
+            .env("XAUTHORITY", &authority)
             .env("XDG_CACHE_HOME", work.0.join("xdg-cache"))
             .env("XDG_CONFIG_HOME", work.0.join("xdg-config"))
             .env("PATH", path)
@@ -841,6 +969,7 @@ fn run(
     let mut focused = false;
     let mut actions = std::collections::BTreeSet::new();
     while !report.is_file() {
+        desktop::require_unlocked(desktop_guard.as_deref(), "workload sample")?;
         if let Some(status) = child.0.try_wait()? {
             return Err(format!(
                 "Owned {arm} client exited before measurement: {status}; see {}",
@@ -856,17 +985,13 @@ fn run(
             .into());
         }
         samples.push(process_sample(child.0.id(), page, ticks)?);
-        if options.auto_ui {
-            perform_control(
-                &out.join("controls.json"),
-                child.0.id(),
-                &display,
-                &authority,
-                &mut actions,
-                options.credentials.as_ref(),
-            )?;
-        }
-        if !focused
+        if options.existing_display.is_some() {
+            let current = focused_owned_window(child.0.id(), &display, &authority);
+            if focused && current.is_err() {
+                return Err("Owned hardware workload lost focus; no refocus or further control was attempted".into());
+            }
+            focused |= current.is_ok();
+        } else if !focused
             && let Ok(result) = Command::new("xdotool")
                 .args([
                     "search",
@@ -891,18 +1016,40 @@ fn run(
                 .status()?
                 .success();
         }
+        if options.auto_ui && focused {
+            perform_control(
+                &out.join("controls.json"),
+                child.0.id(),
+                &display,
+                &authority,
+                &mut actions,
+                options.credentials.as_ref(),
+                desktop_guard.as_deref(),
+            )?;
+        }
         thread::sleep(Duration::from_millis(250));
     }
+    desktop::require_unlocked(desktop_guard.as_deref(), "final workload sample")?;
     samples.push(process_sample(child.0.id(), page, ticks)?);
+    desktop::require_unlocked(desktop_guard.as_deref(), "workload capture")?;
     let frames: Value = serde_json::from_slice(&fs::read(&report)?)?;
     write(&out.join("process-samples.json"), &json!(samples))?;
     let image = out.join("usable-workload.png");
+    let capture = if options.existing_display.is_some() {
+        focused_owned_window(child.0.id(), &display, &authority)?
+    } else {
+        "root".into()
+    };
     let _ = Command::new("import")
-        .args(["-window", "root"])
+        .args(["-window", &capture])
         .arg(&image)
         .env("DISPLAY", &display)
         .env("XAUTHORITY", &authority)
         .status();
+    let maps = fs::read_to_string(format!("/proc/{}/maps", child.0.id()))?;
+    let mapped = |name: &str| maps.lines().any(|line| line.contains(name));
+    let library_evidence = json!({"pid":child.0.id(),"runtimeMapped":mapped(&runtime.to_string_lossy()),"mangoHudMapped":mapped("libMangoHud_opengl.so"),"nvidiaMapped":mapped("libnvidia-glcore.so"),"steamApiMapped":mapped("libsteam_api.so"),"steamJniMapped":mapped("libZNetJNI64.so")});
+    write(&out.join("mapped-libraries.json"), &library_evidence)?;
     if !frames["error"].is_null()
         || !options.growth && frames["frame_count"].as_u64().unwrap_or(0) < 2
     {
@@ -914,6 +1061,7 @@ fn run(
                 &authority,
                 &mut actions,
                 options.credentials.as_ref(),
+                desktop_guard.as_deref(),
             )?;
             write(
                 &out.join("cleanup.json"),
@@ -928,6 +1076,33 @@ fn run(
             report.display()
         )
         .into());
+    }
+    let native_steam_confirmed = if options.growth {
+        frames["records"].as_array().is_some_and(|records| {
+            !records.is_empty()
+                && records
+                    .iter()
+                    .all(|record| record["nativeState"]["steam_enabled"] == true)
+        })
+    } else {
+        frames["ready"]["steam_enabled"] == true && frames["end_ready"]["steam_enabled"] == true
+    };
+    if library_evidence["runtimeMapped"] != enabled
+        || options.frame_source == FrameSource::MangoHud
+            && (library_evidence["mangoHudMapped"] != true
+                || library_evidence["nvidiaMapped"] != true)
+        || options.steam
+            && (library_evidence["steamApiMapped"] != true
+                || library_evidence["steamJniMapped"] != true
+                || !native_steam_confirmed)
+        || options.steam
+            && !fs::read_to_string(out.join("client.log"))?
+                .contains("SteamUtils initialised successfully")
+    {
+        return Err(
+            "Owned workload library maps or native Steam state do not match the declared arm"
+                .into(),
+        );
     }
     let errors = client_errors(&out.join("client.log"))?;
     if options.growth {
@@ -945,6 +1120,7 @@ fn run(
             &authority,
             &mut actions,
             options.credentials.as_ref(),
+            desktop_guard.as_deref(),
         )?;
         write(
             &out.join("cleanup.json"),
@@ -996,6 +1172,7 @@ fn run(
             &authority,
             &mut actions,
             options.credentials.as_ref(),
+            desktop_guard.as_deref(),
         )?;
     }
     let graceful = child.0.try_wait()?.is_some_and(|status| status.success());
@@ -1034,7 +1211,40 @@ fn run(
     Ok(record)
 }
 
-fn key(display: &str, authority: &Path, value: &str) -> Result<()> {
+fn focused_owned_window(pid: u32, display: &str, authority: &Path) -> Result<String> {
+    let focus = Command::new("xdotool")
+        .arg("getwindowfocus")
+        .env("DISPLAY", display)
+        .env("XAUTHORITY", authority)
+        .output()?;
+    if !focus.status.success() {
+        return Err("Cannot inspect native window focus".into());
+    }
+    let window = std::str::from_utf8(&focus.stdout)?
+        .trim()
+        .parse::<u64>()?
+        .to_string();
+    let owner = Command::new("xdotool")
+        .args(["getwindowpid", &window])
+        .env("DISPLAY", display)
+        .env("XAUTHORITY", authority)
+        .output()?;
+    if !owner.status.success() || std::str::from_utf8(&owner.stdout)?.trim().parse::<u32>()? != pid
+    {
+        return Err("Native window focus does not belong to the exact owned client".into());
+    }
+    Ok(window)
+}
+
+fn key(
+    pid: u32,
+    display: &str,
+    authority: &Path,
+    value: &str,
+    desktop_guard: Option<&Path>,
+) -> Result<()> {
+    desktop::require_unlocked(desktop_guard, "native key press")?;
+    let window = focused_owned_window(pid, display, authority)?;
     if !Command::new("xdotool")
         .args(["keydown", value])
         .env("DISPLAY", display)
@@ -1054,6 +1264,9 @@ fn key(display: &str, authority: &Path, value: &str) -> Result<()> {
     {
         return Err("Owned native key-up failed".into());
     }
+    if focused_owned_window(pid, display, authority)? != window {
+        return Err("Owned native key lost its target focus".into());
+    }
     Ok(())
 }
 
@@ -1064,6 +1277,7 @@ fn perform_control(
     authority: &Path,
     done: &mut std::collections::BTreeSet<String>,
     credentials: Option<&FixtureCredentials>,
+    desktop_guard: Option<&Path>,
 ) -> Result<()> {
     let Some(bytes) = fs::read(path).ok() else {
         return Ok(());
@@ -1115,18 +1329,28 @@ fn perform_control(
     {
         return Ok(());
     }
+    desktop::require_unlocked(desktop_guard, "native UI action")?;
     match (value["action"].as_str(), id) {
         (Some("fixture-login"), "ServerConnectPopup.fixture-credentials") => {
             let credentials = credentials.ok_or(
                 "The native popup needs the explicitly supplied disposable fixture credentials",
             )?;
             input_fixture(
+                pid,
                 display,
                 authority,
                 &value["password"],
                 &credentials.password,
+                desktop_guard,
             )?;
-            input_fixture(display, authority, &value["username"], &credentials.account)?;
+            input_fixture(
+                pid,
+                display,
+                authority,
+                &value["username"],
+                &credentials.account,
+                desktop_guard,
+            )?;
         }
         (
             Some("click"),
@@ -1150,8 +1374,15 @@ fn perform_control(
                 .as_f64()
                 .filter(|v| v.is_finite() && (0.0..800.0).contains(v))
                 .ok_or("Invalid native control Y")?;
+            let window = focused_owned_window(pid, display, authority)?;
             if !Command::new("xdotool")
-                .args(["mousemove", &format!("{x:.0}"), &format!("{y:.0}")])
+                .args([
+                    "mousemove",
+                    "--window",
+                    &window,
+                    &format!("{x:.0}"),
+                    &format!("{y:.0}"),
+                ])
                 .env("DISPLAY", display)
                 .env("XAUTHORITY", authority)
                 .status()?
@@ -1160,6 +1391,10 @@ fn perform_control(
                 return Err("Owned native control positioning failed".into());
             }
             thread::sleep(Duration::from_millis(150));
+            desktop::require_unlocked(desktop_guard, "native pointer press")?;
+            if focused_owned_window(pid, display, authority)? != window {
+                return Err("Owned native click lost focus before press".into());
+            }
             if !Command::new("xdotool")
                 .args(["mousedown", "1"])
                 .env("DISPLAY", display)
@@ -1179,18 +1414,26 @@ fn perform_control(
             {
                 return Err("Owned native click-up failed".into());
             }
+            if focused_owned_window(pid, display, authority)? != window {
+                return Err("Owned native click lost focus during press".into());
+            }
         }
         (Some("key"), "MainScreen.open-pause-menu") => {
-            key(display, authority, "Escape")?;
+            key(pid, display, authority, "Escape", desktop_guard)?;
             thread::sleep(Duration::from_secs(1));
         }
         (Some("key"), "Growth.open-pause") => {
-            key(display, authority, "Escape")?;
+            key(pid, display, authority, "Escape", desktop_guard)?;
             thread::sleep(Duration::from_secs(1));
         }
-        (Some("profile-input"), "Growth.profile-id") => {
-            input_fixture(display, authority, &value, "LuaBuddyGrowth")?
-        }
+        (Some("profile-input"), "Growth.profile-id") => input_fixture(
+            pid,
+            display,
+            authority,
+            &value,
+            "LuaBuddyGrowth",
+            desktop_guard,
+        )?,
         _ => return Err("Unrecognized native verification control".into()),
     }
     done.insert(identity);
@@ -1198,7 +1441,16 @@ fn perform_control(
     Ok(())
 }
 
-fn input_fixture(display: &str, authority: &Path, field: &Value, text: &str) -> Result<()> {
+fn input_fixture(
+    pid: u32,
+    display: &str,
+    authority: &Path,
+    field: &Value,
+    text: &str,
+    desktop_guard: Option<&Path>,
+) -> Result<()> {
+    desktop::require_unlocked(desktop_guard, "fixture field selection")?;
+    let window = focused_owned_window(pid, display, authority)?;
     let x = field["x"]
         .as_f64()
         .filter(|value| value.is_finite() && (0.0..1280.0).contains(value))
@@ -1210,6 +1462,8 @@ fn input_fixture(display: &str, authority: &Path, field: &Value, text: &str) -> 
     for args in [
         vec![
             "mousemove".to_owned(),
+            "--window".into(),
+            window.clone(),
             format!("{x:.0}"),
             format!("{y:.0}"),
             "mousedown".into(),
@@ -1228,20 +1482,46 @@ fn input_fixture(display: &str, authority: &Path, field: &Value, text: &str) -> 
         }
         thread::sleep(Duration::from_millis(400));
     }
-    key(display, authority, "ctrl+a")?;
-    if !Command::new("xdotool")
-        .args(["type", "--clearmodifiers", "--delay", "80", "--", text])
-        .env("DISPLAY", display)
-        .env("XAUTHORITY", authority)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?
-        .success()
-    {
+    key(pid, display, authority, "ctrl+a", desktop_guard)?;
+    if focused_owned_window(pid, display, authority)? != window {
+        return Err("Owned fixture input lost focus".into());
+    }
+    desktop::require_unlocked(desktop_guard, "targeted fixture typing")?;
+    let mut typing = Process(
+        Command::new("xdotool")
+            .args([
+                "type",
+                "--window",
+                &window,
+                "--clearmodifiers",
+                "--delay",
+                "80",
+                "--file",
+                "-",
+            ])
+            .env("DISPLAY", display)
+            .env("XAUTHORITY", authority)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?,
+    );
+    let mut input = typing
+        .0
+        .stdin
+        .take()
+        .ok_or("Fixture typing has no private stdin")?;
+    input.write_all(text.as_bytes())?;
+    drop(input);
+    if !typing.0.wait()?.success() {
         return Err(
             "Typing explicitly supplied fixture data into the owned native field failed".into(),
         );
     }
+    if focused_owned_window(pid, display, authority)? != window {
+        return Err("Owned fixture input lost focus during targeted typing".into());
+    }
+    desktop::require_unlocked(desktop_guard, "fixture typing completion")?;
     thread::sleep(Duration::from_millis(300));
     Ok(())
 }
@@ -1313,7 +1593,20 @@ fn main() -> Result<()> {
         &options.out.join("artifacts"),
         "observer",
     )?;
-    let settings = json!({"schema":1,"gameJarSha256":hash(&options.game.join("projectzomboid.jar"))?,"runtimeSha256":runtime_hash,"observerSha256":observer_hash,"driverSha256":hash(&env::current_exe()?)?,"growth":options.growth,"nativeControl":options.native_control,"mode":options.mode,"roundsPerArm":options.rounds,"warmupSeconds":options.warmup,"measurementSeconds":options.seconds,"deciding":options.deciding,"cpuCount":std::thread::available_parallelism()?.get(),"initialLoad":fs::read_to_string("/proc/loadavg")?,"jvmRelease":fs::read_to_string(options.game.join("jre64/release"))?,"observer":"identical hidden Mesa Gallium per-frame dump plus read-only JVMTI agent thread; no Java code edits, breakpoints, or global tracing"});
+    let mango_artifacts = if options.frame_source == FrameSource::MangoHud {
+        let mut files = serde_json::Map::new();
+        for path in [
+            "/usr/bin/mangohud",
+            "/usr/lib/mangohud/libMangoHud_shim.so",
+            "/usr/lib/mangohud/libMangoHud_opengl.so",
+        ] {
+            files.insert(path.into(), json!(hash(Path::new(path))?));
+        }
+        Some(files)
+    } else {
+        None
+    };
+    let settings = json!({"schema":1,"gameJarSha256":hash(&options.game.join("projectzomboid.jar"))?,"runtimeSha256":runtime_hash,"observerSha256":observer_hash,"driverSha256":hash(&env::current_exe()?)?,"growth":options.growth,"nativeControl":options.native_control,"mode":options.mode,"roundsPerArm":options.rounds,"warmupSeconds":options.warmup,"measurementSeconds":options.seconds,"deciding":options.deciding,"cpuCount":std::thread::available_parallelism()?.get(),"initialLoad":fs::read_to_string("/proc/loadavg")?,"jvmRelease":fs::read_to_string(options.game.join("jre64/release"))?,"frameSource":options.frame_source,"presentationTarget":options.frame_source.target(),"presentationObserver":options.frame_source.description(),"mangoHudArtifacts":mango_artifacts,"existingDisplay":options.existing_display.as_ref().map(|value| &value.name),"steam":options.steam,"nativeFavorite":options.native_favorite,"observer":"identical presentation observer and read-only JVMTI agent thread in both arms; no Java code edits, breakpoints, or global tracing"});
     write(&options.out.join("workload.json"), &settings)?;
     let page = getconf("PAGESIZE")?;
     let ticks = getconf("CLK_TCK")?;

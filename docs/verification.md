@@ -59,7 +59,7 @@ The native aggregate runs these distinct consumers.
 | `proofs/extensions` | The selected normal product agent and CLI approval workflow across seven fresh JVM cases. Covers disabled and unapproved code, changed artifact/manifest, unchanged-binary metadata updates, approved native execution, and explicit retry after normal target preparation. |
 | `proofs/performance` build and tests | The measurement program's ownership and provenance behavior. This does not run graphical workloads or establish a performance result. |
 
-The driver applies deadlines and checks proof output in addition to process exit status. The fixtures use disposable homes/caches and preserve the user's running game. No native proof subscribes to, unsubscribes from, or downloads a Workshop item.
+The driver applies deadlines and checks proof output in addition to process exit status. Its fixtures use disposable homes/caches and preserve the user's running game. No aggregate fixture subscribes to, unsubscribes from, or downloads a Workshop item. Explicitly authorized live account journeys are separate from this aggregate.
 
 ## Audit dependencies and packages
 
@@ -97,7 +97,7 @@ Use disposable client caches, displays, profiles, and loopback servers. Keep the
 
 The aggregate does not launch that workflow automatically. Native unit/integration proofs and a graphical client establish different facts. Do not report the latter from the former.
 
-The implementation session authorized only read-only checks of already subscribed Workshop items. New subscription/download mutation tests remain not run by explicit user choice. Subscribe-only native activation also remains a separate clean-install acceptance target.
+The isolated aggregate performs no Steam account operations. A separate, explicitly authorized graphical workflow completed a fresh subscription and download for one test item through the final candidate; its scope is recorded in [Workshop evidence](evolution/workshop.md). That journey does not establish every item, an upstream content update, or subscribe-only native activation.
 
 ## Measure the final runtime
 

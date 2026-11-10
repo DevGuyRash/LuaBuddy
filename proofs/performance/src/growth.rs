@@ -605,6 +605,64 @@ fn mods_tab(env: &mut JNIEnv<'_>, options: &JObject<'_>, serial: usize) -> Resul
     ))
 }
 
+pub(crate) fn join_favorite(env: &mut JNIEnv<'_>, serial: usize) -> Result<bool, String> {
+    let main = main(env)?;
+    if main.is_null() {
+        return Ok(false);
+    }
+    let in_game = native_field(env, &main, "inGame")?;
+    if in_game.is_null()
+        || env
+            .call_method(in_game, "booleanValue", "()Z", &[])
+            .and_then(|value| value.z())
+            .map_err(|e| e.to_string())?
+    {
+        return Ok(false);
+    }
+    let multiplayer = native_field(env, &main, "multiplayer")?;
+    if !multiplayer.is_null() && ui_visible(env, &multiplayer).map_err(|e| e.to_string())? {
+        let list = native_field(env, &multiplayer, "accountList")?;
+        let items = native_field(env, &list, "items")?;
+        let expected = CONFIG
+            .get()
+            .and_then(|c| c.account.as_deref())
+            .ok_or("Missing fixture identity")?;
+        for i in 1..=32 {
+            let record = index(env, &items, i).map_err(|e| e.to_string())?;
+            if record.is_null() {
+                break;
+            }
+            let item = native_field(env, &record, "item")?;
+            let account = native_field(env, &item, "account")?;
+            if account.is_null() {
+                continue;
+            }
+            let name = env
+                .call_method(&account, "getUserName", "()Ljava/lang/String;", &[])
+                .and_then(|v| v.l())
+                .map_err(|e| e.to_string())?;
+            if text(env, &name).map_err(|e| e.to_string())? == expected {
+                if !env
+                    .call_method(&account, "isSavePwd", "()Z", &[])
+                    .and_then(|v| v.z())
+                    .map_err(|e| e.to_string())?
+                {
+                    return Err("The fixed native Favorites fixture requires its generated local-test password to be saved".into());
+                }
+                let connect = native_field(env, &item, "connectButton")?;
+                return click(env, &connect, serial, "reconnect-account");
+            }
+        }
+        return Err("The primed native Favorites list lacks the exact fixture account".into());
+    }
+    let delay = native_field(env, &main, "delay")?;
+    if number(env, &delay).map_err(|e| e.to_string())? > 0.0 {
+        return Ok(false);
+    }
+    let online = native_field(env, &main, "onlineOption")?;
+    click(env, &online, serial, "multiplayer")
+}
+
 fn operate(env: &mut JNIEnv<'_>, kind: Kind, serial: usize) -> Result<(), String> {
     let main = main(env)?;
     if kind == Kind::Reconnect {
@@ -651,49 +709,7 @@ fn operate(env: &mut JNIEnv<'_>, kind: Kind, serial: usize) -> Result<(), String
             }
             return Ok(());
         }
-        let multiplayer = native_field(env, &main, "multiplayer")?;
-        if !multiplayer.is_null() && ui_visible(env, &multiplayer).map_err(|e| e.to_string())? {
-            let list = native_field(env, &multiplayer, "accountList")?;
-            let items = native_field(env, &list, "items")?;
-            let expected = CONFIG
-                .get()
-                .and_then(|c| c.account.as_deref())
-                .ok_or("Missing fixture identity")?;
-            for i in 1..=32 {
-                let record = index(env, &items, i).map_err(|e| e.to_string())?;
-                if record.is_null() {
-                    break;
-                }
-                let item = native_field(env, &record, "item")?;
-                let account = native_field(env, &item, "account")?;
-                if account.is_null() {
-                    continue;
-                }
-                let name = env
-                    .call_method(&account, "getUserName", "()Ljava/lang/String;", &[])
-                    .and_then(|v| v.l())
-                    .map_err(|e| e.to_string())?;
-                if text(env, &name).map_err(|e| e.to_string())? == expected {
-                    if !env
-                        .call_method(&account, "isSavePwd", "()Z", &[])
-                        .and_then(|v| v.z())
-                        .map_err(|e| e.to_string())?
-                    {
-                        return Err("The fixed native Favorites fixture requires its generated local-test password to be saved".into());
-                    }
-                    let connect = native_field(env, &item, "connectButton")?;
-                    click(env, &connect, serial, "reconnect-account")?;
-                    return Ok(());
-                }
-            }
-            return Err("The primed native Favorites list lacks the exact fixture account".into());
-        }
-        let delay = native_field(env, &main, "delay")?;
-        if number(env, &delay).map_err(|e| e.to_string())? > 0.0 {
-            return Ok(());
-        }
-        let online = native_field(env, &main, "onlineOption")?;
-        click(env, &online, serial, "multiplayer")?;
+        join_favorite(env, serial)?;
         return Ok(());
     }
     let modal = options_modal(env)?;

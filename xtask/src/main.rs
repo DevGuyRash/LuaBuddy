@@ -878,7 +878,7 @@ fn native_checks(checks: &mut Checks, options: &Options, artifacts: &Artifacts) 
     checks.note(
         "Workshop account mutations",
         "NOT RUN",
-        "The user authorized read-only subscribed-item checks only",
+        "This isolated aggregate performs no Steam account operations; live subscription and download journeys require separate evidence",
     );
     checks.note(
         "Subscribe-only native activation",

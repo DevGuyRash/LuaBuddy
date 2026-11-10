@@ -10,14 +10,14 @@ The installer probes the selected bundled JVM process architecture. It does not 
 
 | Capability | Linux x86_64 | Windows | macOS |
 | --- | --- | --- | --- |
-| Ordinary native launcher integration | Installed `.site.json`, actual menu and Rust callback, offline relaunch, update, rollback, and uninstall passed through the copied real native executable. | Not verified. | Not verified. |
+| Ordinary native launcher integration | Installed `.site.json`, actual menu and Rust callback, offline relaunch, update, rollback, and uninstall passed through the copied real native executable. A later normal Steam launch mapped runtime `17ffaedb`, and fresh diagnostics plus `doctor` confirmed all 24 existing selections loaded with no failed, pending, or restart-required profiles. | Not verified. | Not verified. |
 | Native callable, dispatch, classloader and patcher mechanisms | Actual bundled JVM proofs with verifier and JNI checking. | Not verified. | Not verified. |
 | Native discovery, translations and diagnostic files | Actual game-class consumers. | Not verified. | Not verified. |
 | Menu management and read-only initialized Workshop browsing | Isolated graphical client evidence in the implementation run. | Not verified. | Not verified. |
-| New subscription/download account mutation | Not run. The user explicitly restricted verification to already subscribed read-only content. | Not verified. | Not verified. |
+| New subscription/download account mutation | One authorized fresh item completed through actual Steam launches and the native manager on the final candidate. See [Workshop evidence](evolution/workshop.md). | Not verified. | Not verified. |
 | Subscribe-only native activation | Unresolved. | Unverified. | Unverified. |
 | Gameplay | All 24 bundled profiles passed individually with required dependencies in distinct native environments. The all-24 combination, runtime addition, repeated no-op, reconnect, native controls, and saved preferences passed in disposable ordinary-role loopback sessions. | Not verified. | Not verified. |
-| Matched performance acceptance | Five alternating baseline/enabled pairs completed but remain inconclusive. Scoped lifecycle references collected across refresh, reload, and reconnect. Reconnect resident growth also occurred in a native-only control; incremental loader cost remains unestablished. The budget has not passed. See [performance evidence](evolution/performance.md). | Not verified. | Not verified. |
+| Matched performance acceptance | The earlier software-rendered five-pair comparison remains inconclusive. The later NVIDIA attempt completed only four of ten required runs before the user ended testing. Its 7,107 verified presentation intervals establish no speedup or budget pass. Scoped lifecycle references collected across refresh, reload, and reconnect. Reconnect resident growth also occurred in a native-only control; incremental loader cost remains unestablished. See [performance evidence](evolution/performance.md). | Not verified. | Not verified. |
 
 ## Native boundaries
 
@@ -35,7 +35,7 @@ The inspected game loader discovers installed Workshop mod roots and mounts comm
 
 The smallest demonstrated additional activation mechanism is the reversible native installer, which owns a launcher site override containing `-agentpath`. That is an additional setup step. It does not meet a subscribe-only one-click acceptance target.
 
-A clean subscription, ordinary Steam launch, interface appearance, offline relaunch, update, and removal still need a complete activation-path proof before one-click setup can be claimed. [The Workshop capability record](evolution/workshop.md) distinguishes API exposure, native callback evidence, read-only browsing, and unrun account mutations.
+A clean LuaBuddy subscription, ordinary Steam launch, interface appearance, offline relaunch, update, and removal still need a complete activation-path proof before one-click setup can be claimed. [The Workshop capability record](evolution/workshop.md) distinguishes native activation from browsing and the successful delivery of one ordinary client mod.
 
 The current Steam adapter attaches only to the game's already initialized context. It neither initializes/shuts down Steam nor takes over its callback pump. Exact native ABI declarations follow the observed UGC021 interface. Native download-result observation still requires installed-state and path verification before success.
 
