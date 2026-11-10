@@ -261,7 +261,7 @@ pub struct SteamWorkshop {
 
 enum DownloadRequester {
     Host(HostDownload),
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
     Test(fn(ItemId) -> Result<bool>),
 }
 
@@ -269,7 +269,7 @@ impl DownloadRequester {
     fn request(&self, item: ItemId) -> Result<bool> {
         match self {
             Self::Host(host) => host.request(item),
-            #[cfg(test)]
+            #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
             Self::Test(request) => request(item),
         }
     }

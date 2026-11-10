@@ -14,10 +14,12 @@ The installer probes the selected bundled JVM process architecture. It does not 
 | Native callable, dispatch, classloader and patcher mechanisms | Actual bundled JVM proofs with verifier and JNI checking. | Not verified. | Not verified. |
 | Native discovery, translations and diagnostic files | Actual game-class consumers. | Not verified. | Not verified. |
 | Menu management and read-only initialized Workshop browsing | Isolated graphical client evidence in the implementation run. | Not verified. | Not verified. |
-| New subscription/download account mutation | One authorized fresh item completed through actual Steam launches and the native manager on the final candidate. See [Workshop evidence](evolution/workshop.md). | Not verified. | Not verified. |
+| New subscription/download account mutation | One authorized fresh item completed through actual Steam launches and the native manager on candidate `17ffaedb`. See [Workshop evidence](evolution/workshop.md). | Not verified. | Not verified. |
 | Subscribe-only native activation | Unresolved. | Unverified. | Unverified. |
 | Gameplay | All 24 bundled profiles passed individually with required dependencies in distinct native environments. The all-24 combination, runtime addition, repeated no-op, reconnect, native controls, and saved preferences passed in disposable ordinary-role loopback sessions. | Not verified. | Not verified. |
 | Matched performance acceptance | The earlier software-rendered five-pair comparison remains inconclusive. The later NVIDIA attempt completed only four of ten required runs before the user ended testing. Its 7,107 verified presentation intervals establish no speedup or budget pass. Scoped lifecycle references collected across refresh, reload, and reconnect. Reconnect resident growth also occurred in a native-only control; incremental loader cost remains unestablished. See [performance evidence](evolution/performance.md). | Not verified. | Not verified. |
+
+The later test-only platform correction produced runtime `1d44f599`, which passed its own 44-check native aggregate and two-path reproducibility. It is installed for the next normal Steam launch. The running game continued with `17ffaedb`, and its actual 24-profile startup remains scoped to that binary. No new graphical or performance journey is claimed for `1d44f599`. Portable CI for the current source head does not establish Windows or macOS gameplay support.
 
 ## Native boundaries
 
