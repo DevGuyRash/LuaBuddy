@@ -12,4 +12,4 @@ For lifecycle growth, use a fixed selection and repeated no-op refresh, cooperat
 
 A narrow Rust verification observer may measure existing host method boundaries on both sides. It must use the same mechanism and sample policy in both arms. A tick interval is not labeled a render-frame time without tracing the actual native render lifecycle. The production runtime does not enable global method tracing.
 
-Status is pending. No deciding performance result is claimed by this document.
+The budget remains fixed. Measurements and their acceptance status are recorded in [performance.md](performance.md). An inconclusive comparison does not establish a budget pass.

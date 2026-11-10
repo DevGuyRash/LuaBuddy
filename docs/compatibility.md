@@ -10,13 +10,14 @@ The installer probes the selected bundled JVM process architecture. It does not 
 
 | Capability | Linux x86_64 | Windows | macOS |
 | --- | --- | --- | --- |
-| Ordinary native launcher integration | Disposable real launcher and `.site.json` activation proved. | Not verified. | Not verified. |
+| Ordinary native launcher integration | Installed `.site.json`, actual menu and Rust callback, offline relaunch, update, rollback, and uninstall passed through the copied real native executable. | Not verified. | Not verified. |
 | Native callable, dispatch, classloader and patcher mechanisms | Actual bundled JVM proofs with verifier and JNI checking. | Not verified. | Not verified. |
 | Native discovery, translations and diagnostic files | Actual game-class consumers. | Not verified. | Not verified. |
 | Menu management and read-only initialized Workshop browsing | Isolated graphical client evidence in the implementation run. | Not verified. | Not verified. |
 | New subscription/download account mutation | Not run. The user explicitly restricted verification to already subscribed read-only content. | Not verified. | Not verified. |
 | Subscribe-only native activation | Unresolved. | Unverified. | Unverified. |
-| Full gameplay and matched performance acceptance | Separate final release checks. | Not verified. | Not verified. |
+| Gameplay | All 24 bundled profiles passed individually with required dependencies in distinct native environments. The all-24 combination, runtime addition, repeated no-op, reconnect, native controls, and saved preferences passed in disposable ordinary-role loopback sessions. | Not verified. | Not verified. |
+| Matched performance acceptance | Five alternating baseline/enabled pairs completed but remain inconclusive. Scoped lifecycle references collected across refresh, reload, and reconnect. Reconnect resident growth also occurred in a native-only control; incremental loader cost remains unestablished. The budget has not passed. See [performance evidence](evolution/performance.md). | Not verified. | Not verified. |
 
 ## Native boundaries
 

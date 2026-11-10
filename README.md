@@ -6,6 +6,8 @@ A fresh installation selects no mods. Bundled profiles are optional integrations
 
 The native adapter and installer currently target Linux x86_64. Windows and macOS game execution remain unverified. Steam Workshop delivery does not yet provide a demonstrated subscribe-only activation route for this native runtime. [Compatibility](docs/compatibility.md) records that gate without treating an installer as one-click Workshop setup.
 
+This Rust migration is a release candidate. The [verification report](docs/evolution/verification-report.md) records the exercised functional paths and the open performance and Workshop acceptance gates.
+
 ## Build and install
 
 Build with the pinned Rust toolchain and lockfile, then create an integrity-checked package. Do not copy proprietary game files into a package.

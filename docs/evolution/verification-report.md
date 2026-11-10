@@ -1,6 +1,6 @@
 # Rust migration verification
 
-This report tracks the request preserved in [request.md](request.md). The implementation is complete for the tested Linux runtime path. Overall acceptance remains open while the explicitly listed external gates remain unresolved.
+This report tracks the request preserved in [request.md](request.md). The Linux functional paths listed below were implemented and exercised against the exact release candidate. Overall acceptance remains open because the performance budget and explicitly listed external gates have not passed.
 
 ## Tested environment
 
@@ -21,7 +21,7 @@ The original implementation at `84d495a` passed its aggregate offline verificati
 | Workshop reads | An initialized Steam context completed real title search and subscription queries across multiple pages. An unavailable item stayed distinct while healthy results remained usable. Account mutations were not performed. |
 | Patcher | Several unrelated real JVM targets passed before hooks, integer replacement and argument modification, priority, nested/concurrent calls, scoped disable, fingerprint/classloader rejection, and preserved host exceptions. Unsupported operations reject explicitly. |
 | Extensions | Two independent compiled Rust extensions activated through normal CLI approval records and the production agent. Disabled, unapproved, changed-artifact, changed-manifest, metadata-update, and deferred-target cases passed, including native initializer nonexecution before approval. |
-| Installer | Disposable native launcher tests and external CLI checks cover empty defaults, exact legacy hook migration, integrity, interrupted operations, repair, rollback, uninstall, unrelated settings, user edits, permissions, Unicode paths, and immutable templates. |
+| Installer | External CLI checks cover empty defaults, exact legacy hook migration, integrity, interrupted operations, repair, rollback, uninstall, unrelated settings, user edits, permissions, Unicode paths, and immutable templates. The copied real `ProjectZomboid64` also passed eight installed-launcher stages covering clean install, native Options and Rust callback, offline relaunch, update, rollback, uninstall, preserved data, and repeated uninstall. |
 | Dependency notices | The package retains locked Rust dependency notices and the standard-library notices. Game, JVM, Steam, and Workshop content remain external and are not redistributed. |
 
 ## Independent review and corrections
@@ -32,6 +32,8 @@ Actual graphical checks additionally found double-instantiated native modals, mi
 
 Reference comparison found that the port's initial batch topological sort changed the original profile-file scan order and effective module precedence. The resolver now preserves the original same-pass behavior. A public core consumer and the actual production-runtime consumer check a filename order that differs from mod-ID order and the resulting overlapping-source winner.
 
+Independent verification-tool review found failed native exits accepted by the runner, non-atomic result publication, and a resident-growth rule that missed periodic increases. Those gates now reject or classify the corresponding counterexamples correctly. Native runs also corrected assumed UI ownership, click acknowledgment, per-profile generation adjacency, and positive counters that did not prove post-operation callback activity. The completed lifecycle run follows the actual native controls and shared-ID contract, requires both callbacks to advance after world resumption, and records normal native exit.
+
 ## Final acceptance record
 
 | Gate | Current state |
@@ -39,16 +41,18 @@ Reference comparison found that the port's initial batch topological sort change
 | Formatting, strict lint, contract tests, native aggregate | Passed the quiet-tree aggregate against the exact release runtime and CLI: 44 checks passed, with separately identified external workflows not run by that command. |
 | Exact release package and two-path reproducibility | Passed after the final ordering correction. Fresh direct-toolchain builds in two paths produced identical binaries, all package contents, and normalized archive bytes. |
 | Final native runtime parity | Passed all 19 scenario groups with JNI checking and JVM verification through the exact release-library override. |
-| Final multiplayer/isolation matrix | In progress against immutable candidates. Native asset caches are warm across same-process reconnects; checks inspect native file mappings rather than inferring them from cached textures. |
-| Matched world performance | In progress under the budget fixed in [performance-budget.md](performance-budget.md). No acceptance result is claimed yet. |
+| Final multiplayer/isolation matrix | Passed all 24 isolated selections with actual required dependencies across 24 distinct native environments, plus final-release all-24 initial restoration, runtime addition, no-op and reconnect. All 329 upstream source counts matched independent enumeration. Native asset caches were warm; checks verified native file-map presence and absence instead of inferring mounting from cached textures. |
+| Matched world performance | Five alternating baseline/enabled pairs finished with valid native readiness and normal exit. The result is inconclusive under observed timing and RSS variation, so no budget pass is claimed. A complete 28-cycle lifecycle run collected all 46 scoped retired references, with no repeatable refresh/reload resident growth in that window. Reconnect RSS exceeded the investigation threshold at 49.86 MiB per measured transition. A six-reconnect native-only control reproduced growth at 41.28 MiB per measured transition with the product library absent. Different preceding history and non-interleaved samples prevent a precise incremental loader-cost claim. Performance acceptance remains open. The fixed budget and results are recorded in [performance-budget.md](performance-budget.md) and [performance.md](performance.md). |
 | One-click Workshop activation | Unmet host gate. Inspected Workshop delivery/mounting has no action that starts a newly delivered native agent. A native launcher site override is proven as the additional activation step. |
 | Actual subscription/download/update writes | Not run under the user's explicit read-only instruction. Native API binding and notification routing are independently checked, but that is not an account-write end-to-end pass. |
 | Physical controller and other OS game execution | Not run. No physical controller or Windows/macOS game environment was supplied. Portable builds do not establish gameplay support. |
 
-Evidence remains outside Git in the implementation machine's LuaBuddy verification state directory. It includes exact artifact hashes, native transcripts, selected diagnostics, screenshots, and the independent counterexamples. The performance outcome, completed isolation roster, and final cleanup state remain pending their deciding runs.
+Evidence remains outside Git in the implementation machine's LuaBuddy verification state directory. It includes exact artifact hashes, native transcripts, selected diagnostics, screenshots, and the independent counterexamples. All owned graphical clients, displays, server processes, disposable caches, generated fixture credentials, and launcher scratch files were removed. The user's original running game was left untouched. The source and acceptance record are delivered through [draft PR #17](https://github.com/DevGuyRash/LuaBuddy/pull/17). Repository CI results are attached to that PR; portable checks do not establish native game support on another operating system or close the open acceptance gates.
 
 ## Release artifact identity
 
 The runtime SHA256 is `832d2d869d648a5bd304e03831df6eca4ce78543301efceabab962141ff0178c`. The installer SHA256 is `20f550a70c23b7976eeaf269bab2fd644097a6808a9201ec0d1dc7b6306d9e66`. The deterministic Linux archive SHA256 is `f28101dc1df66ca31d8558c25ea75b4d26d427e113323b673302ec1a007692a6`. The package manifest independently covers every shipped file.
 
 An online advisory database refresh reported 1,430 advisories and no vulnerabilities or warnings in the workspace lockfile. The offline aggregate also checked each maintained proof and extension lockfile. Offline yanked-crate lookup was explicitly not run.
+
+The final release also passed actual AllInfo custom-tab creation followed by native switching back to Mods and another load, supplied CraftPlanner visible-state restoration, and QuickBuild favorite restoration after actual upstream deletion while preserving an explicit false tombstone. Vehicle-driver dashboard association was verified on the earlier candidate with identical final hook/UI source. CraftPlanner native multiplayer save persistence and every upstream gameplay feature are not claimed.

@@ -18,12 +18,12 @@ The migration starts at commit `84d495a`. Its baseline `python3 tests/check.py -
 | Gate | Status | Evidence |
 | --- | --- | --- |
 | Existing implementation baseline | Passed | Aggregate offline check during this run. |
-| Rust callback through actual host callable | Partial proof passed | Bundled JVM, `-Xcheck:jni`, `-Xverify:all`, exact argument identity on three calls. Full lifecycle, error, nested-call, UI and performance gates remain. |
-| Ordinary Linux launcher override | Proof passed | Disposable real launcher selected `.site.json` and created bundled JVM. |
+| Rust callback through actual host callable | Passed | Exact values/identity, nested calls, exceptions, real dispatcher/queue, actual UIElement and native notifications passed under JNI/verifier checks. Full game UI and multiplayer checks also passed. |
+| Ordinary Linux launcher override | Passed | The copied real native launcher selected the installed `.site.json`. Eight stages covered clean install, actual menu and Rust callback, offline relaunch, update, rollback, uninstall, preserved settings, and repeated uninstall. |
 | Workshop subscribe-only native activation | Unresolved | Inspected mod discovery and mounting deliver files without a native activation action. No clean subscribe/launch/update/offline/removal proof. |
-| Rust behavior migration | In progress | Actual inventory is 24 profiles and 16 hooks. No bundled profile has an unload hook. |
-| In-game browse/add/download/enable/load | Pending | Native API exposure inspected. Actual user workflow not yet verified. |
-| General-purpose patcher and two extensions | In progress | Final native capability and independent consumer checks pending. |
-| Release, performance, platform execution and review | Pending | Windows and macOS game environments have not been supplied or tested. |
+| Rust behavior migration | Passed for tested scope | All 24 profiles and 16 hooks ported; exact legacy migration, 19 actual-runtime scenarios, 24 isolated world cases, all-24 combination and no-op/reconnect passed. |
+| In-game management | Reads/selections/loading passed; writes unrun | Actual installed/subscribed/Workshop search, version/dependency details, selection, native startup/relaunch, live addition and diagnostics passed. User restricted live Workshop verification to reads. |
+| General-purpose patcher and two extensions | Passed | Several unrelated JVM targets, compiled extensions, normal production approval/activation, conflicts, nesting/concurrency and scoped disable passed. |
+| Release and review | Reproducible Linux package and independent reviews passed; acceptance remains open | Exact optimized package passed 44 aggregate checks. The signed implementation is pushed in draft PR #17 and portable CI passed on Linux, Windows, and macOS. The fixed five-pair comparison is inconclusive. The full 28-cycle lifecycle run collected all scoped retired references; reconnect RSS crossed the investigation threshold, and a native-only control also reproduced substantial growth. Incremental loader cost remains unestablished. Physical controller and other OS game execution remain unverified. |
 
 The user explicitly instructed `no claude at all this time`. Implementation and review therefore use GPT models, overriding the repository's model-family requirement for this task.

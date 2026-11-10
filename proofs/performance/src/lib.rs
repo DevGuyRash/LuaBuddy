@@ -1,9 +1,11 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod binding;
+mod growth;
 #[allow(dead_code)]
 #[path = "../../../crates/luabuddy-host/src/jvmti.rs"]
 mod jvmti;
+mod native_control;
 
 use jni::{
     JNIEnv,
@@ -42,6 +44,12 @@ struct Configuration {
     progress: PathBuf,
     account: Option<String>,
     hud: PathBuf,
+    #[serde(default)]
+    growth: bool,
+    #[serde(default)]
+    cache: Option<PathBuf>,
+    #[serde(default)]
+    native_control: bool,
 }
 
 #[derive(Serialize)]
@@ -56,6 +64,11 @@ struct Ready {
     game_version: String,
     player_name: Option<String>,
     active_native_mods: usize,
+}
+
+enum Readiness {
+    Pending(&'static str),
+    Usable(Ready),
 }
 
 #[derive(Serialize)]
@@ -141,6 +154,12 @@ pub unsafe extern "system" fn Agent_OnLoad(
             || !(1..=300).contains(&config.measure_seconds)
             || !config.output.is_absolute()
             || !config.progress.is_absolute()
+            || !config.hud.is_absolute()
+            || config.native_control && (!config.growth || config.enabled)
+            || config.growth
+                && ((!config.enabled && !config.native_control)
+                    || !matches!(config.mode, Mode::World)
+                    || config.cache.as_ref().is_none_or(|p| !p.is_absolute()))
         {
             return Err("Invalid performance configuration bounds".into());
         }
@@ -246,6 +265,12 @@ unsafe fn observe(raw: CallbackEnv, jni: *mut RawJni) -> Result<(), String> {
         return controls(&mut env, &jvmti, true);
     }
     controls(&mut env, &jvmti, false)?;
+    if config.growth {
+        if config.native_control {
+            return native_control::observe(&mut env, &jvmti);
+        }
+        return growth::observe(&mut env, &jvmti);
+    }
     let ready_at = STATE
         .get()
         .ok_or("Missing state")?
@@ -284,10 +309,30 @@ unsafe fn observe(raw: CallbackEnv, jni: *mut RawJni) -> Result<(), String> {
         if now.duration_since(measure_at) < Duration::from_secs(config.measure_seconds) {
             return Ok(());
         }
-        let end_ready = readiness(&mut env, &jvmti, config.mode, config.enabled)?
-            .ok_or("Required native workload was not usable at measurement completion")?;
+        let end_ready = match readiness(&mut env, &jvmti, config.mode, config.enabled)? {
+            Readiness::Usable(ready) => ready,
+            Readiness::Pending(reason) => {
+                return Err(format!(
+                    "Native workload was not usable at measurement completion: {reason}"
+                ));
+            }
+        };
         if end_ready.screen != [1280, 800] || end_ready.active_native_mods != 0 {
             return Err("Viewport or native mod selection changed".into());
+        }
+        if matches!(config.mode, Mode::World) {
+            let state = STATE
+                .get()
+                .ok_or("Missing state")?
+                .lock()
+                .map_err(|_| "Observer lock poisoned")?;
+            let initial = state.ready.as_ref().ok_or("Missing initial readiness")?;
+            if initial.role.as_deref() != Some("user")
+                || end_ready.role.as_deref() != Some("user")
+                || initial.player != end_ready.player
+            {
+                return Err("Ordinary fixture role or fixed player location changed".into());
+            }
         }
         let values = hud_values(&config.hud)?;
         let first = first.ok_or("Missing first frame")?;
@@ -306,7 +351,7 @@ unsafe fn observe(raw: CallbackEnv, jni: *mut RawJni) -> Result<(), String> {
         drop(state);
         return finish(None);
     }
-    if let Some(ready) = readiness(&mut env, &jvmti, config.mode, config.enabled)? {
+    if let Readiness::Usable(ready) = readiness(&mut env, &jvmti, config.mode, config.enabled)? {
         let mut state = STATE
             .get()
             .ok_or("Missing state")?
@@ -342,6 +387,16 @@ fn hud_rows(text: &str) -> Result<Vec<f64>, String> {
         values.push(value);
     }
     Ok(values)
+}
+
+fn publish_json(path: &std::path::Path, value: &serde_json::Value) -> Result<(), String> {
+    let temporary = path.with_extension("partial");
+    fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    fs::rename(temporary, path).map_err(|e| e.to_string())
 }
 
 fn button(
@@ -391,8 +446,39 @@ fn controls(env: &mut JNIEnv<'_>, jvmti: &Jvmti, finished: bool) -> Result<(), S
             return Ok(None);
         }
         if finished {
+            let connect_class = rawget(env, &environment, "ServerConnectPopup")?;
+            let connect_popup = rawget(env, &connect_class, "instance")?;
+            let cancel = rawget(env, &connect_popup, "cancelBtn")?;
+            if let Some(action) = button(env, &cancel, "ServerConnectPopup.cancelBtn")? {
+                return Ok(Some(action));
+            }
+            let controller_class = rawget(env, &environment, "ConnectToServer")?;
+            let controller = rawget(env, &controller_class, "instance")?;
+            let back = rawget(env, &controller, "backBtn")?;
+            if let Some(action) = button(env, &back, "ConnectToServer.nativeBack")? {
+                return Ok(Some(action));
+            }
             let main_class = rawget(env, &environment, "MainScreen")?;
             let main = rawget(env, &main_class, "instance")?;
+            let multiplayer = rawget(env, &main, "multiplayer")?;
+            let back = rawget(env, &multiplayer, "backButton")?;
+            if let Some(action) = button(env, &back, "MultiplayerUI.nativeBack")? {
+                return Ok(Some(action));
+            }
+            let options_class = rawget(env, &environment, "MainOptions")?;
+            let options_instance = rawget(env, &options_class, "instance")?;
+            let options_modal = rawget(env, &options_instance, "modal")?;
+            for field in ["ok", "no"] {
+                let dismiss = rawget(env, &options_modal, field)?;
+                if let Some(action) = button(env, &dismiss, "MainOptions.nativeModalDismiss")? {
+                    return Ok(Some(action));
+                }
+            }
+            let options = rawget(env, &main, "mainOptions")?;
+            let back = rawget(env, &options, "backButton")?;
+            if let Some(action) = button(env, &back, "MainOptions.nativeBack")? {
+                return Ok(Some(action));
+            }
             let mut modal = rawget(env, &main, "quitToDesktopDialog")?;
             if modal.is_null() {
                 modal = rawget(env, &main_class, "quitToDesktopDialog")?;
@@ -401,7 +487,10 @@ fn controls(env: &mut JNIEnv<'_>, jvmti: &Jvmti, finished: bool) -> Result<(), S
             if let Some(action) = button(env, &yes, "MainScreen.quitToDesktopDialog.yes")? {
                 return Ok(Some(action));
             }
-            let field = if matches!(configuration.mode, Mode::World) {
+            let in_game = rawget(env, &main, "inGame")?;
+            let in_game =
+                !in_game.is_null() && env.call_method(in_game, "booleanValue", "()Z", &[])?.z()?;
+            let field = if in_game {
                 "quitToDesktopOption"
             } else {
                 "exitOption"
@@ -424,9 +513,8 @@ fn controls(env: &mut JNIEnv<'_>, jvmti: &Jvmti, finished: bool) -> Result<(), S
             let guide_class = rawget(env, &environment, "SurvivalGuide")?;
             let guide = rawget(env, &guide_class, "instance")?;
             if !guide.is_null() && ui_visible(env, &guide)? {
-                return Ok(Some(
-                    serde_json::json!({"action":"key","id":"SurvivalGuide.native-dismiss","key":"F1","pid":std::process::id()}),
-                ));
+                let close = rawget(env, &guide, "closeButton")?;
+                return button(env, &close, "SurvivalGuide.closeButton");
             }
             let class = rawget(env, &environment, "ServerConnectPopup")?;
             let popup = rawget(env, &class, "instance")?;
@@ -509,7 +597,12 @@ fn controls(env: &mut JNIEnv<'_>, jvmti: &Jvmti, finished: bool) -> Result<(), S
         }
         Ok(None)
     };
-    let value = inspect().map_err(|e| format!("Observing native verification control: {e}"))?;
+    let mut value = inspect().map_err(|e| format!("Observing native verification control: {e}"))?;
+    if configuration.growth
+        && let Some(value) = value.as_mut()
+    {
+        value["sequence"] = serde_json::json!(growth::sequence());
+    }
     let value = serde_json::to_string(&value).map_err(|e| e.to_string())?;
     let mut state = STATE
         .get()
@@ -602,20 +695,20 @@ fn readiness(
     jvmti: &Jvmti,
     mode: Mode,
     enabled: bool,
-) -> Result<Option<Ready>, String> {
+) -> Result<Readiness, String> {
     let Some(manager) = LUA_MANAGER.get() else {
-        return Ok(None);
+        return Ok(Readiness::Pending("LuaManager has not prepared"));
     };
     if !initialized(jvmti, manager)? {
-        return Ok(None);
+        return Ok(Readiness::Pending("LuaManager has not initialized"));
     }
-    let mut attempt = || -> jni::errors::Result<Option<Ready>> {
+    let mut attempt = || -> jni::errors::Result<Readiness> {
         let manager_class: &jni::objects::JClass<'_> = manager.as_obj().into();
         let environment = env
             .get_static_field(manager_class, "env", "Lse/krka/kahlua/vm/KahluaTable;")?
             .l()?;
         if environment.is_null() {
-            return Ok(None);
+            return Ok(Readiness::Pending("native Lua environment is absent"));
         }
         let state = rawget(env, &environment, "LuaBuddy")?;
         let present = !state.is_null();
@@ -639,8 +732,15 @@ fn readiness(
         } else {
             0
         };
-        if profiles != 0 || present != enabled {
-            return Ok(None);
+        let expected_profiles = if CONFIG.get().is_some_and(|c| c.growth && !c.native_control) {
+            2
+        } else {
+            0
+        };
+        if profiles != expected_profiles || present != enabled {
+            return Ok(Readiness::Pending(
+                "runtime presence or empty profile selection differs",
+            ));
         }
         match mode {
             Mode::Menu => {
@@ -653,14 +753,16 @@ fn readiness(
                     || !ui_visible(env, &bottom)?
                     || !ui_visible(env, &options)?
                 {
-                    return Ok(None);
+                    return Ok(Readiness::Pending(
+                        "native main-menu controls are not visible",
+                    ));
                 }
                 let popup = rawget(env, &main, "animPopup")?;
                 if !popup.is_null() && ui_visible(env, &popup)? {
-                    return Ok(None);
+                    return Ok(Readiness::Pending("native menu popup remains visible"));
                 }
                 let (screen, game_version, active_native_mods) = metadata(env)?;
-                Ok(Some(Ready {
+                Ok(Readiness::Usable(Ready {
                     milestone: "visible native main-menu Options control",
                     runtime_present: present,
                     runtime_ready,
@@ -677,22 +779,24 @@ fn readiness(
                 let guide_class = rawget(env, &environment, "SurvivalGuide")?;
                 let guide = rawget(env, &guide_class, "instance")?;
                 if !guide.is_null() && ui_visible(env, &guide)? {
-                    return Ok(None);
+                    return Ok(Readiness::Pending("native Survival Guide remains visible"));
                 }
                 let main_class = rawget(env, &environment, "MainScreen")?;
                 let main = rawget(env, &main_class, "instance")?;
                 if !main.is_null() && ui_visible(env, &main)? {
-                    return Ok(None);
+                    return Ok(Readiness::Pending("native pause menu is visible"));
                 }
                 let (Some(window), Some(player_class)) = (GAME_WINDOW.get(), PLAYER.get()) else {
-                    return Ok(None);
+                    return Ok(Readiness::Pending("native world classes have not prepared"));
                 };
                 if !initialized(jvmti, window)
                     .map_err(|_| jni::errors::Error::NullPtr("GameWindow class status"))?
                     || !initialized(jvmti, player_class)
                         .map_err(|_| jni::errors::Error::NullPtr("IsoPlayer class status"))?
                 {
-                    return Ok(None);
+                    return Ok(Readiness::Pending(
+                        "native world classes have not initialized",
+                    ));
                 }
                 let window_class: &jni::objects::JClass<'_> = window.as_obj().into();
                 let machine = env
@@ -703,13 +807,13 @@ fn readiness(
                     )?
                     .l()?;
                 if machine.is_null() {
-                    return Ok(None);
+                    return Ok(Readiness::Pending("native game-state machine is absent"));
                 }
                 let current = env
                     .get_field(machine, "current", "Lzombie/gameStates/GameState;")?
                     .l()?;
                 if current.is_null() {
-                    return Ok(None);
+                    return Ok(Readiness::Pending("native current game state is absent"));
                 }
                 let class = env.get_object_class(current)?;
                 if jvmti
@@ -717,7 +821,9 @@ fn readiness(
                     .map_err(|_| jni::errors::Error::NullPtr("GameState signature"))?
                     != "Lzombie/gameStates/IngameState;"
                 {
-                    return Ok(None);
+                    return Ok(Readiness::Pending(
+                        "native current state is not IngameState",
+                    ));
                 }
                 let player_class: &jni::objects::JClass<'_> = player_class.as_obj().into();
                 let player = env
@@ -732,7 +838,9 @@ fn readiness(
                     || env.call_method(&player, "isDead", "()Z", &[])?.z()?
                     || enabled && runtime_ready != Some(true)
                 {
-                    return Ok(None);
+                    return Ok(Readiness::Pending(
+                        "native player is absent/dead or runtime is not ready",
+                    ));
                 }
                 let position = [
                     env.call_method(&player, "getX", "()F", &[])?.f()? as f64,
@@ -758,10 +866,10 @@ fn readiness(
                     .and_then(|config| config.account.as_ref())
                     .is_some_and(|expected| expected != &name)
                 {
-                    return Ok(None);
+                    return Ok(Readiness::Pending("native player identity differs"));
                 }
                 let (screen, game_version, active_native_mods) = metadata(env)?;
-                Ok(Some(Ready {
+                Ok(Readiness::Usable(Ready {
                     milestone: "alive native player in IngameState",
                     runtime_present: present,
                     runtime_ready,
@@ -781,6 +889,15 @@ fn readiness(
 
 fn fail(error: &str) {
     eprintln!("[LuaBuddy performance] FAIL {error}");
+    if CONFIG.get().is_some_and(|c| c.growth) {
+        if CONFIG.get().is_some_and(|c| c.native_control) {
+            native_control::failure(error);
+        } else {
+            growth::failure(error);
+        }
+        FINISHED.store(true, Ordering::Release);
+        return;
+    }
     let _ = finish(Some(error.to_owned()));
 }
 

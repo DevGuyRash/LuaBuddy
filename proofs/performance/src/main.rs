@@ -39,7 +39,7 @@ fn fixture_credentials(path: &Path, expected: Option<&String>) -> Result<Fixture
     Ok(value)
 }
 
-const HELP: &str = "luabuddy-performance --game-dir DIR --runtime FILE --observer FILE --out DIR [--template-cache DIR] [--mode menu|world] [--rounds 5] [--warmup 10] [--seconds 30] [--deadline 300] [--single baseline|enabled] [--jvm-args JSONFILE] [--game-args JSONFILE] [--auto-ui] [--account NAME] [--prime-cache-out DIR] [--deciding]\nA deciding suite uses five alternating runs per arm, at least30 seconds measured per run, and an immutable release runtime. Native automation clicks only observed controls in its own client.\n";
+const HELP: &str = "luabuddy-performance --game-dir DIR --runtime FILE --observer FILE --out DIR [--template-cache DIR] [--mode menu|world] [--rounds 5] [--warmup 10] [--seconds 30] [--deadline 300] [--single baseline|enabled] [--jvm-args JSONFILE] [--game-args JSONFILE] [--auto-ui] [--account NAME] [--fixture-credentials JSONFILE] [--prime-cache-out DIR] [--deciding] [--growth] [--native-reconnect-control]\nA deciding suite uses five alternating runs per arm, at least 30 seconds measured per run, and an immutable release runtime. Native automation clicks only observed controls in its own client.\n";
 
 struct Options {
     game: PathBuf,
@@ -60,6 +60,8 @@ struct Options {
     prime: Option<PathBuf>,
     account: Option<String>,
     credentials: Option<FixtureCredentials>,
+    growth: bool,
+    native_control: bool,
 }
 
 impl Options {
@@ -68,6 +70,8 @@ impl Options {
         let mut values = BTreeMap::new();
         let mut deciding = false;
         let mut auto_ui = false;
+        let mut growth = false;
+        let mut native_control = false;
         while let Some(key) = args.next() {
             if matches!(key.as_str(), "--help" | "-h") {
                 print!("{HELP}");
@@ -79,6 +83,15 @@ impl Options {
             }
             if key == "--auto-ui" {
                 auto_ui = true;
+                continue;
+            }
+            if key == "--growth" {
+                growth = true;
+                continue;
+            }
+            if key == "--native-reconnect-control" {
+                native_control = true;
+                growth = true;
                 continue;
             }
             if !matches!(
@@ -161,12 +174,14 @@ impl Options {
                 .get("--fixture-credentials")
                 .map(|path| fixture_credentials(Path::new(path), values.get("--account")))
                 .transpose()?,
+            growth,
+            native_control,
         };
         if !matches!(result.mode.as_str(), "menu" | "world")
             || !(1..=20).contains(&result.rounds)
             || !(1..=120).contains(&result.warmup)
             || !(1..=300).contains(&result.seconds)
-            || !(30..=900).contains(&result.deadline)
+            || !(30..=7200).contains(&result.deadline)
         {
             return Err("Invalid workload bounds".into());
         }
@@ -193,6 +208,21 @@ impl Options {
                 || !result.runtime.to_string_lossy().contains("release"))
         {
             return Err("Deciding evidence needs five paired runs, at least30 measured seconds, and a release runtime path".into());
+        }
+        if result.growth
+            && (result.deciding
+                || result.single.as_deref()
+                    != Some(if result.native_control {
+                        "baseline"
+                    } else {
+                        "enabled"
+                    })
+                || result.rounds != 1
+                || result.mode != "world"
+                || !result.auto_ui
+                || result.template.is_none())
+        {
+            return Err("Lifecycle diagnostics need the matching single world arm, native UI automation, and the private primed fixture".into());
         }
         if result.prime.is_some()
             && (result.deciding || result.single.is_none() || result.rounds != 1)
@@ -356,6 +386,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
                     | "Workshop"
                     | "mods"
                     | "LuaBuddy"
+                    | "performance-recovery.json"
             )
         ) {
             continue;
@@ -393,6 +424,7 @@ fn seed_cache(options: &Options, cache: &Path) -> Result<()> {
         ("frameRate", "60"),
         ("populateServerListOnStart", "false"),
         ("focusloss", "false"),
+        ("showSurvivalGuide", "false"),
     ]);
     let mut lines = original
         .lines()
@@ -411,6 +443,172 @@ fn seed_cache(options: &Options, cache: &Path) -> Result<()> {
     fs::write(path, lines.join("\n") + "\n")?;
     fs::create_dir_all(cache.join("mods"))?;
     Ok(())
+}
+
+fn seed_growth(work: &Path) -> Result<()> {
+    for (id, source, cleanup) in [
+        (
+            "LuaBuddyGrowth",
+            "LuaBuddyGrowth = { ticks = 0 }; local current = LuaBuddyGrowth; Events.OnTick.Add(function() current.ticks = current.ticks + 1 end); function current.cleanup() return true end; return current\n",
+            "cleanup=LuaBuddyGrowth.cleanup\n",
+        ),
+        (
+            "LuaBuddyGrowthForeign",
+            "LuaBuddyGrowthForeign = { ticks = 0 }; local current = LuaBuddyGrowthForeign; Events.OnTick.Add(function() current.ticks = current.ticks + 1 end); return current\n",
+            "",
+        ),
+    ] {
+        let root = work.join("mods").join(id).join("42");
+        fs::create_dir_all(root.join("media/lua/shared"))?;
+        fs::write(
+            root.join("mod.info"),
+            format!("name={id}\nid={id}\nversionMin=42.0\n"),
+        )?;
+        fs::write(
+            root.join("media/lua/shared").join(format!("{id}.lua")),
+            source,
+        )?;
+        fs::write(
+            work.join("profiles").join(format!("{id}.properties")),
+            format!("id={id}\npath=../mods/{id}\n{cleanup}"),
+        )?;
+    }
+    Ok(())
+}
+
+fn native_cleanup(
+    child: &mut Process,
+    out: &Path,
+    display: &str,
+    authority: &Path,
+    actions: &mut std::collections::BTreeSet<String>,
+    credentials: Option<&FixtureCredentials>,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while child.0.try_wait()?.is_none() && Instant::now() < deadline {
+        perform_control(
+            &out.join("controls.json"),
+            child.0.id(),
+            display,
+            authority,
+            actions,
+            credentials,
+        )?;
+        thread::sleep(Duration::from_millis(200));
+    }
+    Ok(())
+}
+
+fn require_native_exit(child: &mut Process) -> Result<()> {
+    match child.0.try_wait()? {
+        Some(status) if status.success() => Ok(()),
+        Some(status) => Err(format!("Owned native client closed unsuccessfully: {status}").into()),
+        None => Err("Owned native client did not close normally within the cleanup bound".into()),
+    }
+}
+
+fn client_errors(path: &Path) -> Result<Vec<String>> {
+    Ok(fs::read_to_string(path)?
+        .lines()
+        .filter(|line| {
+            line.contains("[LuaBuddy performance] FAIL")
+                || line.contains("WARNING in native method")
+                || line.contains("FATAL ERROR")
+                || line.contains("[LuaBuddy] startup inactive")
+                || line.contains("[LuaBuddy] startup failed:")
+                || line.contains("[LuaBuddy] Runtime controls unavailable:")
+        })
+        .map(str::to_owned)
+        .collect())
+}
+
+fn check_post_exit_log(out: &Path) -> Result<()> {
+    let errors = client_errors(&out.join("client.log"))?;
+    write(
+        &out.join("final-log-check.json"),
+        &json!({"checkedAfterNativeExit":true,"errorCount":errors.len(),"errors":errors}),
+    )?;
+    if !errors.is_empty() {
+        return Err(format!(
+            "Owned client logged {} final observer/JNI/runtime failures; see {}",
+            errors.len(),
+            out.join("final-log-check.json").display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn summarize_growth(value: &Value) -> Result<Value> {
+    let records = value["records"]
+        .as_array()
+        .ok_or("Missing lifecycle records")?;
+    let mut comparison = serde_json::Map::new();
+    let native = value["nativeOnly"] == true;
+    let kinds: &[(&str, usize)] = if native {
+        &[("reconnect", 5)]
+    } else {
+        &[("refresh", 10), ("reload", 10), ("reconnect", 5)]
+    };
+    for &(kind, wanted) in kinds {
+        let rows = records
+            .iter()
+            .filter(|r| r["kind"] == kind && r["warmup"] == false)
+            .collect::<Vec<_>>();
+        if rows.len() != wanted {
+            return Err(format!("Incomplete {kind} lifecycle measurement").into());
+        }
+        let medians = rows
+            .iter()
+            .map(|r| {
+                let values = r["rssBytes"]
+                    .as_array()
+                    .ok_or("Missing settled RSS samples")?
+                    .iter()
+                    .map(|v| v.as_f64().ok_or("Invalid RSS sample"))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                percentile(&values, 0.5).ok_or("Empty settled RSS window")
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let deltas = medians.windows(2).map(|v| v[1] - v[0]).collect::<Vec<_>>();
+        let over = deltas
+            .iter()
+            .filter(|v| **v > 4.0 * 1024.0 * 1024.0)
+            .count();
+        let median_delta = percentile(&deltas, 0.5).ok_or("Missing settled RSS transitions")?;
+        let net = medians.last().ok_or("Missing final RSS")?
+            - medians.first().ok_or("Missing initial RSS")?;
+        let net_per_cycle = net / deltas.len() as f64;
+        let retained = rows
+            .iter()
+            .filter_map(|r| r["retiredWeakReferencesStillLive"].as_u64())
+            .max()
+            .unwrap_or(0);
+        let resident = if (over >= 2 && net_per_cycle > 4.0 * 1024.0 * 1024.0)
+            || median_delta > 4.0 * 1024.0 * 1024.0
+        {
+            "investigate repeatable resident growth"
+        } else if net_per_cycle > 4.0 * 1024.0 * 1024.0 {
+            "inconclusive net resident growth above budget; repeatability needs investigation"
+        } else {
+            "no repeatable resident growth observed in this window"
+        };
+        let reference = if retained == 0 {
+            if native {
+                "sampled retired native environments collected"
+            } else {
+                "sampled retired fixture objects collected"
+            }
+        } else if native {
+            "sampled retired native environments remain live; investigation required"
+        } else {
+            "sampled retired fixture objects remain live; investigation required"
+        };
+        comparison.insert(kind.into(),json!({"measuredCycles":wanted,"discardedWarmupCycles":1,"rssMedianBytesByCycle":medians,"rssDeltaBytesByTransition":deltas,"medianRssDeltaBytes":median_delta,"netRssGrowthBytes":net,"netRssGrowthPerCycleBytes":net_per_cycle,"transitionsOverFourMiB":over,"maximumRetiredWeakReferencesStillLive":retained,"residentVerdict":resident,"referenceVerdict":reference,"verdict":if resident!="no repeatable resident growth observed in this window" {resident} else if retained>0 {"inconclusive retained weak references require investigation"} else {"sampled references bounded; no repeatable resident growth observed in this window"}}));
+    }
+    Ok(
+        json!({"schema":1,"nativeOnly":native,"workload":if native {"native-only reconnect diagnostic control"} else {"lifecycle growth"},"complete":true,"comparison":comparison,"measurement":value,"limitation":"RSS alone cannot establish object retention; JVM and native renderer caches can retain committed memory. Weak references cover only the named objects, not all native allocations. The native-only control has no preceding Refresh/Reload history."}),
+    )
 }
 
 fn display(work: &Path, out: &Path) -> Result<(DisplayProcess, String, PathBuf)> {
@@ -546,6 +744,9 @@ fn run(
     let cache = work.0.join("cache");
     seed_cache(options, &cache)?;
     fs::create_dir_all(work.0.join("profiles"))?;
+    if options.growth && !options.native_control {
+        seed_growth(&work.0)?;
+    }
     fs::create_dir_all(work.0.join("home"))?;
     let report = out.join("frames.json");
     if report.exists() {
@@ -559,7 +760,7 @@ fn run(
     let config = work.0.join("observer.json");
     write(
         &config,
-        &json!({"schema":1,"output":report,"enabled":enabled,"mode":options.mode,"warmup_seconds":options.warmup,"measure_seconds":options.seconds,"progress":out.join("controls.json"),"account":options.account,"hud":out.join("hud/frametime_(ms)")}),
+        &json!({"schema":1,"output":report,"enabled":enabled,"mode":options.mode,"warmup_seconds":options.warmup,"measure_seconds":options.seconds,"progress":out.join("controls.json"),"account":options.account,"hud":out.join("hud/frametime_(ms)"),"growth":options.growth,"cache":cache,"native_control":options.native_control}),
     )?;
     let (_display_process, display, authority) = display(&work.0, &out)?;
     let base: Value =
@@ -693,9 +894,7 @@ fn run(
     }
     samples.push(process_sample(child.0.id(), page, ticks)?);
     let frames: Value = serde_json::from_slice(&fs::read(&report)?)?;
-    if !frames["error"].is_null() || frames["frame_count"].as_u64().unwrap_or(0) < 2 {
-        return Err(format!("Performance observer did not complete valid work: {frames}").into());
-    }
+    write(&out.join("process-samples.json"), &json!(samples))?;
     let image = out.join("usable-workload.png");
     let _ = Command::new("import")
         .args(["-window", "root"])
@@ -703,6 +902,57 @@ fn run(
         .env("DISPLAY", &display)
         .env("XAUTHORITY", &authority)
         .status();
+    if !frames["error"].is_null()
+        || !options.growth && frames["frame_count"].as_u64().unwrap_or(0) < 2
+    {
+        if options.auto_ui {
+            native_cleanup(
+                &mut child,
+                &out,
+                &display,
+                &authority,
+                &mut actions,
+                options.credentials.as_ref(),
+            )?;
+            write(
+                &out.join("cleanup.json"),
+                &json!({"nativeGracefulExit":child.0.try_wait()?.is_some_and(|s|s.success()),"measurementRejected":true,"performedNativeControls":actions}),
+            )?;
+        }
+        let reason = frames["error"]
+            .as_str()
+            .unwrap_or("Insufficient completed frame work");
+        return Err(format!(
+            "Performance observer did not complete valid work: {reason}; see {}",
+            report.display()
+        )
+        .into());
+    }
+    let errors = client_errors(&out.join("client.log"))?;
+    if options.growth {
+        if !errors.is_empty() {
+            return Err(
+                format!("Growth client logged observer/JNI/runtime failures: {errors:?}").into(),
+            );
+        }
+        let result = summarize_growth(&frames)?;
+        write(&out.join("result.json"), &result)?;
+        native_cleanup(
+            &mut child,
+            &out,
+            &display,
+            &authority,
+            &mut actions,
+            options.credentials.as_ref(),
+        )?;
+        write(
+            &out.join("cleanup.json"),
+            &json!({"nativeGracefulExit":child.0.try_wait()?.is_some_and(|s|s.success()),"performedNativeControls":actions}),
+        )?;
+        require_native_exit(&mut child)?;
+        check_post_exit_log(&out)?;
+        return Ok(result);
+    }
     let target = frames["measure_start_unix_ms"]
         .as_f64()
         .ok_or("Missing exact measure-start clock")?;
@@ -728,19 +978,7 @@ fn run(
         .iter()
         .map(|value| value.as_f64().ok_or("Invalid frame interval"))
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let content = fs::read_to_string(out.join("client.log"))?;
-    let errors = content
-        .lines()
-        .filter(|line| {
-            line.contains("[LuaBuddy performance] FAIL")
-                || line.contains("WARNING in native method")
-                || line.contains("FATAL ERROR")
-                || line.contains("[LuaBuddy] startup inactive")
-        })
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
     let record = json!({"schema":1,"arm":arm,"index":index,"ok":errors.is_empty(),"errors":errors,"startupMs":frames["ready_unix_ms"].as_f64().ok_or("Missing readiness clock")?-launched_wall,"observerStartupMs":frames["startup_ms"],"frameCount":timings.len(),"p50Ms":percentile(&timings,0.5),"p95Ms":percentile(&timings,0.95),"p99Ms":percentile(&timings,0.99),"cpuSeconds":cpu,"cpuWindowSeconds":(last["unixMs"].as_f64().ok_or("Missing process clock")?-first["unixMs"].as_f64().ok_or("Missing process clock")?)/1000.0,"rssMedianBytes":percentile(&rss,0.5),"rssMaxBytes":rss.iter().copied().max_by(f64::total_cmp),"measurement":frames,"machineLoad":fs::read_to_string("/proc/loadavg")?,"focused":focused});
-    write(&out.join("process-samples.json"), &json!(samples))?;
     write(&out.join("result.json"), &record)?;
     println!(
         "COMPLETE {index} {arm} frames={} p95Ms={} startupMs={}",
@@ -750,48 +988,48 @@ fn run(
         return Err(format!("Owned {arm} client logged observer/JNI failures").into());
     }
     if options.auto_ui {
-        let cleanup_deadline = Instant::now() + Duration::from_secs(30);
-        while child.0.try_wait()?.is_none() && Instant::now() < cleanup_deadline {
-            perform_control(
-                &out.join("controls.json"),
-                child.0.id(),
-                &display,
-                &authority,
-                &mut actions,
-                options.credentials.as_ref(),
-            )?;
-            thread::sleep(Duration::from_millis(200));
-        }
+        native_cleanup(
+            &mut child,
+            &out,
+            &display,
+            &authority,
+            &mut actions,
+            options.credentials.as_ref(),
+        )?;
     }
     let graceful = child.0.try_wait()?.is_some_and(|status| status.success());
-    if let Some(destination) = &options.prime {
-        if !graceful {
-            let _ = child.0.kill();
-            let _ = child.0.wait();
-            let recovery = destination.with_extension("unvalidated");
-            if !recovery.exists() {
-                fs::create_dir(&recovery)?;
-                fs::set_permissions(&recovery, fs::Permissions::from_mode(0o700))?;
-                copy_tree(&cache, &recovery)?;
-                write(
-                    &recovery.join("performance-recovery.json"),
-                    &json!({"schema":1,"validated":false,"reason":"Native client did not close normally; not deciding evidence"}),
-                )?;
-            }
-            return Err(format!(
-                "Priming did not close normally; unvalidated recovery retained at {}",
-                recovery.display()
-            )
-            .into());
-        }
-        fs::create_dir(destination)?;
-        fs::set_permissions(destination, fs::Permissions::from_mode(0o700))?;
-        copy_tree(&cache, destination)?;
-    }
     write(
         &out.join("cleanup.json"),
         &json!({"nativeGracefulExit":graceful,"primedCache":options.prime,"performedNativeControls":actions}),
     )?;
+    if let Some(destination) = &options.prime
+        && !graceful
+    {
+        let _ = child.0.kill();
+        let _ = child.0.wait();
+        let recovery = destination.with_extension("unvalidated");
+        if !recovery.exists() {
+            fs::create_dir(&recovery)?;
+            fs::set_permissions(&recovery, fs::Permissions::from_mode(0o700))?;
+            copy_tree(&cache, &recovery)?;
+            write(
+                &recovery.join("performance-recovery.json"),
+                &json!({"schema":1,"validated":false,"reason":"Native client did not close normally; not deciding evidence"}),
+            )?;
+        }
+        return Err(format!(
+            "Priming did not close normally; unvalidated recovery retained at {}",
+            recovery.display()
+        )
+        .into());
+    }
+    require_native_exit(&mut child)?;
+    check_post_exit_log(&out)?;
+    if let Some(destination) = &options.prime {
+        fs::create_dir(destination)?;
+        fs::set_permissions(destination, fs::Permissions::from_mode(0o700))?;
+        copy_tree(&cache, destination)?;
+    }
     Ok(record)
 }
 
@@ -841,7 +1079,39 @@ fn perform_control(
     let id = value["id"]
         .as_str()
         .ok_or("Native control has no identity")?;
-    if done.contains(id) && id != "MainScreen.open-pause-menu" {
+    let sequence = value["sequence"].as_u64().unwrap_or(0);
+    let name = value["name"].as_str().unwrap_or("");
+    let identity = format!("{id}/{name}/{sequence}");
+    if done.contains(&identity)
+        && !matches!(
+            id,
+            "MainScreen.open-pause-menu"
+                | "Growth.open-pause"
+                | "MainScreen.nativeQuitLabel"
+                | "SurvivalGuide.closeButton"
+                | "MainOptions.nativeBack"
+                | "MainOptions.nativeModalDismiss"
+                | "ServerConnectPopup.instance.connectBtn"
+                | "ServerConnectPopup.cancelBtn"
+                | "ConnectToServer.nativeBack"
+                | "MultiplayerUI.nativeBack"
+                | "GameLoadingState.click-to-start"
+        )
+        && !(id == "Growth.native-button"
+            && matches!(
+                name,
+                "open-options"
+                    | "mods-scroll-left"
+                    | "mods-scroll-right"
+                    | "mods-tab"
+                    | "dismiss-result"
+                    | "options-back"
+                    | "resume"
+                    | "leave-world"
+                    | "multiplayer"
+                    | "reconnect-account"
+            ))
+    {
         return Ok(());
     }
     match (value["action"].as_str(), id) {
@@ -860,9 +1130,16 @@ fn perform_control(
         (
             Some("click"),
             "ServerConnectPopup.instance.connectBtn"
+            | "ServerConnectPopup.cancelBtn"
+            | "ConnectToServer.nativeBack"
+            | "MultiplayerUI.nativeBack"
             | "GameLoadingState.click-to-start"
+            | "SurvivalGuide.closeButton"
             | "MainScreen.nativeQuitLabel"
-            | "MainScreen.quitToDesktopDialog.yes",
+            | "MainScreen.quitToDesktopDialog.yes"
+            | "MainOptions.nativeBack"
+            | "MainOptions.nativeModalDismiss"
+            | "Growth.native-button",
         ) => {
             let x = value["x"]
                 .as_f64()
@@ -891,7 +1168,7 @@ fn perform_control(
             {
                 return Err("Owned native click-down failed".into());
             }
-            thread::sleep(Duration::from_millis(250));
+            thread::sleep(Duration::from_millis(650));
             if !Command::new("xdotool")
                 .args(["mouseup", "1"])
                 .env("DISPLAY", display)
@@ -906,11 +1183,17 @@ fn perform_control(
             key(display, authority, "Escape")?;
             thread::sleep(Duration::from_secs(1));
         }
-        (Some("key"), "SurvivalGuide.native-dismiss") => key(display, authority, "F1")?,
+        (Some("key"), "Growth.open-pause") => {
+            key(display, authority, "Escape")?;
+            thread::sleep(Duration::from_secs(1));
+        }
+        (Some("profile-input"), "Growth.profile-id") => {
+            input_fixture(display, authority, &value, "LuaBuddyGrowth")?
+        }
         _ => return Err("Unrecognized native verification control".into()),
     }
-    done.insert(id.to_owned());
-    println!("NATIVE CONTROL {id}");
+    done.insert(identity);
+    println!("NATIVE CONTROL {id} {name} {sequence}");
     Ok(())
 }
 
@@ -1029,7 +1312,7 @@ fn main() -> Result<()> {
         &options.out.join("artifacts"),
         "observer",
     )?;
-    let settings = json!({"schema":1,"gameJarSha256":hash(&options.game.join("projectzomboid.jar"))?,"runtimeSha256":runtime_hash,"observerSha256":observer_hash,"mode":options.mode,"roundsPerArm":options.rounds,"warmupSeconds":options.warmup,"measurementSeconds":options.seconds,"deciding":options.deciding,"cpuCount":std::thread::available_parallelism()?.get(),"initialLoad":fs::read_to_string("/proc/loadavg")?,"jvmRelease":fs::read_to_string(options.game.join("jre64/release"))?,"observer":"identical hidden Mesa Gallium per-frame dump plus read-only JVMTI agent thread; no Java code edits, breakpoints, or global tracing"});
+    let settings = json!({"schema":1,"gameJarSha256":hash(&options.game.join("projectzomboid.jar"))?,"runtimeSha256":runtime_hash,"observerSha256":observer_hash,"driverSha256":hash(&env::current_exe()?)?,"growth":options.growth,"nativeControl":options.native_control,"mode":options.mode,"roundsPerArm":options.rounds,"warmupSeconds":options.warmup,"measurementSeconds":options.seconds,"deciding":options.deciding,"cpuCount":std::thread::available_parallelism()?.get(),"initialLoad":fs::read_to_string("/proc/loadavg")?,"jvmRelease":fs::read_to_string(options.game.join("jre64/release"))?,"observer":"identical hidden Mesa Gallium per-frame dump plus read-only JVMTI agent thread; no Java code edits, breakpoints, or global tracing"});
     write(&options.out.join("workload.json"), &settings)?;
     let page = getconf("PAGESIZE")?;
     let ticks = getconf("CLK_TCK")?;
@@ -1047,7 +1330,11 @@ fn main() -> Result<()> {
                     records.push(record);
                     write(
                         &options.out.join("summary.json"),
-                        &summarize(&records, options.deciding, options.rounds * arms.len()),
+                        &if options.growth {
+                            records[0].clone()
+                        } else {
+                            summarize(&records, options.deciding, options.rounds * arms.len())
+                        },
                     )?;
                 }
                 Err(error) => {
@@ -1060,7 +1347,11 @@ fn main() -> Result<()> {
             }
         }
     }
-    let summary = summarize(&records, options.deciding, options.rounds * arms.len());
+    let summary = if options.growth {
+        records[0].clone()
+    } else {
+        summarize(&records, options.deciding, options.rounds * arms.len())
+    };
     println!(
         "{}",
         serde_json::to_string_pretty(
@@ -1073,6 +1364,77 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_late_cleanup_fault_is_rechecked_from_the_complete_log() {
+        let fixture = OwnedDirectory::new().unwrap();
+        fs::write(fixture.0.join("client.log"), "Native world completed\n").unwrap();
+        assert!(check_post_exit_log(&fixture.0).is_ok());
+        fs::write(
+            fixture.0.join("client.log"),
+            "Native world completed\nWARNING in native method: late cleanup fault\n",
+        )
+        .unwrap();
+        assert!(check_post_exit_log(&fixture.0).is_err());
+        let value: Value =
+            serde_json::from_slice(&fs::read(fixture.0.join("final-log-check.json")).unwrap())
+                .unwrap();
+        assert_eq!(value["errorCount"], 1);
+        assert_eq!(value["checkedAfterNativeExit"], true);
+    }
+
+    #[test]
+    fn native_only_control_summarizes_five_measured_reconnects_without_fixture_operations() {
+        let mut records=(0..6).map(|cycle|json!({"kind":"reconnect","cycle":cycle,"warmup":cycle==0,"rssBytes":[(300+cycle*2)*1024*1024],"retiredWeakReferencesStillLive":0})).collect::<Vec<_>>();
+        let value = summarize_growth(&json!({"nativeOnly":true,"records":records})).unwrap();
+        assert_eq!(value["nativeOnly"], true);
+        assert_eq!(value["comparison"].as_object().unwrap().len(), 1);
+        assert_eq!(value["comparison"]["reconnect"]["measuredCycles"], 5);
+        assert_eq!(
+            value["comparison"]["reconnect"]["netRssGrowthPerCycleBytes"],
+            2.0 * 1024.0 * 1024.0
+        );
+        records.pop();
+        assert!(summarize_growth(&json!({"nativeOnly":true,"records":records})).is_err());
+    }
+
+    #[test]
+    fn nonzero_or_live_native_process_cannot_be_accepted_as_normal_cleanup() {
+        let mut failed = Process(Command::new("sh").args(["-c", "exit 7"]).spawn().unwrap());
+        failed.0.wait().unwrap();
+        assert!(require_native_exit(&mut failed).is_err());
+        let mut live = Process(Command::new("sleep").arg("30").spawn().unwrap());
+        assert!(require_native_exit(&mut live).is_err());
+        drop(live);
+        let mut normal = Process(Command::new("true").spawn().unwrap());
+        normal.0.wait().unwrap();
+        assert!(require_native_exit(&mut normal).is_ok());
+    }
+
+    #[test]
+    fn periodic_eighteen_mib_increases_every_third_cycle_require_investigation() {
+        let mut records = Vec::new();
+        for (kind, count) in [("refresh", 10), ("reload", 10), ("reconnect", 5)] {
+            for cycle in 0..count {
+                let bytes = 100_u64 * 1024 * 1024
+                    + if kind == "reload" {
+                        (cycle / 3) * 18 * 1024 * 1024
+                    } else {
+                        0
+                    };
+                records.push(json!({"kind":kind,"cycle":cycle,"warmup":false,"rssBytes":[bytes,bytes,bytes],"retiredWeakReferencesStillLive":0}));
+            }
+        }
+        let report = summarize_growth(&json!({"records":records})).unwrap();
+        let reload = &report["comparison"]["reload"];
+        assert_eq!(reload["medianRssDeltaBytes"], 0.0);
+        assert_eq!(reload["netRssGrowthPerCycleBytes"], 6.0 * 1024.0 * 1024.0);
+        assert_eq!(reload["transitionsOverFourMiB"], 3);
+        assert_eq!(
+            reload["residentVerdict"],
+            "investigate repeatable resident growth"
+        );
+    }
 
     #[test]
     fn statistics_use_interpolated_order_values() {
