@@ -1,0 +1,13 @@
+[package]
+name = "luabuddy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+luabuddy-core = { path = "../luabuddy-core" }
+luabuddy-patcher = { path = "../luabuddy-patcher" }

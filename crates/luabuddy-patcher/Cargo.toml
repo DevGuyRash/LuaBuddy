@@ -1,0 +1,12 @@
+[package]
+name = "luabuddy-patcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
+libloading = "=0.8.9"

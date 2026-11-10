@@ -1,0 +1,11 @@
+[package]
+name = "luabuddy-activation-proof"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+jni = { version = "=0.21.1", features = ["invocation"] }
+luabuddy-core = { path = "../../crates/luabuddy-core" }

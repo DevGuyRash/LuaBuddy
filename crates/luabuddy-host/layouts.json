@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "class_loader": "system",
+  "targets": [
+    {
+      "class": "zombie/Lua/Event",
+      "method": "trigger",
+      "descriptor": "(Lse/krka/kahlua/vm/KahluaTable;Lse/krka/kahlua/integration/LuaCaller;[Ljava/lang/Object;)Z",
+      "bytecode_sha256": "879d99fb2c957fcf4aa6544cdfbadec79fda95eb9157f69380f490845d72cd11",
+      "observed_game": "42.22.2"
+    },
+    {
+      "class": "zombie/core/znet/SteamWorkshop",
+      "method": "onItemDownloaded",
+      "descriptor": "(J)V",
+      "bytecode_sha256": "45d9f2ff858424a827233667d0e4c64359f722526fd5e152919961f430141840",
+      "observed_game": "42.22.2"
+    },
+    {
+      "class": "zombie/core/znet/SteamWorkshop",
+      "method": "onItemNotDownloaded",
+      "descriptor": "(JI)V",
+      "bytecode_sha256": "cd9e352e70d2387762c61848adca543ae0778efe94764ddfc9b84fa2823049b1",
+      "observed_game": "42.22.2"
+    }
+  ]
+}

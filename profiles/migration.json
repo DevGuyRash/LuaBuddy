@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "hooks": [
+    {
+      "sha256": "5c15e0070324c8f250abbfc6ba6182f77cb0f9559f562d8ff4136ca8f5680efc",
+      "source": "AllInfo.lua",
+      "hook": "AllInfo"
+    },
+    {
+      "sha256": "a6ef2cb2c71c3e1d37a2db39874f52369b7de75d275e59409ac0ad2dc53a0ed4",
+      "source": "AutoAll.lua",
+      "hook": "AutoAll"
+    },
+    {
+      "sha256": "bb30002ef3147ded8cbd16f3c93bcb04d9b3c79c3dfa50050d839346d62f8576",
+      "source": "CraftPlanner.lua",
+      "hook": "CraftPlanner"
+    },
+    {
+      "sha256": "9d84042d7cb220375a39b5d8e3ecb48e086624ea882c59c516db57c211348c8e",
+      "source": "EURY_CRAFTING.lua",
+      "hook": "EURY_CRAFTING"
+    },
+    {
+      "sha256": "c6dd2ed44cae5a34a564780911f910b04d9c01c62cc6b3260eb274a94dbc1f88",
+      "source": "KADropnLoot.lua",
+      "hook": "KADropnLoot"
+    },
+    {
+      "sha256": "c6dd2ed44cae5a34a564780911f910b04d9c01c62cc6b3260eb274a94dbc1f88",
+      "source": "LootSenseQuickStack.lua",
+      "hook": "LootSenseQuickStack"
+    },
+    {
+      "sha256": "c6dd2ed44cae5a34a564780911f910b04d9c01c62cc6b3260eb274a94dbc1f88",
+      "source": "LootSenseStorage.lua",
+      "hook": "LootSenseStorage"
+    },
+    {
+      "sha256": "c6dd2ed44cae5a34a564780911f910b04d9c01c62cc6b3260eb274a94dbc1f88",
+      "source": "LootTrackerB42.lua",
+      "hook": "LootTrackerB42"
+    },
+    {
+      "sha256": "0272be655301fa0663a5f639a4935b5311224e46ed08279bdaac8e7a39a991cf",
+      "source": "NeatUI_Inventory.lua",
+      "hook": "NeatUI_Inventory"
+    },
+    {
+      "sha256": "28ace1542d0f64071ba7507bacbffef810cb11bf9e2d1de88845d79cf7a1bdd5",
+      "source": "NeatUI_Mechanics.lua",
+      "hook": "NeatUI_Mechanics"
+    },
+    {
+      "sha256": "c6dd2ed44cae5a34a564780911f910b04d9c01c62cc6b3260eb274a94dbc1f88",
+      "source": "NutritionHelper.lua",
+      "hook": "NutritionHelper"
+    },
+    {
+      "sha256": "c6dd2ed44cae5a34a564780911f910b04d9c01c62cc6b3260eb274a94dbc1f88",
+      "source": "P4AlarmSyndrome.lua",
+      "hook": "P4AlarmSyndrome"
+    },
+    {
+      "sha256": "5e90b045e0c4f0a762a859242b7f54db5b0ba0edc8ad193668f13bec0530f357",
+      "source": "QuickBuildMenu.lua",
+      "hook": "QuickBuildMenu"
+    },
+    {
+      "sha256": "5816c1e3a88b04661f49c5375fba51bc00c0c6559507da081c4eedef8b338e5b",
+      "source": "RetroDashboard.lua",
+      "hook": "RetroDashboard"
+    },
+    {
+      "sha256": "c6dd2ed44cae5a34a564780911f910b04d9c01c62cc6b3260eb274a94dbc1f88",
+      "source": "TrueLineOfSight.lua",
+      "hook": "TrueLineOfSight"
+    },
+    {
+      "sha256": "c6dd2ed44cae5a34a564780911f910b04d9c01c62cc6b3260eb274a94dbc1f88",
+      "source": "WalkLootForage.lua",
+      "hook": "WalkLootForage"
+    }
+  ]
+}

@@ -1,166 +1,112 @@
-# Verify LuaBuddy
+# Verify a Rust checkout
 
-Run the portable installer tests without a game installation.
+Use the pinned Rust toolchain and committed lockfiles. The aggregate driver is Rust and does not require Python or a Java compiler. Native proofs read the installed game's proprietary classes in place and use its bundled JVM.
 
-```sh
-python3 -m unittest discover -s tests -p 'test_*.py' -v
-```
+## Run the portable checks
 
-On a machine with Project Zomboid installed, run the full check. This compiles a temporary candidate and uses the selected game's Java classes, bundled Java runtime, and the actual ZombieBuddy agent patch.
+Cache the declared dependencies before an offline run, then execute the portable aggregate.
 
 ```sh
-python3 tests/check.py
+cargo fetch --locked
+cargo fetch --locked --manifest-path examples/extensions/math-guard/Cargo.toml
+cargo fetch --locked --manifest-path examples/extensions/string-observer/Cargo.toml
+cargo xtask check --portable --offline
 ```
 
-Pass `--game-dir /path/to/ProjectZomboid` if discovery cannot select one installation. Pass `--offline` to require an existing verified dependency cache. On Windows, use `py -3` instead of `python3`. The extra Lua failure checks run when LuaJIT is on `PATH`. The native Kahlua integration checks run independently of LuaJIT.
+The driver builds the complete application before running tests. It checks workspace formatting and strict Clippy, runs behavior and installer tests, compiles two independent Rust extensions, exercises their actual ABI consumer, validates the bundled profile catalog, creates and verifies a package from the current native artifact, and rejects prohibited implementation payload files in that package.
 
-The check runner creates and deletes its own temporary profiles and mod fixtures. It can download a verified framework dependency and writes `.local/compatibility.log`. It does not install LuaBuddy, replace the published helper build, change the active launcher, contact a game server, or modify Workshop files.
+The driver snapshots the selected CLI and runtime bytes once after the application build. The default inputs are the completed debug artifacts. Commands and native JVMs use those immutable copies, even if another build later replaces the original files. The temporary copies and package are removed after inspection. Check transcripts and `report.json` remain under the printed evidence directory outside Git. The report records the exact artifact SHA256 values and native host identity. Supply `--log-dir` to choose a different evidence destination. A failed command, missing proof marker, proof `FAIL`, JNI warning, output limit, or deadline produces a failed aggregate result.
 
-## Exercise the installed loader
+Portable CI runs on Linux, Windows, and macOS. Linux-only installer fixtures remain explicitly scoped. Portable success on another operating system is not a native game-runtime pass.
 
-Use a separate client cache and a disposable loopback server. Keep `Mods=` and `WorkshopItems=` empty and `DoLuaChecksum=true` in that server's settings. Use the game's bundled Java 25. On Linux, the normal Steam script puts `jre64/bin` on `PATH` before running `ProjectZomboid64`. Calling that executable with the host's newer Java can break ZombieBuddy's bytecode patches.
+## Run the native proofs
 
-1. Build LuaBuddy and run `luabuddy.py install --mod AllInfo --mod AutoAll`.
-2. Start the isolated client through the normal launcher configuration. If Steam is disabled for the test, make the test cache's local `mods` directory contain the installed mod roots. This lets native discovery find the mods without Steam.
-3. Join the disposable server. Confirm that its Lua checksum completes and each mod has one `[LuaBuddy] ... restored before OnGameStart` line.
-4. Hover a weapon and inspect AllTheInfo's numeric details. Select Auto All's **Read Everything Automatically** action on an unread magazine. Wait for its completion message.
-5. Return to the main menu and rejoin in the same process. Confirm that each mod initializes once in the fresh environment and that the menus remain functional.
-6. Stop the test client, server, and display. Remove their disposable caches. Keep the screenshots and selected runtime log outside the repository.
+Supply the selected installation directory, or let the installer identify one Steam game installation. An ambiguous or absent installation fails the native aggregate; use `--portable` when that narrower scope is intended.
 
-## Verification on November 2, 2026
+```sh
+cargo xtask check --offline --game-dir /path/to/ProjectZomboid
+```
 
-The Linux check used Project Zomboid 42.21.0, bundled Java 25.0.1, and ZombieBuddy 2.3.4. The user's existing game session stayed running. Evidence is in `~/.local/state/app-verification/LuaBuddy/2026-11-02/` on the implementation machine.
+The driver selects `jre64/bin/java` from that installation, records its actual Java version and process architecture, and sets the proof invocation environment to that JVM. It does not infer JVM architecture from the machine CPU or fall back silently to `JAVA_HOME`.
 
-| Check | Result |
+Native crash diagnostics go into the evidence directory's `jvm-errors` folder. The proof environment disables core dumps, so a failed verification JVM does not place a core dump in the installed game directory. Evidence paths are resolved before child commands change working directories.
+
+The currently observed Linux x86_64 single-JAR layout is the native proof target. Fetch the locked proof dependencies once before an offline run.
+
+```sh
+cargo fetch --locked --manifest-path proofs/metadata/Cargo.toml
+cargo fetch --locked --manifest-path proofs/runtime/Cargo.toml
+cargo fetch --locked --manifest-path proofs/steam/Cargo.toml
+cargo fetch --locked --manifest-path proofs/patcher/Cargo.toml
+cargo fetch --locked --manifest-path proofs/bridge-loader/Cargo.toml
+cargo fetch --locked --manifest-path proofs/activation/Cargo.toml
+cargo fetch --locked --manifest-path proofs/extensions/Cargo.toml
+cargo fetch --locked --manifest-path proofs/extensions/marker/Cargo.toml
+cargo fetch --locked --manifest-path proofs/performance/Cargo.toml
+```
+
+The native aggregate runs these distinct consumers.
+
+| Consumer | What it exercises |
 | --- | --- |
-| Portable CLI | Twenty-six CLI checks pass. They cover install/remove/idempotence, original backups, staged writes and rollback, launcher ownership, filename collisions, debug settings, read-only diagnostics, malformed reports, selected-field output, and the reported running framework version. |
-| Native game integration | Passes dependency ordering and hook completion, compile and dependency failures, common/version overlays, shared/client phases, late imports, server-enabled skips, single-player/server isolation, and fresh Lua environments. |
-| Native translations | Passes version precedence, German and English, fallback, and `%1` substitution. |
-| Optional AllInfo profile | Excludes SelfTest and overlapping trait screens while retaining inventory providers. |
-| Native diagnostics | Passes real Kahlua Lua/Java traces, nested closure source metadata, uppercase `.LUA` imports, empty/disabled/malformed configurations, report replacement on reconnect, and report-write failure isolation. The CLI reads the actual native JSON report. |
-| Extra Lua failure checks | Passes `nil` and `false` caching, native delegation, failure without retry, unrelated continuation, circular imports, path overrides, and invalid hooks. |
-| Arbitrary mod IDs in the real client | Two temporary mods load and assert native dependency order, common/version replacement, shared/client files with the same name, and a late cross-mod import. |
-| Installed launcher | Loads the staged JARs through the normal launcher JSON. AllInfo restores 39 files and AutoAll restores 35 files. Native mod discovery finds the installed roots without pinned version paths. |
-| Gameplay | AllTheInfo's weapon tooltip is visible. Auto All completes its normal read action with the ordinary user role and reports one item read. |
-| Reconnect | Two world entries in the same normal-launcher process each pass checksums and initialize each mod exactly once. The second entry uses the ordinary user role. |
-| Multiplayer diagnostic report | A separate client loads AllInfo, AutoAll, and an uppercase-extension probe while isolating a deliberately broken mod. The JSON report records three loaded mods and one failed mod with its actual filename, stage, Lua trace, and Java cause. The real diagnostic CLI reads that report and returns failure as expected. |
-| Dependency updater | Sixty-seven portable Python tests cover CLI behavior, verified downloads/cache reuse, update checks, offline and corrupt-cache behavior, failed promotion, and source/game/Java-runtime/framework/helper provenance. A changed Java runtime invalidates cached verification without changing the game JAR. Real official 2.3.4 download and instrumented native checks pass on 42.21 and 42.22. See [compatibility](compatibility.md). |
+| Production `proof-native` mode | Real Kahlua callable identity, values, reentrancy, exceptions, scoped retirement, native UI mouse callback, synchronous/nested/queued owner-thread dispatch, and actual native Workshop notification routing without an account action. |
+| `proofs/metadata` | Actual identity, dependencies, availability, native symlink and flat-root discovery, cache recovery, translation parser/fallback/placeholders, callback ownership/removal, and generated diagnostic contents. |
+| `proofs/runtime` | The actual production library, copied immutably into a disposable fixture, through native events and its public Lua-facing operations. Covers cache/alias/phase behavior, refresh, reconnect, preflight, failure isolation, cleanup consent/refusal/quarantine, and scoped callbacks. |
+| `proofs/activation` | Actual native dependency metadata and preference serialization, explicit next-startup selection, preserved unrelated IDs and map order, unchanged current/server activation, and centralized live eligibility. |
+| `proofs/steam` | Required native Steam symbols and rejection before an initialized host Steam context. No account mutation is performed. |
+| The selected runtime's `proof-patcher` mode | Real unrelated JVM targets, both compiled Rust extensions, deterministic shared-hook order, mutation/replacement, original exceptions, reference identity, nesting/concurrency, stale targets, and exact disable. The standalone `proofs/patcher` consumer also builds. |
+| `proofs/bridge-loader` | An unsupported classloader copy prepared during the transform-to-register interval retains its original declaration and does not poison native registration. |
+| `proofs/extensions` | The selected normal product agent and CLI approval workflow across seven fresh JVM cases. Covers disabled and unapproved code, changed artifact/manifest, unchanged-binary metadata updates, approved native execution, and explicit retry after normal target preparation. |
+| `proofs/performance` build and tests | The measurement program's ownership and provenance behavior. This does not run graphical workloads or establish a performance result. |
 
-The diagnostics pass kept its selected evidence in `~/.local/state/app-verification/LuaBuddy/2026-11-02-diagnostics/`. Its deliberately failing fixture was confined to the disposable client, not the user's configuration.
+The driver applies deadlines and checks proof output in addition to process exit status. Its fixtures use disposable homes/caches and preserve the user's running game. No aggregate fixture subscribes to, unsubscribes from, or downloads a Workshop item. Explicitly authorized live account journeys are separate from this aggregate.
 
-The workflow in `.github/workflows/check.yml` runs the installer fixtures on Windows and Linux with Python 3.10 and 3.14. It does not distribute or run the proprietary game. A Windows game session and every third-party mod or public-server combination remain outside this verification.
+## Audit dependencies and packages
 
-## Optional-profile verification on November 4, 2026
+Install a reviewed `cargo-audit` development tool and keep a usable RustSec advisory database. Request the audit explicitly.
 
-The full check passed 69 portable tests and the native ZombieBuddy-instrumented startup gate on Project Zomboid 42.21.0 with Java 25 and ZombieBuddy 2.3.4. New native cases exercise opt-in file mounting, version-over-common assets, unchanged active mod IDs, exclusion of server Lua, replay after client initialization, native callback registration/removal, nested and foreign imports, callback failure attribution, flat Workshop metadata, recovery after a failed lookup, native registered-directory precedence, and preservation of native symlink aliases. Fresh installation selects no profiles; every bundled addition installs independently and preserves existing AllInfo/AutoAll files, including user edits.
+```sh
+cargo xtask check --portable --audit
+cargo xtask check --portable --offline --audit
+```
 
-A separate native Steam probe resolved Easy Pickings from its bundled profile without a `path` override, read its two upstream Lua sources in place, and verified that subsequent native metadata lookup still succeeds. This covers the default Workshop fallback rather than only the explicit-path fixture.
+The audit covers the workspace, extension, and proof lockfiles. Offline mode supplies `--no-fetch --no-yanked`; a missing or stale advisory database fails rather than becoming a security pass. Registry yanked-crate lookup is explicitly not run offline. Omitting `--audit` records the advisory check as not run.
 
-An isolated Linux multiplayer client joined an unmodified loopback server with `Mods=` and `WorkshopItems=` empty and `DoLuaChecksum=true`. It loaded all 13 bundled profiles, including AutoAll, AllInfo, ReloadAllAmmo, AutoFishing, and the NeatUI dependency, plus one independent verification mod: 14 loaded, zero failures. Checks inside the live game confirmed the existing inventory pages have NeatUI controls, the saved forage key and alarm setting are restored, the five UI images and AutoFishing icon resolve through native texture loading, AutoAll mechanics and AllInfo providers remain initialized, and the active server mod list stays empty.
+To verify release artifacts, build them first and supply both paths. Add the package directory when that same release has been packaged.
 
-The no-Steam client used installed mod roots linked into its disposable cache's native `mods` directory. Versioned profiles used native discovery; only the flat Easy Pickings profile needed its documented explicit path. Native image-prefix validation remains intact. Evidence is retained outside the repository under `~/.local/state/app-verification/LuaBuddy/2026-11-04-optional-profiles/` on the verification machine.
+```sh
+cargo build --release --locked --offline
+cargo xtask check --offline --audit --game-dir /path/to/ProjectZomboid --runtime target/release/libluabuddy_host.so --cli target/release/luabuddy --package dist/LuaBuddy-linux-x86_64
+```
 
-These checks establish loading, initialization, resource access, settings restoration, and the tested combination. They do not prove every upstream gameplay feature, optional third-party combination, or server configuration. AutoFishing's sandbox-page registration and custom seated bait animation require normal loading as documented in the README. NeatUI grid views can omit other mods' vanilla-row overlays; use its List view for those overlays. Windows gameplay and full preview-client gameplay remain unverified.
+`--runtime` selects the exact library for native callable, patcher, runtime, and normal-product extension proofs. `--cli` selects the executable for discovery, profile inspection, packaging, and extension approval. Helper consumers for metadata, native preference APIs, and classloader interleaving compile from the current source and use the selected game's JVM. They are distinct evidence from execution of the selected library.
 
-## Runtime loading verification on November 6, 2026
+The installer verifies every manifest entry and the native artifact architecture. The aggregate also requires package runtime and CLI hashes to match the exact tested artifact snapshots. A release package paired with default debug inputs fails that identity check. To inspect package integrity alone, use `luabuddy verify-package --package DIR`. The aggregate additionally refuses symlinks and executable `.lua`, `.java`, `.class`, `.jar`, `.py`, `.js`, or `.wasm` payload files in the package. Migration catalog strings and preserved historical references are not a runtime dependency on ZombieBuddy.
 
-The full check passes 74 portable tests, the native ZombieBuddy-instrumented startup/runtime gate on Project Zomboid 42.21.0 with Java 25 and ZombieBuddy 2.3.4, and the extra Lua require/failure checks. Runtime cases exercise append/no-op resolver and object identity, cached `nil` and `false`, dependency reuse, scoped startup after the new batch, original cleanup contexts, native discovery-cache refresh, ordering/path/import-provider refusal, candidate compilation before cleanup and mounting, cooperative callback removal, cleanup/activation quarantine, startup failure propagation, reentrancy, owner-thread checks, retired environments, and cumulative diagnostics with stable session IDs.
+## Exercise the graphical product
 
-An isolated ordinary-role multiplayer client joined a disposable server with `Mods=` and `WorkshopItems=` empty and `DoLuaChecksum=true`. Its initial selection included AutoAll, AllInfo, NeatUI Inventory and Framework, a cooperative test mod, and a read-only observation fixture. Through the real native Options buttons, it loaded Loot Tracker's 18 sources without reconnecting. Saved preferences, all nine images, its local multiplayer save initialization, map overlay and vanilla countdown worked. A repeated refresh did not rerun existing code or add UI records. A dirty native checkbox refused loading without discarding the pending edit.
+Use disposable client caches, displays, profiles, and loopback servers. Keep the user's game and personal saves untouched. Match the exact native artifact SHA256 to each evidence set.
 
-The same session replaced the cooperative mod's version 1 with version 2, retaining one resolver and one upstream callback while leaving foreign callbacks and priority-mod initialization intact. A syntax-invalid replacement was refused before cleanup; version 2 remained callable and native mappings were not published. Fresh clients also exercised later generations through the keyboard path. Holding Enter submits one operation and leaves the result visible. Result dialogs use a bounded native rich-text viewport. Mod option record counts remained stable across repeated refresh/reload; new Loot Tracker controls appeared once.
+1. Install a clean package with no selected profiles through the real launcher override. Confirm the native manager appears after an ordinary launch.
+2. Exercise installed discovery, details, search, unavailable Workshop, already subscribed read-only content, pagination, genuine per-item failures, and repeated open/close.
+3. Drive actual controls with mouse and keyboard. Check focus, held Return, Escape, pending Options preservation, bounded dialogs, and controller navigation where hardware is available.
+4. Add supported selections through actual native controls. Inspect saved preferences and profile contents, including Unicode names, continued properties, and file permissions.
+5. Join an isolated ordinary-role multiplayer client to a loopback server with `Mods=`, `WorkshopItems=`, and `DoLuaChecksum=true`. Check affected integrations alone and with relevant Auto All/AllTheInfo combinations.
+6. Cover initial restoration, reconnect, runtime addition, repeated no-op refresh, supported cleanup replacement, refusal, syntax failure, and uncertain cleanup. Inspect actual controls and saved state.
+7. Stop only the owned client, server, and display. Remove their disposable caches. Retain selected logs/screenshots outside Git.
 
-The implementation was built before the new tests were written. Gameplay checks preceded native and portable additions for the remaining failure cases. Evidence and selected screenshots/logs stay outside Git under `~/.local/state/app-verification/LuaBuddy/2026-11-06T112117Z-runtime-loading/` on the verification machine. Only owned caches, clients, display and server were used. No user game was signaled, controlled, evaluated or restarted. The initially recorded user PID was later absent for an unknown reason, which was reported separately.
+The aggregate does not launch that workflow automatically. Native unit/integration proofs and a graphical client establish different facts. Do not report the latter from the former.
 
-These checks cover the documented runtime loading and cooperative-reload contract. They do not prove arbitrary Workshop unload, undeclared foreign-reference cleanup, every mod combination, native asset-cache replacement, Windows gameplay, or runtime behavior on the preview build. Existing bundled profiles do not claim safe reload merely because they load successfully. See [runtime loading](runtime.md) for the boundaries.
+The isolated aggregate performs no Steam account operations. A separate, explicitly authorized graphical workflow completed a fresh subscription and download for one test item through the final candidate; its scope is recorded in [Workshop evidence](evolution/workshop.md). That journey does not establish every item, an upstream content update, or subscribe-only native activation.
 
-## True Line of Sight verification on November 7, 2026
+## Measure the final runtime
 
-The optional `TrueLineOfSight` integration uses native file mounting and the existing saved-preferences hook pattern. No loader, event replay, ordering rule, exclusion, or custom rendering code was added. The production profile and hook were built before test changes. The full offline check passes 74 portable tests, the instrumented Project Zomboid 42.21.0 / Java 25 / ZombieBuddy 2.3.4 native gate, and the extra Lua checks. The installer matrix checks this profile independently and alongside the existing selections, including preservation of edited AutoAll hooks and a fresh default with no selected mods.
+Choose a fixed workload and acceptance budget before collecting deciding baseline/enabled results. Alternate matched release-build runs. Record startup time, frame-time percentiles, CPU, memory, and growth across repeated reconnect/reload cycles. Verify that the changed work actually ran and count failures alongside timings.
 
-An isolated Linux client joined a disposable vanilla server with `Mods=` and `WorkshopItems=` empty and `DoLuaChecksum=true`. True Line of Sight loaded on its own. A fresh connection loaded AutoAll and AllInfo, then the native **Load new profiles** button added True Line of Sight without reconnecting. Saved proximity, darkness, linger, and colour values seeded under the private cache's `Lua/ModOptions.ini` were restored. Translated native controls and the loose fallback image resolved. The environment session, require resolver, priority-mod objects, and callback counts remained intact across the addition and a no-op refresh.
+A callback microbenchmark is not a game frame-time result. Cross-compilation is not platform gameplay evidence. Report passed, failed, and not-run checks separately, with actual game/JVM/OS versions, artifact hashes, and limits.
 
-Native outline flags and the configured blue colour were observed on two zombies in a controlled scene. The server console protected and positioned the disposable character and created the scene's crawlers; its role remained `user`. Ongoing callbacks did not trip the upstream safety circuit or disable fallback drawing. Native Options displayed the saved values after loading. Evidence, including fixture corrections and selected screenshots/logs, stays outside Git under `~/.local/state/app-verification/LuaBuddy/2026-11-07-true-line-of-sight/` on the verification machine. All input and process diagnostics targeted owned test processes and a private display.
+## Evidence scope during the Rust migration
 
-These checks cover integration, preferences, resource access, native outline activation, runtime addition, and the tested priority-mod combination. They do not establish every upstream building, vehicle, staircase, or canopy case, split-screen support, Windows gameplay, or safe whole-mod reload. The integration adds no cleanup hook and does not change upstream visibility rules.
+The old implementation at commit `84d495a` passed its offline aggregate before replacement. That historical result is a baseline, not verification of Rust behavior. The Rust implementation run used Project Zomboid `42.22.2 3d39148846 integrity=pending`, bundled Azul Java `25.0.5+8-LTS`, and Linux x86_64.
 
-## Batch Craft Recipe and Nutrition Helper verification on November 7, 2026
-
-The integrations add two optional profiles and one native saved-preferences hook. Nutrition Helper uses the existing scoped startup replay and optional `before=AllInfo` ordering. No loader code, rendering code, exclusions, or dependencies were added. The production changes were built before test changes. `python3 tests/check.py --offline` passes 74 portable tests, the instrumented Project Zomboid 42.21.0 / Java 25 / ZombieBuddy 2.3.4 native checks, and the extra Lua checks. The installer matrix covers each addition independently, preservation of existing edits, 19 combined selections, and a fresh installation with none selected.
-
-Each mod loaded alone through the native **Load new profiles** button in an isolated ordinary-role Linux multiplayer client. The disposable server had `Mods=` and `WorkshopItems=` empty and `DoLuaChecksum=true`. Batch Craft's three menu modes consumed one, selected, and all remaining nail boxes, with the native recipe producing 100 nails per box. Multiple-recipe submenus retained all three modes. Its upstream tag changes affected all 969 craft recipes. A native blade-based canned-food recipe completed without a nearby craft surface on the vanilla server. This one case does not establish every station-dependent recipe or server rule.
-
-Nutrition Helper attached its button to the existing Health view after runtime loading. Saved nondefault preferences, the panel toggle, nutrient bars, food ratings, and calorie-threshold tooltip worked. Eating a quarter portion through the native menu increased the live calorie value by 42.5. A repeated refresh retained the same button, panel, resolver, and session without replaying a foreign startup callback. Adding Nutrition Helper after AllInfo was running failed before changing the renderer, priority-mod globals, or Health view, as required by its ordering rule.
-
-A fresh connection loaded both additions with AutoAll and AllInfo, plus the observation fixture: five loaded, zero failures. Nutrition Helper's food ratings appeared together with AllInfo's spoilage and cooking rows. AllInfo's weapon details, AutoAll's completed magazine-reading action, AutoAll's box-opening options, Batch Craft's batch action, and Nutrition Helper's Health panel remained functional. A no-op refresh preserved the live renderer and UI objects. No user game was controlled or restarted. Evidence stays outside Git under `~/.local/state/app-verification/LuaBuddy/2026-11-07-batch-nutrition/` on the verification machine.
-
-The inspected Nutrition Helper source leaves its immersion-cue event registrations commented out. Missing server sandbox skill gates default to zero, so food ratings are not necessarily restricted to Nutritionist characters. The integration preserves those upstream behaviors. These checks do not establish every recipe, fetched-item return path, third-party combination, Windows gameplay, or safe whole-mod reload. Neither profile adds cleanup support.
-
-## Quick Build Menu verification on November 8, 2026
-
-The optional `QuickBuildMenu` profile preloads the native build action and uses a profile hook for saved options and startup favorite preservation. No core code, rendering code, replay, mounting, dependency, or ordering rule was added. The complete production change was built before new tests. `python3 tests/check.py --offline` passes 74 portable tests, the instrumented Project Zomboid 42.21.0 / Java 25 / ZombieBuddy 2.3.4 native checks, and the extra Lua checks. The installer matrix covers independent installation, hook copying, existing edits, 20 combined selections, and an empty fresh default.
-
-An isolated ordinary-role Linux client joined a disposable vanilla server with `Mods=` and `WorkshopItems=` empty and `DoLuaChecksum=true`. The native **Load new profiles** button added Quick Build Menu alone without reconnecting. Saved nondefault removal-confirmation, multiple-tracker, and F8 key settings loaded. Native building favorites, translated context menus, recipe icons, material counts, the XP estimate, Last, and the tracker worked. Two chained floor placements and four queued placements consumed exactly six planks and six nails and created six native floors. The queue exhausted its stock and drained its actions and cursor. A tracker opened from the native handcraft window crafted one nail box into 100 nails after that window closed.
-
-An unmodified upstream startup reproduced deletion of a handcraft favorite selected through the native UI. With the profile hook, valid handcraft and building favorites survived startup, while an obsolete favorite was still removed and explicit false and unrelated values remained. A final connection with only Quick Build Menu and the observer confirmed that protection works alone and the favorites persist across reconnects. The native regression executes the actual hook in Kahlua using real recipe objects, favorite-key generation, and native event dispatch. Player, options, and recipe-list fixtures isolate the remaining cases: cleanup self-removal, an explicit unfavorite after the snapshot, unchanged and empty favorites without extra broadcasts, foreign callbacks, drained temporary callbacks, and runtime activation without protective startup registration.
-
-A fresh connection loaded Quick Build Menu with AutoAll, AllInfo, CraftPlanner, and the observation fixture: five loaded, zero failures. A native Track button selected a floor recipe, and a Quick Build placement completed it through CraftPlanner's wrapper. AllInfo's build and weapon details and AutoAll's completed native reading action remained functional. No-op refresh retained the build wrapper, option handles, resolver, session, and callback counts. The inspected upstream files remain unchanged. Evidence and fixture corrections stay outside Git under `~/.local/state/app-verification/LuaBuddy/2026-11-08-quick-build/` on the verification machine.
-
-These checks do not establish every recipe, rotation, workstation, fetched-item path, optional combination, Windows gameplay, or safe whole-mod reload. Queue stock is an upstream launch-time snapshot. This integration does not add cancellation of already queued native actions or independent split-screen chain state. The upstream metadata limits the current mod to game versions 42.20 through 42.21.99. LuaBuddy skips server-loaded copies, so its profile protection does not alter their upstream cleanup.
-
-## NeatUI window-controls regression on November 8, 2026
-
-The original late rebuild recreated anchored controls while the native page still had an unapplied saved-size change. A 620×420 loot window created from the native 455×300 size moved its replacement pin and resize controls another 165 pixels right and 120 pixels down. NeatUI's gear followed the displaced pin, while its resize grip was drawn at the visible window edge. The rebuild also reset saved pin state through native `createChildren()`.
-
-The profile now calls native `recalcSize()` after clearing old children and before upstream recreation, then restores a previously pinned page with native `setPinned()`. No core, upstream, event, ordering, or rendering code changed. The complete production correction was built before new regression tests. The full offline runner passes 74 portable tests, the instrumented 42.21.0 / Java 25 / ZombieBuddy 2.3.4 native gate, and extra Lua checks. The regression executes the actual profile using real native `UIElement` parents, anchored children, and deferred resize, with explicit page/player/options boundaries. It checks hand-calculated final control bounds, preserved dimensions, true and false pin states, and already-built/disabled guards.
-
-An isolated ordinary-role Linux client reproduced the original displacement and pin reset using saved layouts. With the corrected profile, actual corner drags resized both windows, loot unpin/re-pin worked, and its gear opened settings and saved a changed scrolling option. Reconnecting retained geometry, mixed pin states, and the saved setting. A combination with NeatUI Framework, AutoAll, AllInfo, Easy Drop'n'Loot, LootSense Storage, and the observer loaded seven profiles without failure. Loot resize, pinning, settings, and no-op refresh remained functional. Evidence and fixture corrections stay outside Git under `~/.local/state/app-verification/LuaBuddy/2026-11-08-neatui-controls/` on the verification machine. No user game was controlled or restarted. Windows gameplay and every optional combination remain unverified.
-
-## Early UI restoration and additional UI profiles on November 8, 2026
-
-Native `GameLoadingState` calls `UIManager.init()`, which fires `OnCreateUI`, then fires `OnCreatePlayer(index, player)`. The native player callback constructs inventory, mechanics and dashboard windows and restores saved layouts. `OnGameStart` follows later. The new `install --early-ui` option uses the existing ZombieBuddy event patch to restore the selected batch before UI/player construction. The default timing and `OnGameStart` fallback remain available. Runtime operations still wait for the real game-start callbacks to finish.
-
-The complete implementation was built before adding tests. The offline runner passes 75 portable tests, the instrumented 42.21.0 / Java 25 / ZombieBuddy 2.3.4 native gate, and extra Lua checks. Native event cases cover opt-in constructor/player ordering, default and explicitly disabled timing, fallback without `OnCreateUI`, startup refusal of runtime requests, and once-per-environment loading. Public installer checks cover the opt-in, preservation on reinstall, removal, and fresh configurations selecting no mods. Each new bundled profile installs independently while preserving existing files.
-
-An ordinary-role isolated client tested NeatUI Mechanics with its required framework, Better Crafting alone, Retro Dashboard alone, and all 24 bundled profiles together with one observer. The combined session loaded 25 profiles without initialization failures against an unmodified loopback server with empty mod lists and Lua checksum enforcement. NeatUI Mechanics retained saved geometry/preferences, exposed car-tab pinning, search, settings, resize and Best Parts, and displayed Auto All's Train Mechanics entry. Better Crafting displayed collapsible categories, Best XP Gain sorting and cursor XP tooltips. A real star click saved a favorite, and a separate real recipe absent before reconnect imported through native `OnCreatePlayer` and appeared in Favorites. Retro Dashboard rendered after actual driver-seat entry; its context menu changed scale and units, its headlight control changed the native vehicle state, and preferences survived reconnect. Mod Manager Reforged worked in the normal native main-menu Mods screen and initialized its boot patches during multiplayer restoration.
-
-Native Options also loaded Better Crafting and Retro Dashboard during play while retaining the existing mechanics window. A no-op refresh preserved window/dashboard identity and startup counts. Loading NeatUI Mechanics during play exposed an upstream setup resize from 900×660 to 1049×682; its profile now retains the existing dimensions around upstream setup. The corrected late setup preserved the 900×660 window, added its sidebar button and retained the driving dashboard. In the full combination, the loot window pinned and resized through actual input, its gear changed saved settings, and AllTheInfo's numeric weapon details and Nutrition Helper's food block remained visible.
-
-Evidence, source hashes, reports, screenshots and fixture corrections stay outside Git under `~/.local/state/app-verification/LuaBuddy/2026-11-08-mechanics-crafting/` on the verification machine. Workshop files were read in place. No user game was controlled, evaluated, signaled or restarted. These gameplay checks used 42.21.0 on Linux; Windows gameplay, preview gameplay, every upstream action and every optional combination remain unverified. Better Crafting's server fish-fillet fix still requires normal server installation, and its cross-save import needs early restoration when joining.
-
-## Per-profile maintenance review on November 8, 2026
-
-The requested Poteto sweep reviewed every bundled profile separately against the installed upstream source and native APIs. Each review distinguished actual-source headless checks from the earlier game evidence. The resulting changes use existing native APIs and replay metadata. No Workshop implementation was copied or edited, and no mod IDs were added to core code.
-
-| Profile | Review result |
-| --- | --- |
-| `AutoAll` | Added runtime startup replay for Medicine, VHS and other upstream installers. |
-| `AllInfo` | Added runtime startup replay and its existing custom Options-page builder; removed the obsolete SelfTest exclusion. |
-| `NeatUI_Inventory` | Restored native/NeatUI saved layouts after late construction; runtime snapshots retain live pane preferences, geometry, pins and menu-hidden visibility. |
-| `NeatUI_Mechanics` | Retained the upstream setup hook and runtime dimension preservation. |
-| `NeatUI_Framework` | Retained ID and mounting only. |
-| `KADropnLoot` | Retained settings and ordering; classified titlebar overlap as upstream coexistence. |
-| `P4AlarmSyndrome` | Added runtime startup replay and corrected shared load-event timing. |
-| `LootSenseStorage` | Added runtime startup replay for display installers. |
-| `LootSenseQuickStack` | Removed unnecessary Storage ordering; the optional bridge reads the live API. |
-| `CraftPlanner` | Waits for native inventory/loot UI before opening a saved plan; early mode uses the upstream player callback. |
-| `EURY_CRAFTING` | Retained the native preference hook and documented early favorites initialization. |
-| `RetroDashboard` | Retained native factory use and mounting; PNG glyphs need no new font framework. |
-| `MMReforgedC` | Retained boot replay and added its runtime persistence bootstrap. |
-| `ReloadAllAmmo` | Added native mounting for current upstream radial icons. |
-| `SuperOl3gContextMenuIcons` | Added runtime startup replay for supplemental icon installers. |
-| `WalkLootForage` | Added runtime startup replay for its key registration. |
-| `WhatItDoes` | Added the upstream runtime installer retry for optional classes introduced in the same batch. |
-| `NutritionHelper` | Retained initialization and optional tooltip ordering. |
-| `QuickBuildMenu` | Retained the preload, settings and native-favorite protection. |
-| `LootTrackerB42` | Retained settings, mounting and scoped runtime initialization. |
-| `TrueLineOfSight` | Retained settings and image mounting. |
-| `AreaTasks` | Retained ID only. |
-| `AutoFishing` | Retained ID and mounting only. |
-| `vac_mod_b42_10` | Retained ID only. |
-
-Two shared corrections emerged. Startup now enforces declared ordering against already executed native code, including reciprocal rules from skipped native profiles and native `loadModAfter` metadata. Runtime lifecycle replay follows native event phase and callback-registration order, skips callbacks removed before invocation, and keeps failure attribution with the owning profile. Initial restoration no longer duplicates the native `OnLoad` still ahead. Replay takes one callback snapshot per event; callbacks added to that same event during replay wait for a later event.
-
-Native regression cases exercise initial and runtime ordering refusal before hooks, sources or mounts; explicit and reciprocal profile rules; native metadata; shared/client registration order; scoped startup/load phases; removed callbacks; and unchanged foreign callbacks. Live follow-up restored saved native/custom pane sorts and per-window NeatUI views under default timing, added Auto All and AllInfo during play with Medicine/VHS/moodles and one functional custom Options tab, and checked no-op identity/counts. AllInfo's actual SelfTest button passed 221 of 222 checks during runtime addition; its constructor-hook assertion does not recognize direct use of its public page builder. The profile does not falsify that upstream diagnostic flag.
-
-The review also recorded upstream issues that these loading profiles do not replace. Easy Drop'n'Loot's fixed titlebar buttons overlap NeatUI text, and its hide setting does not update existing buttons. QuickStack can plan a backpack item twice and restricts multiplayer destinations beyond the native action's vehicle-seat check. Quick Build removals bypass Better Crafting's cross-save favorite tombstones. Easy Pickings' main-inventory priority can use the currently selected bag. Auto Fishing and Auto All can retain competing fishing sessions; Auto Fishing can select a rod without a hook. LootSense targets a missing native row method and nonexistent tooltip description methods. True Line of Sight's one-shot label-tooltip attachment misses controls replaced by later Options refresh. Context-menu icons omit a required translation count. AllInfo diagnostics also treat some composable wrapper identities as failures. These findings belong to upstream behavior and are recorded with reproductions in the private per-mod reports. They do not justify a general-loader gameplay framework, hardcoded offsets, or broad feature suppression.
+The individual native consumers, compiled-extension execution, installer journeys, classloader regression, and graphical menu/read-only Steam checks have produced scoped evidence during implementation. The final release report must identify the deciding final artifact and the still-unrun account, platform, full-game, or performance gates. See [the behavior ledger](evolution/behavior.md) and [platform evidence](compatibility.md).
