@@ -1743,6 +1743,24 @@ pub fn rollback(game: &Path) -> Result<Value> {
         .as_array_mut()
         .ok_or_else(|| invalid("Invalid launcher arguments"))?
         .extend(owned_args);
+    let profile_argument = config["vmArgs"]
+        .as_array()
+        .ok_or_else(|| invalid("Invalid launcher arguments"))?
+        .iter()
+        .rev()
+        .filter_map(Value::as_str)
+        .find(|arg| *arg == "-Dluabuddy.config" || arg.starts_with("-Dluabuddy.config="))
+        .ok_or_else(|| invalid("Previous generation has no profile directory argument"))?;
+    let profiles = profile_argument
+        .strip_prefix("-Dluabuddy.config=")
+        .ok_or_else(|| invalid("Previous generation has an invalid profile directory argument"))?;
+    if !Path::new(profiles).is_absolute() || profiles.contains(['\0', '\r', '\n']) {
+        return Err(invalid(
+            "Previous generation has an invalid profile directory",
+        ));
+    }
+    record.profiles = PathBuf::from(profiles);
+    previous.config_argument = profile_argument.to_owned();
     previous.site_bytes = json_bytes(&config)?;
     record.previous = Some(std::mem::replace(&mut record.current, previous));
     let record_path = game.join(INSTALL_DIR).join(RECORD_FILE);

@@ -55,6 +55,8 @@ A shared ZombieBuddy agent remains installed for its other consumers. An argumen
 
 Use an integrity-checked local package for an update. The prior generation remains available for rollback.
 
+Rollback also restores the prior generation's profile directory selection. If an update changed that selection from A to B, rollback selects A consistently in the launcher, installation metadata, verification output, and later updates without an explicit directory. Files in both profile directories remain untouched. Invalid saved directory arguments fail before the rollback transaction.
+
 ```sh
 luabuddy update --package /path/to/new-package --game-dir /path/to/ProjectZomboid
 luabuddy rollback --game-dir /path/to/ProjectZomboid

@@ -284,6 +284,125 @@ fn update_rollback_and_uninstall_preserve_user_edits() {
 }
 
 #[test]
+fn rollback_restores_the_previous_profile_directory_for_reports_and_future_updates() {
+    let f = Fixture::new();
+    let a = f.root.join("profiles A 雪");
+    let b = f.root.join("profiles B");
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&b).unwrap();
+    let a_file = a.join("ChoiceA.properties");
+    let b_file = b.join("ChoiceB.properties");
+    let a_bytes = b"id=ChoiceA\nenabled=false\n";
+    let b_bytes = b"id=ChoiceB\nenabled=true\n";
+    fs::write(&a_file, a_bytes).unwrap();
+    fs::write(&b_file, b_bytes).unwrap();
+    let base = fs::read(f.game.join("ProjectZomboid64.json")).unwrap();
+    for (command, directory) in [("install", &a), ("update", &b)] {
+        f.success(
+            command,
+            &[
+                "--package",
+                f.package.to_str().unwrap(),
+                "--profiles-dir",
+                directory.to_str().unwrap(),
+            ],
+        );
+    }
+    let selected = |directory: &Path| {
+        let argument = format!("-Dluabuddy.config={}", directory.display());
+        let site = f.site();
+        let args = site["vmArgs"].as_array().unwrap();
+        assert_eq!(
+            args.iter()
+                .filter(|value| value.as_str().unwrap().starts_with("-Dluabuddy.config="))
+                .collect::<Vec<_>>(),
+            [&json!(argument)]
+        );
+        assert_eq!(f.record()["profiles"], json!(directory));
+        assert_eq!(f.record()["current"]["config_argument"], json!(argument));
+        assert!(args.contains(&json!("-Dunrelated=preserve me")));
+        assert!(args.contains(&json!("-javaagent:other.jar")));
+        assert_eq!(site["custom"]["value"], 7);
+        for result in [
+            f.success("verify", &[]),
+            f.success(
+                "doctor",
+                &["--cache-dir", f.root.join("empty-cache").to_str().unwrap()],
+            ),
+        ] {
+            assert_eq!(result["ok"], true);
+            assert_eq!(result["profiles"], json!(directory));
+        }
+    };
+    assert_eq!(f.success("rollback", &[])["profilesPreserved"], json!(a));
+    selected(&a);
+    f.success("update", &["--package", f.package.to_str().unwrap()]);
+    selected(&a);
+    for directory in [&b, &a] {
+        assert_eq!(
+            f.success("rollback", &[])["profilesPreserved"],
+            json!(directory)
+        );
+        selected(directory);
+    }
+    f.success("uninstall", &[]);
+    assert_eq!(fs::read(a_file).unwrap(), a_bytes);
+    assert_eq!(fs::read(b_file).unwrap(), b_bytes);
+    assert_eq!(
+        fs::read(f.game.join("ProjectZomboid64.json")).unwrap(),
+        base
+    );
+}
+
+#[test]
+fn rollback_refuses_invalid_effective_profile_arguments_without_changing_the_installation() {
+    let f = Fixture::new();
+    f.install();
+    f.success(
+        "update",
+        &[
+            "--package",
+            f.package.to_str().unwrap(),
+            "--profiles-dir",
+            f.root.join("profiles-B").to_str().unwrap(),
+        ],
+    );
+    let record = f.record();
+    let record_path = f.game.join(".luabuddy/native-install.json");
+    let site_path = f.game.join("ProjectZomboid64.site.json");
+    let site = fs::read(&site_path).unwrap();
+    for argument in [
+        None,
+        Some("-Dluabuddy.config".to_owned()),
+        Some("-Dluabuddy.config=".to_owned()),
+        Some("-Dluabuddy.config=relative".to_owned()),
+        Some(format!("-Dluabuddy.config={}\n", f.root.display())),
+        Some(format!("-Dluabuddy.config={}\r", f.root.display())),
+        Some(format!("-Dluabuddy.config={}\0", f.root.display())),
+    ] {
+        let mut altered = record.clone();
+        let prior_bytes: Vec<u8> =
+            serde_json::from_value(altered["previous"]["site_bytes"].clone()).unwrap();
+        let mut prior: Value = serde_json::from_slice(&prior_bytes).unwrap();
+        let args = prior["vmArgs"].as_array_mut().unwrap();
+        if let Some(argument) = argument {
+            args.push(json!(argument));
+        } else {
+            args.retain(|value| !value.as_str().unwrap().starts_with("-Dluabuddy.config="));
+        }
+        altered["previous"]["site_bytes"] = json!(serde_json::to_vec(&prior).unwrap());
+        let before = serde_json::to_vec(&altered).unwrap();
+        fs::write(&record_path, &before).unwrap();
+        let result = f.command("rollback", &[]);
+        assert_eq!(result.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("profile directory"));
+        assert_eq!(fs::read(&site_path).unwrap(), site);
+        assert_eq!(fs::read(&record_path).unwrap(), before);
+        assert!(!f.game.join(".luabuddy/native-transaction.json").exists());
+    }
+}
+
+#[test]
 fn legacy_migration_keeps_shared_agent_without_reactivating_old_loader() {
     let f = Fixture::new();
     let mut base: Value =
