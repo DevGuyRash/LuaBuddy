@@ -1,6 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -178,7 +179,7 @@ fn empty_default_additive_selection_and_idempotence() {
 }
 
 #[test]
-fn package_rejects_corruption_unlisted_files_and_lua_hooks() {
+fn package_rejects_corruption_and_unlisted_files() {
     let f = Fixture::new();
     f.success(
         "verify-package",
@@ -206,26 +207,59 @@ fn package_rejects_corruption_unlisted_files_and_lua_hooks() {
         Some(2)
     );
     assert!(!f.game.join("ProjectZomboid64.site.json").exists());
-    fs::write(
-        f.templates.join("Legacy.properties"),
-        "id=Legacy\nplugin=Legacy.lua\n",
-    )
-    .unwrap();
-    fs::write(f.templates.join("Legacy.lua"), "return {}\n").unwrap();
-    let output = f.command(
-        "package",
-        &[
-            "--runtime",
-            f.runtime.to_str().unwrap(),
-            "--profiles-dir",
-            f.templates.to_str().unwrap(),
-            "--out",
-            f.root.join("bad-package").to_str().unwrap(),
-        ],
-    );
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Legacy.lua"));
-    assert!(!f.root.join("bad-package").exists());
+}
+
+#[test]
+fn package_template_format_is_checked_before_activation_with_valid_manifest_hashes() {
+    for (name, content) in [
+        ("profiles/metadata.json", "{\"version\":1}\n"),
+        ("profiles/nested/Extra.properties", "id=Extra\n"),
+    ] {
+        let f = Fixture::new();
+        f.success(
+            "verify-package",
+            &["--package", f.package.to_str().unwrap()],
+        );
+        let path = f.package.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, content).unwrap();
+        let manifest_path = f.package.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["files"][name] = json!({
+            "sha256":format!("{:x}", Sha256::digest(content.as_bytes())),
+            "size":content.len(),
+            "executable":false,
+        });
+        let mut manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        manifest_bytes.push(b'\n');
+        fs::write(&manifest_path, &manifest_bytes).unwrap();
+        fs::write(
+            f.package.join("manifest.sha256"),
+            format!("{:x}  manifest.json\n", Sha256::digest(&manifest_bytes)),
+        )
+        .unwrap();
+        let base = fs::read(f.game.join("ProjectZomboid64.json")).unwrap();
+        for command in ["verify-package", "install"] {
+            let result = f.command(command, &["--package", f.package.to_str().unwrap()]);
+            assert_eq!(result.status.code(), Some(2));
+            assert!(
+                String::from_utf8_lossy(&result.stderr)
+                    .contains("Unsupported profile template entry")
+            );
+        }
+        assert_eq!(
+            fs::read(f.game.join("ProjectZomboid64.json")).unwrap(),
+            base
+        );
+        for path in [
+            "ProjectZomboid64.site.json",
+            ".luabuddy/native-install.json",
+            ".luabuddy/native-transaction.json",
+        ] {
+            assert!(!f.game.join(path).exists());
+        }
+    }
 }
 
 #[test]
@@ -403,55 +437,7 @@ fn rollback_refuses_invalid_effective_profile_arguments_without_changing_the_ins
 }
 
 #[test]
-fn legacy_migration_keeps_shared_agent_without_reactivating_old_loader() {
-    let f = Fixture::new();
-    let mut base: Value =
-        serde_json::from_slice(&fs::read(f.game.join("ProjectZomboid64.json")).unwrap()).unwrap();
-    base["vmArgs"].as_array_mut().unwrap().extend([
-        json!("-javaagent:.luabuddy/ZombieBuddy.jar=patches_jar=LuaBuddy.jar:luabuddy"),
-        json!("-Dluabuddy.config=unused-old-profiles"),
-        json!("-javaagent:ZombieBuddy.jar=patches_jar=Other.jar:other"),
-    ]);
-    fs::write(
-        f.game.join("ProjectZomboid64.json"),
-        serde_json::to_vec(&base).unwrap(),
-    )
-    .unwrap();
-    f.success(
-        "install",
-        &[
-            "--package",
-            f.package.to_str().unwrap(),
-            "--profiles-dir",
-            f.profile_dir().to_str().unwrap(),
-        ],
-    );
-    let installed = f.site()["vmArgs"].as_array().unwrap().clone();
-    assert!(installed.contains(&json!(
-        "-javaagent:ZombieBuddy.jar=patches_jar=Other.jar:other"
-    )));
-    assert!(
-        !installed
-            .iter()
-            .any(|v| v.as_str().unwrap().contains("LuaBuddy.jar:luabuddy"))
-    );
-    f.success("uninstall", &[]);
-    assert!(
-        !f.site()["vmArgs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v.as_str().unwrap().contains("LuaBuddy.jar:luabuddy"))
-    );
-    assert_eq!(
-        base,
-        serde_json::from_slice::<Value>(&fs::read(f.game.join("ProjectZomboid64.json")).unwrap())
-            .unwrap()
-    );
-}
-
-#[test]
-fn repair_retains_modified_runtime_and_legacy_profiles_are_never_overwritten() {
+fn repair_retains_modified_runtime_and_preserves_user_profiles() {
     let f = Fixture::new();
     f.install();
     let runtime = PathBuf::from(f.record()["current"]["runtime"].as_str().unwrap());
@@ -471,32 +457,18 @@ fn repair_retains_modified_runtime_and_legacy_profiles_are_never_overwritten() {
         .collect();
     assert_eq!(backups.len(), 1);
     assert_eq!(fs::read(&backups[0]).unwrap(), b"user modified runtime");
-    fs::write(
-        f.profile_dir().join("Legacy.properties"),
-        "id=Legacy\nplugin=Legacy.lua\n",
-    )
-    .unwrap();
-    fs::write(
-        f.profile_dir().join("Legacy.lua"),
-        "return { after = print }\n",
-    )
-    .unwrap();
-    let site = fs::read(f.game.join("ProjectZomboid64.site.json")).unwrap();
-    let result = f.command("install", &["--package", f.package.to_str().unwrap()]);
-    assert_eq!(result.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&result.stderr).contains("Legacy.lua"));
-    assert_eq!(
-        site,
-        fs::read(f.game.join("ProjectZomboid64.site.json")).unwrap()
-    );
-    assert_eq!(
-        fs::read_to_string(f.profile_dir().join("Legacy.lua")).unwrap(),
-        "return { after = print }\n"
-    );
+    let profile = f.profile_dir().join("UserSettings.properties");
+    let original = "id=UserSettings\nenabled=false\nmount=true\n# preserve this comment\n";
+    fs::write(&profile, original).unwrap();
+    f.install();
+    f.success("verify", &[]);
+    f.success("uninstall", &[]);
+    assert_eq!(fs::read_to_string(profile).unwrap(), original);
+    assert_eq!(fs::read(&backups[0]).unwrap(), b"user modified runtime");
 }
 
 #[test]
-fn case_collisions_and_shared_legacy_arguments_fail_before_activation() {
+fn case_collisions_fail_before_activation() {
     let f = Fixture::new();
     let result = f.command(
         "install",
@@ -511,51 +483,23 @@ fn case_collisions_and_shared_legacy_arguments_fail_before_activation() {
     );
     assert_eq!(result.status.code(), Some(2));
     assert!(!f.game.join("ProjectZomboid64.site.json").exists());
-    let base = json!({"vmArgs":["-javaagent:ZombieBuddy.jar=patches_jar=LuaBuddy.jar:luabuddy,Other.jar:other"]});
-    fs::write(
-        f.game.join("ProjectZomboid64.json"),
-        serde_json::to_vec(&base).unwrap(),
-    )
-    .unwrap();
-    let result = f.command("install", &["--package", f.package.to_str().unwrap()]);
-    assert_eq!(result.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&result.stderr).contains("shares a ZombieBuddy"));
-    assert!(!f.game.join("ProjectZomboid64.site.json").exists());
+    assert!(!f.game.join(".luabuddy/native-install.json").exists());
 }
 
 #[test]
-fn immutable_templates_and_exact_hook_migration_preserve_original_files() {
+fn immutable_template_repair_and_uninstall_preserve_user_files() {
     let f = Fixture::new();
-    fs::write(f.templates.join("migration.json"), serde_json::to_vec(&json!({"schemaVersion":1,"hooks":[{"source":"Original.lua","hook":"NativeHook","sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]})).unwrap()).unwrap();
-    let package = f.root.join("migrating-package");
-    f.package(&package);
     fs::create_dir_all(f.profile_dir()).unwrap();
-    let original = "id=Example\nenabled=false\nplugin=Original.lua\n# preserve this comment\n";
-    fs::write(f.profile_dir().join("Example.properties"), original).unwrap();
-    fs::write(f.profile_dir().join("Original.lua"), "abc").unwrap();
-    let result = f.success("install", &["--package", package.to_str().unwrap()]);
-    assert_eq!(result["migratedProfiles"].as_array().unwrap().len(), 1);
+    let original = "id=AutoAll\nenabled=false\nhook=AutoAll\n# preserve this comment\n";
+    let profile_file = f.profile_dir().join("AutoAll.properties");
+    fs::write(&profile_file, original).unwrap();
+    f.install();
     let profile = luabuddy_core::read_profiles(&f.profile_dir())
         .unwrap()
         .remove(0);
     assert!(!profile.enabled);
-    assert_eq!(profile.hook.as_deref(), Some("NativeHook"));
-    assert!(profile.legacy_plugin.is_none());
-    assert!(
-        fs::read_to_string(&profile.file)
-            .unwrap()
-            .starts_with(original)
-    );
-    assert_eq!(
-        fs::read_to_string(f.profile_dir().join("Original.lua")).unwrap(),
-        "abc"
-    );
-    let backups: Vec<_> = fs::read_dir(f.game.join(".luabuddy/recovery/profiles"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    assert_eq!(backups.len(), 1);
-    assert_eq!(fs::read_to_string(&backups[0]).unwrap(), original);
+    assert_eq!(profile.hook.as_deref(), Some("AutoAll"));
+    assert_eq!(fs::read_to_string(&profile_file).unwrap(), original);
     let runtime = PathBuf::from(f.record()["current"]["runtime"].as_str().unwrap());
     let templates = runtime.parent().unwrap().join("profiles");
     assert_eq!(
@@ -575,7 +519,7 @@ fn immutable_templates_and_exact_hook_migration_preserve_original_files() {
     )
     .unwrap();
     assert_eq!(f.command("verify", &[]).status.code(), Some(1));
-    f.success("repair", &["--package", package.to_str().unwrap()]);
+    f.success("repair", &["--package", f.package.to_str().unwrap()]);
     assert_eq!(
         fs::read_to_string(templates.join("Example.properties")).unwrap(),
         "id=Example\n"
@@ -584,10 +528,12 @@ fn immutable_templates_and_exact_hook_migration_preserve_original_files() {
         .unwrap()
         .map(|e| e.unwrap().path())
         .collect();
+    assert_eq!(repaired.len(), 1);
     assert_eq!(
         fs::read_to_string(&repaired[0]).unwrap(),
         "user changed immutable template"
     );
+    assert_eq!(fs::read_to_string(&profile_file).unwrap(), original);
     fs::write(
         templates.join("Example.properties"),
         "user changed immutable template",
@@ -598,6 +544,7 @@ fn immutable_templates_and_exact_hook_migration_preserve_original_files() {
         fs::read_to_string(templates.join("Example.properties")).unwrap(),
         "user changed immutable template"
     );
+    assert_eq!(fs::read_to_string(profile_file).unwrap(), original);
 }
 
 #[test]

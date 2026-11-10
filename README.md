@@ -2,7 +2,7 @@
 
 LuaBuddy is a Rust-native client/shared Lua loader, in-game mod manager, and reusable JVM patcher for Project Zomboid. The native runtime uses the game's existing Java classes and Kahlua interpreter. It has no ZombieBuddy, Python, extra interpreter, or runtime compiler dependency.
 
-A fresh installation selects no mods. Bundled profiles are optional integrations. Workshop subscription, download, installation, native activation, profile selection, and live loading are separate states.
+A fresh installation selects no mods. Bundled profiles are optional integrations. Profiles use supported Rust hooks and declarative fields. Obsolete `plugin` settings and Java-agent or Lua-hook migration are unsupported. Workshop subscription, download, installation, native activation, profile selection, and live loading are separate states.
 
 The native adapter and installer currently target Linux x86_64. Windows and macOS game execution remain unverified. Steam Workshop delivery does not yet provide a demonstrated subscribe-only activation route for this native runtime. [Compatibility](docs/compatibility.md) records that gate without treating an installer as one-click Workshop setup.
 
@@ -19,7 +19,7 @@ target/release/luabuddy verify-package --package dist/LuaBuddy-linux-x86_64
 dist/LuaBuddy-linux-x86_64/luabuddy install --package dist/LuaBuddy-linux-x86_64 --game-dir /path/to/ProjectZomboid
 ```
 
-Quit and relaunch the game through its normal native launcher. Installation writes a reversible `ProjectZomboid64.site.json` override and leaves Steam's base launcher JSON intact. A running JVM keeps its current library until exit. See [installation, migration, repair, rollback, and uninstall](docs/evolution/install.md).
+Quit and relaunch the game through its normal native launcher. Installation writes a reversible `ProjectZomboid64.site.json` override and leaves Steam's base launcher JSON intact. A running JVM keeps its current library until exit. See [installation, repair, rollback, and uninstall](docs/evolution/install.md).
 
 The installer copies the full declarative template catalog into an immutable generation. It copies only explicitly selected profiles into the active configuration.
 
@@ -88,7 +88,7 @@ id=Example
 
 Profiles support native-root discovery or an explicit `path`, dependency and optional ordering metadata, source exclusions, preloads, scoped replay, opt-in mounting, explicit live-loading policy, Rust hook identifiers, and a bounded upstream cleanup path. See the [profile and lifecycle reference](docs/runtime.md).
 
-Reviewed original bundled Lua hooks migrate only when their exact filename and SHA256 match the package's migration catalog. Original files and recovery copies remain intact. Modified or unknown executable hooks receive a precise migration error and are never silently executed as first-party compatibility code.
+Custom first-party integration logic belongs in a compiled Rust hook or an explicitly enabled Rust extension. The installer does not translate old Lua hook files or import their configuration.
 
 ## Develop patches and extensions
 

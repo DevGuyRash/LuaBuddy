@@ -46,3 +46,5 @@ The current Steam adapter attaches only to the game's already initialized contex
 LuaBuddy does not supply missing server code, change multiplayer server policy, bypass checksums, or bypass anti-cheat. A selected mod can still require server installation or normal startup. Use native loading for content whose lifecycle cannot be safely completed during play.
 
 Upstream Workshop updates are read in place. Native metadata decides version availability. Compatibility rules and optional integration code remain in the profile catalog, and no bundled mod is selected by default.
+
+The native-only purge package `1207d5d6` passed the exact-package 44-check native aggregate and current configuration/installer tests. Its source and package no longer contain the old migration paths or catalog. Actual normal-play startup evidence remains scoped to `1d44f599`; the newer native-only package is installed for the next normal launch.

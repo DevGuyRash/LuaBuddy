@@ -160,8 +160,7 @@ fn declaration_or_catalog(path: &Path) -> bool {
             | ".cargo/config.toml"
             | "LICENSE"
             | "THIRD_PARTY.md"
-    ) || text.starts_with("profiles/")
-        && (text.ends_with(".properties") || text == "profiles/migration.json")
+    ) || text.starts_with("profiles/") && text.ends_with(".properties")
         || text.starts_with("crates/") && text.ends_with("Cargo.toml")
 }
 

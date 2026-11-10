@@ -32,7 +32,8 @@ A profile is a UTF-8 Java-properties file with one native mod ID. Empty installa
 | `hook` | A supported compiled Rust integration identifier. Unknown identifiers are refused. |
 | `cleanup` | Bounded dotted path to an existing upstream callable, such as `Example.cleanup`. It is metadata, not evaluated source. |
 | `live` | `auto`, `client-shared`, or `startup`. Controls whether source restoration is eligible or native startup is required. |
-| `plugin` | Legacy executable Lua hook reference. Preserved and detected for exact migration or a precise refusal. The Rust runtime never executes it. |
+
+Only the fields in this table and scoped `excludeWhen.ModID` keys are accepted. The obsolete `plugin` key is an unknown option, including an empty `plugin=` assignment. The runtime has no executable Lua-hook compatibility path. Use a supported compiled Rust `hook` or an explicitly enabled Rust extension.
 
 For example, a cooperating upstream mod can declare its native cleanup function without supplying first-party executable Lua.
 
