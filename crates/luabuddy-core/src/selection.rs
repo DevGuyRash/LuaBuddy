@@ -1,6 +1,6 @@
 use crate::{CoreError, ModId, Profile, read_profiles};
 use std::collections::BTreeSet;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, OpenOptions, TryLockError};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -364,6 +364,30 @@ pub fn claim(directory: &Path) -> Result<Vec<Profile>, CoreError> {
     }
     let store = directory.join(STORE);
     safe_directory(&store, false)?;
+    let lock_path = store.join("claim.lock");
+    match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => (),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(error(&lock_path, e)),
+        Ok(_) => {
+            return Err(error(
+                &lock_path,
+                "Expected an owned regular claim lock file",
+            ));
+        }
+    }
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| error(&lock_path, e))?;
+    match lock.try_lock() {
+        Ok(()) => (),
+        Err(TryLockError::WouldBlock) => return Ok(Vec::new()),
+        Err(TryLockError::Error(e)) => return Err(error(&lock_path, e)),
+    }
     match fs::symlink_metadata(&pending) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => (),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

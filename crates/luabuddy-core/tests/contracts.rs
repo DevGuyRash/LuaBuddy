@@ -93,7 +93,7 @@ impl Directory {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
-        Self(path)
+        Self(path.canonicalize().unwrap())
     }
     fn write(&self, name: &str, text: &str) {
         let file = self.0.join(name);
@@ -686,6 +686,28 @@ fn one_launch_claim_has_one_consumer_and_preserves_normal_selection() {
     assert!(selection::pending(&root.0).unwrap().is_empty());
     assert!(selection::claim(&root.0).unwrap().is_empty());
     assert_eq!(fs::read(&persistent).unwrap(), before);
+}
+
+#[test]
+fn one_launch_claim_contention_preserves_the_queue_until_the_owner_releases() {
+    use luabuddy_core::selection::{self, Lifetime};
+    let root = Directory::new();
+    selection::select(&root.0, &id("Temporary"), None, Lifetime::Once).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.0.join(".launch-once/claim.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    assert!(selection::claim(&root.0).unwrap().is_empty());
+    assert_eq!(selection::pending(&root.0).unwrap().len(), 1);
+    drop(lock);
+    let profiles = selection::claim(&root.0).unwrap();
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].id, id("Temporary"));
+    assert!(selection::pending(&root.0).unwrap().is_empty());
 }
 
 #[test]
