@@ -1,3 +1,7 @@
+mod guides;
+mod presentation;
+mod workshop_link;
+
 use crate::{
     callables, game,
     lua::{Context, Result, Value},
@@ -19,98 +23,77 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod reload;
+
 const TIMEOUT: Duration = Duration::from_secs(45);
 const UI_OWNER: &str = "LuaBuddy.UI";
 
-#[derive(Clone, Copy)]
-#[repr(u8)]
-enum Action {
-    Open = 1,
-    Refresh,
-    Reload,
-    Search,
-    Installed,
-    Subscribed,
-    Select,
-    Add,
-    Download,
-    Enable,
-    Disable,
-    Load,
-    Cancel,
-    Close,
-    Key,
-    Destroy,
-    ReloadSubmit,
-    ReloadEnter,
-    Restart,
-    Consumed,
-    Previous,
-    Next,
-    EntryKey,
-    Update,
-    StartupEnable,
-    StartupDisable,
-    PatchDiagnostics,
-    ApplyApprovedPatches,
-    SearchSubmit,
-    ReloadSelect,
-    Help,
-    JoypadGain,
-    JoypadLose,
-    JoypadDown,
-    JoypadDeactivate,
-    OpenWorkshop,
-    ModalPrerender,
-    ReloadJoypadGain,
-    ReloadJoypadLose,
+macro_rules! actions {
+    ($($name:ident = $value:literal),+ $(,)?) => {
+        #[derive(Clone, Copy)]
+        #[repr(u8)]
+        enum Action { $($name = $value),+ }
+
+        impl Action {
+            fn from(value: u8) -> Option<Self> {
+                match value { $($value => Some(Self::$name),)+ _ => None }
+            }
+        }
+    };
 }
 
-impl Action {
-    fn from(value: u8) -> Option<Self> {
-        Some(match value {
-            1 => Self::Open,
-            2 => Self::Refresh,
-            3 => Self::Reload,
-            4 => Self::Search,
-            5 => Self::Installed,
-            6 => Self::Subscribed,
-            7 => Self::Select,
-            8 => Self::Add,
-            9 => Self::Download,
-            10 => Self::Enable,
-            11 => Self::Disable,
-            12 => Self::Load,
-            13 => Self::Cancel,
-            14 => Self::Close,
-            15 => Self::Key,
-            16 => Self::Destroy,
-            17 => Self::ReloadSubmit,
-            18 => Self::ReloadEnter,
-            19 => Self::Restart,
-            20 => Self::Consumed,
-            21 => Self::Previous,
-            22 => Self::Next,
-            23 => Self::EntryKey,
-            24 => Self::Update,
-            25 => Self::StartupEnable,
-            26 => Self::StartupDisable,
-            27 => Self::PatchDiagnostics,
-            28 => Self::ApplyApprovedPatches,
-            29 => Self::SearchSubmit,
-            30 => Self::ReloadSelect,
-            31 => Self::Help,
-            32 => Self::JoypadGain,
-            33 => Self::JoypadLose,
-            34 => Self::JoypadDown,
-            35 => Self::JoypadDeactivate,
-            36 => Self::OpenWorkshop,
-            37 => Self::ModalPrerender,
-            38 => Self::ReloadJoypadGain,
-            39 => Self::ReloadJoypadLose,
-            _ => return None,
-        })
-    }
+actions! {
+    Open = 1,
+    Refresh = 2,
+    Reload = 3,
+    Search = 4,
+    Installed = 5,
+    Subscribed = 6,
+    Select = 7,
+    Add = 8,
+    Download = 9,
+    Enable = 10,
+    Disable = 11,
+    Load = 12,
+    Cancel = 13,
+    Close = 14,
+    Key = 15,
+    Destroy = 16,
+    ReloadSubmit = 17,
+    ReloadEnter = 18,
+    Restart = 19,
+    Consumed = 20,
+    Previous = 21,
+    Next = 22,
+    EntryKey = 23,
+    Update = 24,
+    StartupEnable = 25,
+    StartupDisable = 26,
+    PatchDiagnostics = 27,
+    ApplyApprovedPatches = 28,
+    SearchSubmit = 29,
+    ReloadSelect = 30,
+    Help = 31,
+    JoypadGain = 32,
+    JoypadLose = 33,
+    JoypadDown = 34,
+    JoypadDeactivate = 35,
+    OpenWorkshop = 36,
+    ModalPrerender = 37,
+    ReloadJoypadGain = 38,
+    ReloadJoypadLose = 39,
+    ReloadTyped = 40,
+    ReloadDown = 41,
+    ReloadUp = 42,
+    GuideSelect = 50,
+    GuideWheel = 51,
+    GuidePreRender = 52,
+    GuideRender = 53,
+    GuideGain = 54,
+    GuideLose = 55,
+    GuideScrollUp = 56,
+    GuideScrollDown = 57,
+    CopyWorkshopLink = 60,
 }
 
 #[derive(Clone)]
@@ -261,6 +244,8 @@ pub fn install(context: &mut Context<'_, '_>, session: u64) -> Result<()> {
     }
     for module in [
         "ISUI/ISPanelJoypad",
+        "ISUI/ISLabel",
+        "ISUI/ISToolTip",
         "ISUI/ISScrollingListBox",
         "ISUI/ISTextEntryBox",
         "ISUI/ISRichTextPanel",
@@ -274,7 +259,7 @@ pub fn install(context: &mut Context<'_, '_>, session: u64) -> Result<()> {
         context.call_global("require", &[name])?;
     }
     let options = first(context.invoke(&options, "create", &[name.clone(), name])?);
-    let description = context.string("Browse installed and Workshop mods. Subscription, installation, selection and loading have separate states. Apply pending Options changes first.")?;
+    let description = context.string(&presentation::instructions("Choose mods in Manage mods.\nLate selections, native startup, and Workshop delivery are separate.\nApply or discard pending Options edits before changing selections."))?;
     context.invoke(&options, "addDescription", &[description])?;
     for (id, title, tooltip, action) in [
         (
@@ -311,11 +296,13 @@ pub fn install(context: &mut Context<'_, '_>, session: u64) -> Result<()> {
         let args = [
             context.string(id)?,
             context.string(title)?,
-            context.string(tooltip)?,
+            context.string(&presentation::instructions(tooltip))?,
             callback(context, session, action)?,
         ];
         context.invoke(&options, "addButton", &args)?;
     }
+    let bottom_spacing = context.string("")?;
+    context.invoke(&options, "addDescription", &[bottom_spacing])?;
     Ok(())
 }
 
@@ -484,9 +471,18 @@ fn dispatch<'vm>(
         let value = context.boolean(consumed)?;
         return context.frame_return(frame, &[value]);
     }
+    if matches!(action, Action::GuideWheel) {
+        let result = guides::wheel(&mut context, &args);
+        if let Err(error) = &result {
+            game::log(&format!("Guide scrolling failed: {error}"));
+        }
+        let consumed = context.boolean(result.is_ok())?;
+        return context.frame_return(frame, &[consumed]);
+    }
     let result = (|| -> Result<()> {
         match action {
             Action::Open => open(&mut context, session),
+            Action::CopyWorkshopLink => workshop_link::copy(&mut context, &args),
             Action::Refresh => {
                 let (kind, summary) = load_enabled(&mut context, session)?;
                 let _ = with_browser(&mut context, session, |context, browser| {
@@ -501,20 +497,34 @@ fn dispatch<'vm>(
                     &format!("{}: {summary}", kind.label()),
                 )
             }
-            Action::Reload => reload_prompt(&mut context, session),
+            Action::Reload => reload::prompt(&mut context, session),
             Action::Help => help(&mut context, session),
+            Action::GuideSelect => guides::select(&mut context, &args),
+            Action::GuidePreRender => guides::prerender(&mut context, &args),
+            Action::GuideRender => guides::render(&mut context, &args),
+            Action::GuideGain | Action::GuideLose => {
+                guides::focus(&mut context, &args, matches!(action, Action::GuideGain))
+            }
+            Action::GuideScrollUp | Action::GuideScrollDown => guides::scroll(
+                &mut context,
+                &args,
+                matches!(action, Action::GuideScrollDown),
+            ),
             Action::JoypadGain
             | Action::JoypadLose
             | Action::JoypadDown
             | Action::JoypadDeactivate => joypad(&mut context, action, &args),
-            Action::ReloadSelect => reload_select(&mut context, &args),
+            Action::ReloadSelect => reload::select(&mut context, &args),
+            Action::ReloadTyped => reload::typed(&mut context, &args),
+            Action::ReloadDown => reload::direction(&mut context, &args, true),
+            Action::ReloadUp => reload::direction(&mut context, &args, false),
             Action::ModalPrerender => modal_prerender(&mut context, &args),
-            Action::ReloadJoypadGain | Action::ReloadJoypadLose => reload_focus(
+            Action::ReloadJoypadGain | Action::ReloadJoypadLose => reload::focus(
                 &mut context,
                 &args,
                 matches!(action, Action::ReloadJoypadGain),
             ),
-            Action::ReloadSubmit | Action::ReloadEnter => reload_submit(
+            Action::ReloadSubmit | Action::ReloadEnter => reload::submit(
                 &mut context,
                 session,
                 &args,
@@ -559,7 +569,15 @@ fn dispatch<'vm>(
         let _ = with_browser(&mut context, session, |context, browser| {
             feedback(context, browser, Feedback::Error, &error)
         });
-        message(&mut context, session, &error)?;
+        notice_result(
+            &mut context,
+            session,
+            Feedback::Error,
+            "Action unavailable",
+            &error,
+            "Review the selected mod's loading state and the reported condition, then retry. Help & guides explains the complete workflows.",
+            false,
+        )?;
     }
     Ok(0)
 }
@@ -639,14 +657,33 @@ fn button(
     title: &str,
     action: Action,
 ) -> Result<Value> {
+    let title = presentation::action_label(action).unwrap_or(title);
     let mut args = numbers(context, &rectangle)?;
     args.push(context.string(title)?);
     args.push(panel.clone());
     args.push(callback(context, session, action)?);
     let button = construct(context, "ISButton", &args)?;
     child(context, panel, &button)?;
-    field_text(context, &button, "tooltip", action_tooltip(action))?;
+    field_text(
+        context,
+        &button,
+        "tooltip",
+        &presentation::instructions(action_tooltip(action)),
+    )?;
     Ok(button)
+}
+
+fn bounded_list_tooltip(context: &mut Context<'_, '_>, list: &Value) -> Result<()> {
+    let tooltip = construct(context, "ISToolTip", &[])?;
+    context.invoke(&tooltip, "setOwner", std::slice::from_ref(list))?;
+    let no = context.boolean(false)?;
+    let yes = context.boolean(true)?;
+    context.invoke(&tooltip, "setVisible", &[no])?;
+    context.invoke(&tooltip, "setAlwaysOnTop", &[yes])?;
+    let width = presentation::tooltip_max_line_width(context)?;
+    let width = context.number(width)?;
+    context.set(&tooltip, "maxLineWidth", &width)?;
+    context.set(list, "tooltipUI", &tooltip)
 }
 
 fn geometry(context: &mut Context<'_, '_>, max_width: f64, max_height: f64) -> Result<[f64; 4]> {
@@ -669,50 +706,46 @@ fn geometry(context: &mut Context<'_, '_>, max_width: f64, max_height: f64) -> R
     ])
 }
 
-type ActionGroup = (
-    &'static str,
-    &'static str,
-    &'static [(&'static str, Action)],
-);
+type ActionGroup = (&'static str, &'static str, &'static [Action]);
 
 fn action_groups() -> [ActionGroup; 4] {
     [
         (
             "This session",
-            "Enable late saves a profile. Load enabled applies eligible profiles now. Disable late changes future environments.",
+            "Enable late saves a selection; Load enabled runs it. Disable late affects future sessions. Reload a profile needs upstream cleanup; otherwise reconnect.",
             &[
-                ("Enable late", Action::Enable),
-                ("Disable late", Action::Disable),
-                ("Load enabled", Action::Load),
-                ("Reload a profile", Action::Reload),
+                Action::Enable,
+                Action::Disable,
+                Action::Load,
+                Action::Reload,
             ],
         ),
         (
             "Next launch",
             "These controls change the game's native selection for its next normal launch. They do not load or unload running code.",
             &[
-                ("Startup enable", Action::StartupEnable),
-                ("Startup disable", Action::StartupDisable),
-                ("Restart game...", Action::Restart),
+                Action::StartupEnable,
+                Action::StartupDisable,
+                Action::Restart,
             ],
         ),
         (
             "Workshop",
             "Subscription and download deliver files. Enable and load installed mod IDs separately.",
             &[
-                ("Subscribe + download", Action::Add),
-                ("Download / update", Action::Download),
-                ("Open Workshop", Action::OpenWorkshop),
-                ("Cancel query", Action::Cancel),
+                Action::Add,
+                Action::Download,
+                Action::OpenWorkshop,
+                Action::Cancel,
             ],
         ),
         (
             "Diagnostics",
             "Inspect actual runtime and patch state. Reload and native patch activation have separate safety requirements.",
             &[
-                ("Patch diagnostics", Action::PatchDiagnostics),
-                ("Apply approved patches", Action::ApplyApprovedPatches),
-                ("Help & guides", Action::Help),
+                Action::PatchDiagnostics,
+                Action::ApplyApprovedPatches,
+                Action::Help,
             ],
         ),
     ]
@@ -777,6 +810,9 @@ fn action_tooltip(action: Action) -> &'static str {
         Action::Close => {
             "Close this manager without changing saved selections. Escape works on keyboard; the native B action appears when using a controller."
         }
+        Action::GuideScrollUp | Action::GuideScrollDown => {
+            "Scroll the selected workflow. You can also use its native scrollbar or the mouse wheel."
+        }
         _ => "",
     }
 }
@@ -808,19 +844,19 @@ fn feedback(
     kind: Feedback,
     text: &str,
 ) -> Result<()> {
-    let color = match kind {
-        Feedback::Info => "0.8,0.85,0.95",
-        Feedback::Working => "0.55,0.8,1",
-        Feedback::Success => "0.5,0.95,0.6",
-        Feedback::Warning => "1,0.8,0.35",
-        Feedback::Error => "1,0.5,0.5",
-    };
-    let escaped = crate::diagnostic_text::rich(&format!("{}: {text}", kind.label()));
+    let color = feedback_color(kind);
+    let escaped = presentation::plain(context, &browser.status, text, true)?;
+    let no = context.boolean(false)?;
+    context.set(&browser.status, "luabuddyStructured", &no)?;
     field_text(
         context,
         &browser.status,
         "text",
-        &format!("<RGB:{color}> {escaped}"),
+        &format!(
+            "<RGB:{color}> {} <LINE> <RGB:{}> {escaped}",
+            kind.label(),
+            presentation::TEXT
+        ),
     )?;
     paginate(context, &browser.status)?;
     update_buttons(context, browser)
@@ -1020,11 +1056,7 @@ fn joypad(context: &mut Context<'_, '_>, action: Action, args: &[Value]) -> Resu
 }
 
 fn help(context: &mut Context<'_, '_>, session: u64) -> Result<()> {
-    message(
-        context,
-        session,
-        "LuaBuddy guides\n\nChoose a loading path\n1. Open Installed and select the exact mod ID. Read This game, Late selection, and Next launch separately.\n2. Use This session for eligible client/shared Lua in multiplayer. Use Next launch for ordinary native startup, server code, maps, or other native assets.\n3. A Steam subscription only delivers files. It does not select or load the mod.\n\nTest an installed or local mod\n1. Install a valid local mod under Zomboid/mods, or register its root with luabuddy select --profiles-dir DIR --mod ID --path ROOT. ROOT contains common/ and the version folders.\n2. If testing only late loading, use Next launch > Startup disable first when that mod is natively selected. Preserve other selections. Reconnect or restart if it is already running natively.\n3. Choose This session > Enable late, then Load enabled. Apply or discard pending Options edits first.\n4. Confirm a green result and Runtime: loaded for this mod. Attention or Failed gives the actual remaining state. Test its controls in game.\n5. Choose Disable late to stop future late activation, then reconnect. Running code cannot generally be unloaded. Source files and settings stay intact.\n\nUse a mod for one game launch\n1. Queue it before launching with luabuddy select --profiles-dir DIR --mod ID --path ROOT --once. It must not duplicate a persistent late selection.\n2. Start the game normally. The registration is consumed for that process and remains available across reconnects. Native/server and late-loading eligibility still apply.\n3. The next new game process has no temporary selection. Original source files are never deleted. Cancel an unused queue with luabuddy deselect --profiles-dir DIR --mod ID --once.\n4. A queue added after the game process initialized is reserved for the next process. Persistent native startup selections are independent; disable one separately if it would keep loading the mod.\n\nInstall from Workshop\n1. Search Workshop or inspect Subscribed. Open Workshop shows the author's original page.\n2. Choose Subscribe + download or Download / update and wait for verified installation.\n3. Open Installed, select the actual mod ID and inspect required mods and eligibility.\n4. Choose one loading path above. Confirm the result and Runtime state. Disable the corresponding selection to undo activation for future sessions.\n\nReload a cooperating profile\n1. Apply pending Options changes. Use Reload a profile and choose an installed ID or type a custom one.\n2. The profile must already be locally loaded and declare upstream cleanup. Active dependents or unsupported cleanup are refused.\n3. Inspect the result. If reconnect is required, keep the current game until ready and reconnect normally. Reload is not a general mod uninstaller.\n\nTroubleshoot a missing feature\n1. Check Runtime, selection lifetime, dependencies, native compatibility and activation limits for the selected mod.\n2. Read the action result. Loaded client/shared Lua does not supply missing server code or every native asset.\n3. Use Diagnostics > Patch diagnostics for native extension state. Apply approved patches retries approved code only.\n4. Read LuaBuddy/diagnostics.json in the game cache and the game's console log for the exact profile failure.\n\nNavigation\nMouse and keyboard use the native controls; Escape closes. Native controller focus shows B to close. Left and right bumpers switch action tabs; the D-pad and A use normal native focus and activation.",
-    )
+    guides::open(context, session)
 }
 
 fn open(context: &mut Context<'_, '_>, session: u64) -> Result<()> {
@@ -1173,10 +1205,18 @@ fn open(context: &mut Context<'_, '_>, session: u64) -> Result<()> {
     let list_width = (w * 0.40).max(220.0);
     let list_args = numbers(context, &[12.0, list_y, list_width, list_height])?;
     let list = construct(context, "ISScrollingListBox", &list_args)?;
-    let item_height = context.number(control_height)?;
-    context.set(&list, "itemheight", &item_height)?;
+    let font = context.jni(|env| {
+        let value = env
+            .get_static_field("zombie/ui/UIFont", "Medium", "Lzombie/ui/UIFont;")?
+            .l()?;
+        env.new_global_ref(value)
+            .map(|reference| Value(Some(reference)))
+    })?;
+    let row_padding = context.number(6.0)?;
+    context.invoke(&list, "setFont", &[font, row_padding])?;
     context.set(&list, "drawBorder", &yes)?;
     child(context, &panel, &list)?;
+    bounded_list_tooltip(context, &list)?;
     let select_callback = callback(context, session, Action::Select)?;
     context.invoke(
         &list,
@@ -1197,6 +1237,8 @@ fn open(context: &mut Context<'_, '_>, session: u64) -> Result<()> {
     context.set(&details, "autosetheight", &no)?;
     context.set(&details, "clip", &yes)?;
     child(context, &panel, &details)?;
+    let margins = numbers(context, &[16.0, 12.0, 28.0, 22.0])?;
+    context.invoke(&details, "setMargins", &margins)?;
     context.invoke(&details, "addScrollBars", std::slice::from_ref(&yes))?;
     let status_args = numbers(context, &[12.0, status_y, w - 24.0, status_height])?;
     let status = construct(context, "ISRichTextPanel", &status_args)?;
@@ -1223,7 +1265,7 @@ fn open(context: &mut Context<'_, '_>, session: u64) -> Result<()> {
         context.set(&page, "background", &no)?;
         let width = (w - 48.0 - 8.0 * (actions.len() - 1) as f64) / actions.len() as f64;
         let mut row = Vec::new();
-        for (index, (title, action)) in actions.iter().enumerate() {
+        for (index, action) in actions.iter().enumerate() {
             let control = button(
                 context,
                 session,
@@ -1234,7 +1276,8 @@ fn open(context: &mut Context<'_, '_>, session: u64) -> Result<()> {
                     width,
                     control_height,
                 ],
-                title,
+                presentation::action_label(*action)
+                    .expect("Every declared action group has a label"),
                 *action,
             )?;
             row.push(control.clone());
@@ -1369,12 +1412,45 @@ fn open(context: &mut Context<'_, '_>, session: u64) -> Result<()> {
 }
 
 fn rich(context: &mut Context<'_, '_>, panel: &Value, text: &str) -> Result<()> {
-    let escaped = crate::diagnostic_text::rich(text);
+    let structured = serde_json::from_str::<serde_json::Value>(text)
+        .is_ok_and(|value| value.is_object() || value.is_array());
+    let flag = context.boolean(structured)?;
+    context.set(panel, "luabuddyStructured", &flag)?;
+    let escaped = if structured {
+        crate::diagnostic_text::rich(text)
+    } else {
+        presentation::plain(context, panel, text, true)?
+    };
+    if structured {
+        context.set(panel, "maxLineWidth", &Value::default())?;
+    }
     field_text(context, panel, "text", &escaped)?;
     paginate(context, panel)
 }
 
 fn paginate(context: &mut Context<'_, '_>, panel: &Value) -> Result<()> {
+    let structured = context.get(panel, "luabuddyStructured")?;
+    if !context.truth(&structured)? {
+        let width = presentation::reading_width(context, panel)?;
+        let width = context.number(width)?;
+        context.set(panel, "maxLineWidth", &width)?;
+        context.invoke(panel, "paginate", &[])?;
+        let width = first(context.invoke(panel, "getScrollAreaWidth", &[])?);
+        context.invoke(panel, "setScrollWidth", &[width])?;
+        let zero = context.number(0.0)?;
+        context.invoke(panel, "setXScroll", &[zero])?;
+        let horizontal = context.get(panel, "hscroll")?;
+        if !horizontal.is_nil() {
+            let no = context.boolean(false)?;
+            context.invoke(&horizontal, "setVisible", &[no])?;
+        }
+        return Ok(());
+    }
+    let horizontal = context.get(panel, "hscroll")?;
+    if !horizontal.is_nil() {
+        let yes = context.boolean(true)?;
+        context.invoke(&horizontal, "setVisible", &[yes])?;
+    }
     context.invoke(panel, "paginate", &[])?;
     let lines = context.get(panel, "lines")?;
     let positions = context.get(panel, "lineX")?;
@@ -1597,29 +1673,7 @@ fn browser_action(
             details(context, browser)?;
             update_buttons(context, browser)
         }
-        Action::OpenWorkshop => {
-            let item = selected(context, browser)?;
-            let id = item
-                .workshop
-                .ok_or("This local mod has no verified Workshop page.")?;
-            let url = context.string(&format!(
-                "https://steamcommunity.com/sharedfiles/filedetails/?id={}",
-                id.get()
-            ))?;
-            let overlay = first(context.call_global("isSteamOverlayEnabled", &[])?);
-            let opener = if context.truth(&overlay)? {
-                "activateSteamOverlayToWebPage"
-            } else {
-                "openUrl"
-            };
-            context.call_global(opener, &[url])?;
-            feedback(
-                context,
-                browser,
-                Feedback::Success,
-                "Opened the selected item's original Workshop page.",
-            )
-        }
+        Action::OpenWorkshop => workshop_link::open(context, session, browser),
         Action::Previous | Action::Next => {
             if browser.search_changed.is_some() {
                 return set_status(
@@ -1867,7 +1921,7 @@ fn render(context: &mut Context<'_, '_>, browser: &mut Browser) -> Result<()> {
                 .map(ModId::as_str)
                 .unwrap_or("Workshop item"),
         )?;
-        let tooltip = context.string(&format!(
+        let tooltip_text = format!(
             "{}\nMod ID: {}\n{}",
             item.title,
             item.id
@@ -1875,7 +1929,9 @@ fn render(context: &mut Context<'_, '_>, browser: &mut Browser) -> Result<()> {
                 .map(ModId::as_str)
                 .unwrap_or("Workshop item"),
             item.source
-        ))?;
+        );
+        let tooltip_text = presentation::tooltip(context, &tooltip_text, false)?;
+        let tooltip = context.string(&tooltip_text)?;
         context.invoke(&browser.list, "addItem", &[title, id, tooltip])?;
     }
     browser.selected = usize::MAX;
@@ -1899,42 +1955,44 @@ fn details(context: &mut Context<'_, '_>, browser: &mut Browser) -> Result<()> {
         context.invoke(&browser.details, "setYScroll", &[top])?;
     }
     browser.selected = index;
-    let mut lines = vec![item.title, "".into(), "MOD INFORMATION".into()];
+    let mut document = presentation::Document::default();
+    document.title(&item.title);
+    document.section("Mod information");
     if let Some(reason) = &item.unavailable_reason {
         if let Some(id) = item.workshop {
-            lines.push(format!("Workshop ID: {}", id.get()));
+            document.field("Workshop ID", id.get().to_string(), presentation::TEXT);
         }
-        lines.push(
-            "Details unavailable. No subscription or download action is permitted for this result."
-                .to_owned(),
-        );
-        lines.push(reason.clone());
-        return rich(context, &browser.details, &lines.join("\n\n"));
+        document.field("Availability", "Details unavailable", presentation::WARNING);
+        document.text("No subscription or download action is permitted for this result.");
+        document.text(reason);
+        return presentation::set_document(context, &browser.details, &document);
     }
     if let Some(id) = &item.id {
-        lines.push(format!("Mod ID: {id}"));
-        lines.push(format!(
-            "Mod version: {}",
-            item.mod_version.as_deref().unwrap_or("not reported")
-        ));
-        lines.push(format!(
-            "Minimum game version: {}",
+        document.field("Mod ID", id.to_string(), presentation::TEXT);
+        document.field(
+            "Mod version",
+            item.mod_version.as_deref().unwrap_or("not reported"),
+            presentation::TEXT,
+        );
+        document.field(
+            "Minimum game version",
             item.minimum_game_version
                 .as_deref()
-                .unwrap_or("not specified")
-        ));
-        lines.push(format!(
-            "Maximum game version: {}",
+                .unwrap_or("not specified"),
+            presentation::TEXT,
+        );
+        document.field(
+            "Maximum game version",
             item.maximum_game_version
                 .as_deref()
-                .unwrap_or("not specified")
-        ));
+                .unwrap_or("not specified"),
+            presentation::TEXT,
+        );
         let profiles = configured(context)?;
         let enabled = profiles
             .iter()
             .find(|profile| &profile.id == id)
-            .map(|profile| profile.enabled)
-            .unwrap_or(false);
+            .is_some_and(|profile| profile.enabled);
         let state = context.global("LuaBuddy")?;
         let loaded = if state.is_nil() {
             Value::default()
@@ -1942,57 +2000,85 @@ fn details(context: &mut Context<'_, '_>, browser: &mut Browser) -> Result<()> {
             let mods = context.get(&state, "mods")?;
             context.get(&mods, id.as_str())?
         };
-        lines.push("\nLOADING STATE".into());
-        lines.push(format!(
-            "Late selection: {}",
-            if enabled { "enabled" } else { "disabled" }
-        ));
+        document.section("Loading state");
+        document.field(
+            "Late selection",
+            if enabled { "Enabled" } else { "Disabled" },
+            if enabled {
+                presentation::SUCCESS
+            } else {
+                presentation::MUTED
+            },
+        );
         if crate::selections::temporary(context, id)? {
-            lines.push("Selection lifetime: this game process, including reconnects. The temporary registration is already removed; the source mod is preserved.".to_owned());
+            document.field(
+                "Selection lifetime",
+                "This game process, including reconnects",
+                presentation::ACTION,
+            );
+            document.text(
+                "The temporary registration is already removed. The source mod is preserved.",
+            );
         }
         if crate::selections::queued(context)?
             .iter()
             .any(|profile| &profile.id == id)
         {
-            lines.push("Next LuaBuddy launch: queued for one game process, including reconnects. This does not activate it in the current process or select native startup.".to_owned());
+            document.field(
+                "Next LuaBuddy launch",
+                "Queued for one game process, including reconnects",
+                presentation::WARNING,
+            );
+            document
+                .text("This does not activate it in the current process or select native startup.");
         }
         let startup = crate::activation::selected_next_startup(context)?;
-        lines.push(format!(
-            "Next normal launch: {}",
-            if startup.contains(id) {
-                "enabled"
+        let selected = startup.contains(id);
+        document.field(
+            "Next normal launch",
+            if selected { "Enabled" } else { "Disabled" },
+            if selected {
+                presentation::SUCCESS
             } else {
-                "disabled"
-            }
-        ));
+                presentation::MUTED
+            },
+        );
         if !item.native_startup_available {
-            lines.push("Native startup discovery does not expose this flat Workshop layout. A reviewed client/shared profile can still restore eligible Lua.".to_owned());
+            document.text("Native startup discovery does not expose this flat Workshop layout. A reviewed client/shared profile can still restore eligible Lua.");
         }
         let native_active = game::active(context)?.contains(id);
         if native_active {
-            lines.push(
-                "Native game/server selection: active. LuaBuddy does not own this activation."
-                    .into(),
+            document.field(
+                "Native game/server selection",
+                "Active. LuaBuddy does not own this activation.",
+                presentation::SUCCESS,
             );
         }
-        lines.push(format!(
-            "Runtime: {}",
-            if native_active {
-                "native-loaded".to_owned()
-            } else if loaded.is_nil() {
-                if enabled {
-                    "selected, waiting for Load enabled or a new environment".to_owned()
-                } else {
-                    "not loaded by LuaBuddy".to_owned()
-                }
+        let runtime = if native_active {
+            "native-loaded".into()
+        } else if loaded.is_nil() {
+            if enabled {
+                "Selected, waiting for Load enabled or a new environment".into()
             } else {
-                context.text(&loaded)?
+                "Not loaded by LuaBuddy".into()
             }
-        ));
+        } else {
+            context.text(&loaded)?
+        };
+        let color = if native_active || runtime == "loaded" {
+            presentation::SUCCESS
+        } else if runtime.starts_with("failed:") {
+            presentation::ERROR
+        } else if enabled || runtime.starts_with("restart-required:") {
+            presentation::WARNING
+        } else {
+            presentation::MUTED
+        };
+        document.field("Runtime", runtime, color);
     }
     if let Some(id) = item.workshop {
-        lines.push("\nWORKSHOP DELIVERY".into());
-        lines.push(format!("Workshop ID: {}", id.get()));
+        document.section("Workshop delivery");
+        document.field("Workshop ID", id.get().to_string(), presentation::TEXT);
         if let Some(updated) = item.workshop_updated_at {
             let timestamp = context.jni(|env| {
                 let value = env
@@ -2006,89 +2092,114 @@ fn details(context: &mut Context<'_, '_>, browser: &mut Browser) -> Result<()> {
                 env.new_global_ref(value)
                     .map(|reference| Value(Some(reference)))
             })?;
-            lines.push(format!("Workshop updated: {}", context.text(&timestamp)?));
+            document.field(
+                "Workshop updated",
+                context.text(&timestamp)?,
+                presentation::TEXT,
+            );
         }
-        lines.push(match item.size_bytes {
-            Some(bytes) => format!("Content size: {bytes} bytes"),
-            None => "Content size: not reported".to_owned(),
-        });
+        document.field(
+            "Content size",
+            item.size_bytes
+                .map(|bytes| format!("{bytes} bytes"))
+                .unwrap_or_else(|| "Not reported".into()),
+            presentation::TEXT,
+        );
         if let Ok(steam) = &browser.steam {
-            let state = steam.item_state(id).map_err(|e| e.to_string())?;
-            lines.push(format!(
-                "Delivery: {}{}{}{}",
+            let state = steam.item_state(id).map_err(|error| error.to_string())?;
+            document.field(
+                "Subscription",
                 if state.subscribed {
-                    "subscribed"
+                    "Subscribed"
                 } else {
-                    "not subscribed"
+                    "Not subscribed"
+                },
+                if state.subscribed {
+                    presentation::SUCCESS
+                } else {
+                    presentation::MUTED
+                },
+            );
+            document.field(
+                "Installation",
+                if state.installed {
+                    "Installed"
+                } else {
+                    "Not installed"
                 },
                 if state.installed {
-                    ", installed"
+                    presentation::SUCCESS
                 } else {
-                    ", not installed"
+                    presentation::MUTED
                 },
-                if state.downloading || state.download_pending {
-                    ", downloading"
-                } else {
-                    ""
-                },
-                if state.needs_update {
-                    ", update required"
-                } else {
-                    ""
-                }
-            ));
+            );
+            if state.downloading || state.download_pending {
+                document.field("Download", "In progress", presentation::WARNING);
+            }
+            if state.needs_update {
+                document.field("Update", "Required", presentation::WARNING);
+            }
         }
     }
-    lines.push("\nREQUIREMENTS & ACTIVATION".into());
-    lines.push(format!(
-        "Compatibility: {}",
-        if item.id.is_none() {
-            "inspect the installed mod identities for game-version compatibility"
-        } else if item.available {
-            "accepted by native metadata"
+    document.section("Requirements & activation");
+    let compatibility = if item.id.is_none() {
+        "Inspect the installed mod identities for game-version compatibility"
+    } else if item.available {
+        "Accepted by native metadata"
+    } else {
+        "Incompatible with the current game version"
+    };
+    document.field(
+        "Compatibility",
+        compatibility,
+        if item.available {
+            presentation::SUCCESS
         } else {
-            "incompatible with the current game version"
-        }
-    ));
+            presentation::WARNING
+        },
+    );
     if !item.required.is_empty() {
-        lines.push(format!(
-            "Required mods: {}",
+        document.field(
+            "Required mods",
             item.required
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
-                .join(", ")
-        ));
+                .join(", "),
+            presentation::TEXT,
+        );
     }
     if !item.workshop_dependencies.is_empty() {
-        lines.push(format!(
-            "Workshop dependencies: {}",
+        document.field(
+            "Workshop dependencies",
             item.workshop_dependencies
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
-                .join(", ")
-        ));
+                .join(", "),
+            presentation::TEXT,
+        );
     }
     if !item.activation_explanation.is_empty() {
-        lines.push(item.activation_explanation);
+        document.text(item.activation_explanation);
     }
-    lines.push(format!("\nSOURCE\n{}", item.source));
-    lines.push(format!(
-        "\nABOUT THIS MOD\n{}",
-        mod_description(&item.description)
-    ));
-    rich(context, &browser.details, &lines.join("\n"))
+    document.section("Source");
+    document.text(item.source);
+    document.section("About this mod");
+    for paragraph in presentation::paragraphs(&mod_description(&item.description)) {
+        document.text(paragraph);
+        document.text("");
+    }
+    presentation::set_document(context, &browser.details, &document)
 }
 
 fn mod_description(text: &str) -> String {
     let mut result = String::new();
     let mut remaining = text;
-    let mut image = false;
+    let mut links = Vec::<(String, usize)>::new();
+    let mut cell_closed = false;
     while let Some(start) = remaining.find('[') {
-        if !image {
-            result.push_str(&remaining[..start]);
-        }
+        result.push_str(&remaining[..start]);
         remaining = &remaining[start..];
         let Some(end) = remaining.find(']') else {
             break;
@@ -2098,34 +2209,72 @@ fn mod_description(text: &str) -> String {
         let name = tag.split('=').next().unwrap_or("");
         let recognized = match name {
             "img" => {
-                image = true;
-                result.push_str("[Image on original Workshop page]");
+                result.push_str("\n[Image on original Workshop page] ");
                 true
             }
             "/img" => {
-                image = false;
+                result.push('\n');
+                true
+            }
+            "url" => {
+                let target = raw
+                    .split_once('=')
+                    .map(|(_, target)| target.trim_matches([' ', '\"', '\'']))
+                    .unwrap_or("");
+                links.push((target.to_owned(), result.len()));
+                true
+            }
+            "/url" => {
+                if let Some((target, start)) = links.pop()
+                    && !target.is_empty()
+                    && result.get(start..).map(str::trim) != Some(target.as_str())
+                {
+                    result.push_str(" (");
+                    result.push_str(&target);
+                    result.push(')');
+                }
                 true
             }
             "h1" | "h2" | "h3" | "/h1" | "/h2" | "/h3" | "list" | "/list" | "olist" | "/olist"
-            | "quote" | "/quote" | "code" | "/code" | "tr" | "/tr" => {
+            | "quote" | "/quote" | "code" | "/code" | "table" | "/table" => {
                 result.push('\n');
+                true
+            }
+            "tr" | "/tr" => {
+                cell_closed = false;
+                result.push('\n');
+                true
+            }
+            "td" | "th" => {
+                if cell_closed {
+                    result.push_str(" | ");
+                }
+                cell_closed = false;
+                true
+            }
+            "/td" | "/th" => {
+                cell_closed = true;
                 true
             }
             "*" => {
                 result.push_str("\n• ");
                 true
             }
-            "b" | "/b" | "i" | "/i" | "u" | "/u" | "s" | "/s" | "url" | "/url" | "spoiler"
-            | "/spoiler" | "table" | "/table" | "td" | "/td" => true,
+            "b" | "/b" | "i" | "/i" | "u" | "/u" | "s" | "/s" | "spoiler" | "/spoiler" => true,
             _ => false,
         };
-        if !recognized && !image {
+        if !recognized {
             result.push_str(&remaining[..=end]);
         }
         remaining = &remaining[end + 1..];
     }
-    if !image {
-        result.push_str(remaining);
+    result.push_str(remaining);
+    for (target, _) in links {
+        if !target.is_empty() {
+            result.push_str(" (");
+            result.push_str(&target);
+            result.push(')');
+        }
     }
     let result = result.trim();
     if result.is_empty() {
@@ -3099,6 +3248,17 @@ fn show(context: &mut Context<'_, '_>, session: u64, panel: &Value) -> Result<()
         let main = context.get(&class, "instance")?;
         if !main.is_nil() {
             let previous = context.get(&main, "modal")?;
+            if !previous.is_nil() && !context.same(&previous, panel)? {
+                reload::dismiss(context, &previous)?;
+                let entry = context.get(&previous, "entry")?;
+                if !entry.is_nil() {
+                    let focused = first(context.invoke(&entry, "isFocused", &[])?);
+                    if context.truth(&focused)? {
+                        context.set(panel, "luabuddyPreviousEntry", &entry)?;
+                    }
+                    context.invoke(&entry, "unfocus", &[])?;
+                }
+            }
             context.set(panel, "luabuddyPreviousModal", &previous)?;
             context.set(&main, "modal", panel)?;
             UI.with(|state| {
@@ -3121,7 +3281,7 @@ fn close(context: &mut Context<'_, '_>, panel: &Value) -> Result<()> {
     if !context.truth(&visible)? {
         return Ok(());
     }
-    dismiss_reload_picker(context, panel)?;
+    reload::dismiss(context, panel)?;
     let entry = context.get(panel, "entry")?;
     if !entry.is_nil() {
         context.invoke(&entry, "unfocus", &[])?;
@@ -3147,7 +3307,8 @@ fn restore_modal(context: &mut Context<'_, '_>, panel: &Value) -> Result<()> {
         return Ok(());
     }
     let current = context.get(&main, "modal")?;
-    if context.same(&current, panel)? {
+    let restore_keyboard = context.same(&current, panel)?;
+    if restore_keyboard {
         let previous = context.get(panel, "luabuddyPreviousModal")?;
         context.set(&main, "modal", &previous)?;
     }
@@ -3168,12 +3329,40 @@ fn restore_modal(context: &mut Context<'_, '_>, panel: &Value) -> Result<()> {
             }
         }
     }
+    if restore_keyboard {
+        let entry = context.get(panel, "luabuddyPreviousEntry")?;
+        let previous = context.get(panel, "luabuddyPreviousModal")?;
+        if !entry.is_nil() && !previous.is_nil() {
+            let visible = first(context.invoke(&previous, "getIsVisible", &[])?);
+            let controller = context.get(&previous, "joyfocus")?;
+            if context.truth(&visible)? && controller.is_nil() {
+                context.invoke(&entry, "focus", &[])?;
+            }
+        }
+    }
     Ok(())
+}
+
+fn top_keyboard_modal(context: &mut Context<'_, '_>, panel: &Value) -> Result<bool> {
+    let visible = first(context.invoke(panel, "getIsVisible", &[])?);
+    if !context.truth(&visible)? {
+        return Ok(false);
+    }
+    let class = context.global("MainOptions")?;
+    if class.is_nil() {
+        return Ok(true);
+    }
+    let main = context.get(&class, "instance")?;
+    if main.is_nil() {
+        return Ok(true);
+    }
+    let current = context.get(&main, "modal")?;
+    Ok(current.is_nil() || context.same(&current, panel)?)
 }
 
 fn destroy(context: &mut Context<'_, '_>, args: &[Value]) -> Result<()> {
     let panel = args.first().ok_or("Missing dialog receiver")?;
-    dismiss_reload_picker(context, panel)?;
+    reload::dismiss(context, panel)?;
     let entry = context.get(panel, "entry")?;
     if !entry.is_nil() {
         context.invoke(&entry, "unfocus", &[])?;
@@ -3190,13 +3379,19 @@ fn key(context: &mut Context<'_, '_>, _session: u64, args: &[Value]) -> Result<(
     if args.len() < 2 {
         return Ok(());
     }
+    if !top_keyboard_modal(context, &args[0])? {
+        return Ok(());
+    }
     let keyboard = context.global("Keyboard")?;
     let escape = context.get(&keyboard, "KEY_ESCAPE")?;
     if context.numeric(&args[1])? == context.numeric(&escape)? {
+        context.set(&args[0], "luabuddyConsumedKey", &args[1])?;
         close(context, &args[0])?;
+        return Ok(());
     }
     let enter = context.get(&keyboard, "KEY_RETURN")?;
     if context.numeric(&args[1])? == context.numeric(&enter)? {
+        context.set(&args[0], "luabuddyConsumedKey", &args[1])?;
         let entry = context.get(&args[0], "entry")?;
         if entry.is_nil() {
             let ignore = context.get(&args[0], "luabuddyIgnoreReturn")?;
@@ -3205,7 +3400,10 @@ fn key(context: &mut Context<'_, '_>, _session: u64, args: &[Value]) -> Result<(
                 context.set(&args[0], "luabuddyIgnoreReturn", &no)?;
                 return Ok(());
             }
-            let ok = context.get(&args[0], "ok")?;
+            let mut ok = context.get(&args[0], "ok")?;
+            if ok.is_nil() {
+                ok = context.get(&args[0], "yes")?;
+            }
             if !ok.is_nil() {
                 context.invoke(&args[0], "onClick", &[ok])?;
             }
@@ -3218,6 +3416,14 @@ fn consumed(context: &mut Context<'_, '_>, args: &[Value]) -> Result<bool> {
     if args.len() < 2 {
         return Ok(false);
     }
+    let handled = context.get(&args[0], "luabuddyConsumedKey")?;
+    if !handled.is_nil() && context.numeric(&handled)? == context.numeric(&args[1])? {
+        context.set(&args[0], "luabuddyConsumedKey", &Value::default())?;
+        return Ok(true);
+    }
+    if !top_keyboard_modal(context, &args[0])? {
+        return Ok(false);
+    }
     let keyboard = context.global("Keyboard")?;
     let escape = context.get(&keyboard, "KEY_ESCAPE")?;
     if context.numeric(&args[1])? == context.numeric(&escape)? {
@@ -3226,7 +3432,9 @@ fn consumed(context: &mut Context<'_, '_>, args: &[Value]) -> Result<bool> {
     let enter = context.get(&keyboard, "KEY_RETURN")?;
     let entry = context.get(&args[0], "entry")?;
     let ok = context.get(&args[0], "ok")?;
-    Ok(context.numeric(&args[1])? == context.numeric(&enter)? && (!entry.is_nil() || !ok.is_nil()))
+    let accept = context.get(&args[0], "yes")?;
+    Ok(context.numeric(&args[1])? == context.numeric(&enter)?
+        && (!entry.is_nil() || !ok.is_nil() || !accept.is_nil()))
 }
 
 fn message(context: &mut Context<'_, '_>, session: u64, text: &str) -> Result<()> {
@@ -3241,16 +3449,36 @@ fn message_guard(
 ) -> Result<()> {
     let structured = serde_json::from_str::<serde_json::Value>(text)
         .is_ok_and(|value| value.is_object() || value.is_array());
-    let (width, height) = if structured {
-        (900.0, 680.0)
-    } else if text.lines().count() > 12 {
-        (680.0, 600.0)
-    } else {
-        (680.0, 280.0)
-    };
-    let geometry = geometry(context, width, height)?;
+    if !structured {
+        let mut document = presentation::Document::default();
+        let outcome = [
+            Feedback::Info,
+            Feedback::Working,
+            Feedback::Success,
+            Feedback::Warning,
+            Feedback::Error,
+        ]
+        .into_iter()
+        .find_map(|kind| {
+            text.strip_prefix(&format!("{}: ", kind.label()))
+                .map(|body| (kind, body))
+        });
+        let body = if let Some((kind, body)) = outcome {
+            document.heading(kind.label(), feedback_color(kind));
+            body
+        } else {
+            document.title("LuaBuddy");
+            text
+        };
+        for paragraph in presentation::paragraphs(body) {
+            document.instruction(paragraph);
+            document.text("");
+        }
+        return document_message(context, session, &document, ignore_return);
+    }
+    let geometry = geometry(context, 900.0, 680.0)?;
     let mut args = numbers(context, &geometry)?;
-    args.push(context.string(&crate::diagnostic_text::rich(text))?);
+    args.push(context.string("")?);
     args.push(context.boolean(false)?);
     let panel = construct(context, "ISModalRichText", &args)?;
     opaque(context, &panel)?;
@@ -3261,165 +3489,90 @@ fn message_guard(
     let yes = context.boolean(true)?;
     context.invoke(&text_panel, "addScrollBars", std::slice::from_ref(&yes))?;
     context.set(&text_panel, "clip", &yes)?;
-    paginate(context, &text_panel)?;
+    rich(context, &text_panel, text)?;
     show(context, session, &panel)
 }
 
-fn reload_prompt(context: &mut Context<'_, '_>, session: u64) -> Result<()> {
-    require_clean_options(context)?;
-    let profiles = configured(context)?;
-    let installed = installed_items(context)?;
-    let native = game::active(context)?;
-    let state = context.global("LuaBuddy")?;
-    let statuses = context.get(&state, "mods")?;
-    let mut choices = BTreeMap::new();
-    for item in installed {
-        if let Some(id) = item.id {
-            choices.insert(id, item.title);
-        }
+fn feedback_color(kind: Feedback) -> &'static str {
+    match kind {
+        Feedback::Info | Feedback::Working => presentation::ACTION,
+        Feedback::Success => presentation::SUCCESS,
+        Feedback::Warning => presentation::WARNING,
+        Feedback::Error => presentation::ERROR,
     }
-    for profile in &profiles {
-        choices
-            .entry(profile.id.clone())
-            .or_insert_with(|| profile.id.to_string());
+}
+
+fn notice(
+    context: &mut Context<'_, '_>,
+    session: u64,
+    title: &str,
+    reason: &str,
+    next: &str,
+    ignore_return: bool,
+) -> Result<()> {
+    notice_result(
+        context,
+        session,
+        Feedback::Warning,
+        title,
+        reason,
+        next,
+        ignore_return,
+    )
+}
+
+fn notice_result(
+    context: &mut Context<'_, '_>,
+    session: u64,
+    kind: Feedback,
+    title: &str,
+    reason: &str,
+    next: &str,
+    ignore_return: bool,
+) -> Result<()> {
+    let mut document = presentation::Document::default();
+    document.heading(title, feedback_color(kind));
+    document.section("Reason");
+    for paragraph in presentation::paragraphs(&reason.replace("; ", ";\n")) {
+        document.text(paragraph);
     }
-    let geometry = geometry(context, 620.0, 270.0)?;
-    let mut args = numbers(context, &geometry)?;
-    args.push(context.string("Select an installed mod or enter a custom mod ID to reload.")?);
+    if !next.is_empty() {
+        document.section("Next step");
+        document.instruction(next);
+    }
+    document_message(context, session, &document, ignore_return)
+}
+
+fn document_message(
+    context: &mut Context<'_, '_>,
+    session: u64,
+    document: &presentation::Document,
+    ignore_return: bool,
+) -> Result<()> {
+    let [x, y, width, height] = geometry(context, 760.0, 560.0)?;
+    let mut args = numbers(context, &[x, y, width, height])?;
     args.push(context.string("")?);
-    args.push(Value::default());
-    args.push(callback(context, session, Action::ReloadSubmit)?);
-    let panel = construct(context, "ISTextBox", &args)?;
-    initialise(context, &panel)?;
+    args.push(context.boolean(false)?);
+    let panel = construct(context, "ISModalRichText", &args)?;
     opaque(context, &panel)?;
-    let prerender = context.index(&panel, "prerender")?;
-    context.set(&panel, "luabuddyModalPrerender", &prerender)?;
-    let prerender = callback(context, session, Action::ModalPrerender)?;
-    context.set(&panel, "prerender", &prerender)?;
-    let yes = context.boolean(true)?;
-    context.set(&panel, "noEmpty", &yes)?;
-    let width = first(context.invoke(&panel, "getWidth", &[])?);
-    let width = context.numeric(&width)?;
-    let entry = context.get(&panel, "entry")?;
-    let height = first(context.invoke(&entry, "getHeight", &[])?);
-    let height = context.numeric(&height)?;
-    let mut picker_args = numbers(context, &[11.0, 40.0, width - 22.0, height])?;
-    picker_args.push(panel.clone());
-    picker_args.push(callback(context, session, Action::ReloadSelect)?);
-    let picker = construct(context, "ISComboBox", &picker_args)?;
-    child(context, &panel, &picker)?;
-    let prompt = context.string("Choose an installed mod, or type below")?;
-    context.invoke(&picker, "addOption", &[prompt])?;
-    for (id, title) in choices {
-        let profile = profiles.iter().find(|profile| profile.id == id);
-        let status = context.get(&statuses, id.as_str())?;
-        let status = if status.is_nil() {
-            None
-        } else {
-            Some(context.text(&status)?)
-        };
-        let reason = if native.contains(&id) {
-            "Native-loaded. Use normal restart or reconnect."
-        } else if status.as_deref() == Some("loaded") {
-            if profile.is_some_and(|profile| profile.cleanup.is_some()) {
-                "Loaded with a cleanup contract. Reload checks still apply."
-            } else {
-                "Loaded without a cleanup contract. Reconnect to reload."
-            }
-        } else if status.is_some() {
-            "Not a healthy running profile. Inspect its status before reconnecting."
-        } else if profile.is_some_and(|profile| profile.enabled) {
-            "Selected but not loaded. Use Load new profiles when eligible."
-        } else {
-            "Installed but not selected. Enable and load it before reloading."
-        };
-        let label = context.string(&format!("{id} | {title}"))?;
-        let data = context.string(id.as_str())?;
-        let tooltip = context.string(reason)?;
-        context.invoke(&picker, "addOptionWithData", &[label, data, tooltip])?;
-    }
-    let tooltip = context.string("Selection copies the exact mod ID below. Only enabled, locally loaded profiles with explicit cooperative cleanup can reload.")?;
-    let tooltips = context.table()?;
-    context.set(&tooltips, "defaultTooltip", &tooltip)?;
-    context.set(&picker, "tooltip", &tooltips)?;
-    context.set(&panel, "luabuddyReloadPicker", &picker)?;
-    let tooltip = context.string("Enter an exact configured mod ID, including an ID not shown in the installed list. Reload still requires a healthy locally loaded profile and its cleanup contract.")?;
-    context.set(&entry, "tooltip", &tooltip)?;
-    let base = context.global("ISPanelJoypad")?;
-    for method in ["onJoypadDirUp", "onJoypadDirDown", "onJoypadDown"] {
-        let function = context.index(&base, method)?;
-        context.set(&panel, method, &function)?;
-    }
-    for (method, action) in [
-        ("onGainJoypadFocus", Action::ReloadJoypadGain),
-        ("onLoseJoypadFocus", Action::ReloadJoypadLose),
-        ("onJoypadDeactivate", Action::ReloadJoypadLose),
-    ] {
-        let function = callback(context, session, action)?;
-        context.set(&panel, method, &function)?;
-    }
-    context.invoke(&panel, "clearJoypadButtonsList", &[])?;
-    context.invoke(
-        &panel,
-        "insertNewLineOfButtons",
-        std::slice::from_ref(&picker),
-    )?;
-    context.invoke(
-        &panel,
-        "insertNewLineOfButtons",
-        std::slice::from_ref(&entry),
-    )?;
-    let accept = context.get(&panel, "yes")?;
-    let cancel = context.get(&panel, "no")?;
-    context.invoke(&panel, "insertNewLineOfButtons", &[accept, cancel])?;
-    show(context, session, &panel)?;
-    let enter = callback(context, session, Action::ReloadEnter)?;
-    context.set(&entry, "onCommandEntered", &enter)?;
-    let other_key = callback(context, session, Action::EntryKey)?;
-    context.set(&entry, "onOtherKey", &other_key)?;
-    context.invoke(&entry, "focus", &[])?;
-    Ok(())
-}
-
-fn reload_select(context: &mut Context<'_, '_>, args: &[Value]) -> Result<()> {
-    let panel = args.first().ok_or("Missing reload dialog")?;
-    let picker = args.get(1).ok_or("Missing installed profile picker")?;
-    let selected = context.get(picker, "selected")?;
-    let id = first(context.invoke(picker, "getOptionData", &[selected])?);
-    if !id.is_nil() {
-        let entry = context.get(panel, "entry")?;
-        context.invoke(&entry, "setText", &[id])?;
-        context.invoke(&entry, "focus", &[])?;
-    }
-    Ok(())
-}
-
-fn reload_focus(context: &mut Context<'_, '_>, args: &[Value], gain: bool) -> Result<()> {
-    let panel = args.first().ok_or("Missing reload dialog")?;
-    let base = context.global("ISPanelJoypad")?;
-    let function = context.index(
-        &base,
-        if gain {
-            "onGainJoypadFocus"
-        } else {
-            "onLoseJoypadFocus"
-        },
-    )?;
-    context.call(&function, args)?;
-    if gain {
-        let entry = context.get(panel, "entry")?;
-        context.invoke(&entry, "unfocus", &[])?;
-        context.invoke(panel, "setJoypadFocusTopLeft", &args[1..])?;
-        let accept = context.get(panel, "yes")?;
-        let cancel = context.get(panel, "no")?;
-        context.invoke(panel, "setISButtonForA", &[accept])?;
-        context.invoke(panel, "setISButtonForB", &[cancel])?;
-    } else {
-        context.invoke(panel, "clearISButtons", &[])?;
-        context.invoke(panel, "clearJoypadFocus", &args[1..])?;
-        dismiss_reload_picker(context, panel)?;
-    }
-    Ok(())
+    initialise(context, &panel)?;
+    let flag = context.boolean(ignore_return)?;
+    context.set(&panel, "luabuddyIgnoreReturn", &flag)?;
+    let text = context.get(&panel, "chatText")?;
+    let margins = numbers(context, &[18.0, 16.0, 28.0, 20.0])?;
+    context.invoke(&text, "setMargins", &margins)?;
+    presentation::set_document(context, &text, document)?;
+    let contents = first(context.invoke(&text, "getScrollHeight", &[])?);
+    let target = (context.numeric(&contents)? + 48.0).clamp(180.0, height);
+    let target_value = context.number(target)?;
+    context.invoke(&panel, "setHeight", &[target_value])?;
+    context.invoke(&panel, "ignoreHeightChange", &[])?;
+    let center = context.number(y + (height - target) / 2.0)?;
+    context.invoke(&panel, "setY", &[center])?;
+    context.invoke(&panel, "updateButtons", &[])?;
+    let text_height = context.number(target - 46.0)?;
+    context.invoke(&text, "setHeight", &[text_height])?;
+    show(context, session, &panel)
 }
 
 fn opaque(context: &mut Context<'_, '_>, panel: &Value) -> Result<()> {
@@ -3451,51 +3604,6 @@ fn modal_prerender(context: &mut Context<'_, '_>, args: &[Value]) -> Result<()> 
     let original = context.get(panel, "luabuddyModalPrerender")?;
     context.call(&original, std::slice::from_ref(panel))?;
     Ok(())
-}
-
-fn dismiss_reload_picker(context: &mut Context<'_, '_>, panel: &Value) -> Result<()> {
-    let picker = context.get(panel, "luabuddyReloadPicker")?;
-    if !picker.is_nil() {
-        let popup = context.get(&picker, "popup")?;
-        if !popup.is_nil() {
-            let current = context.get(&popup, "parentCombo")?;
-            if context.same(&current, &picker)? {
-                context.invoke(&popup, "removeFromUIManager", &[])?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn reload_submit(
-    context: &mut Context<'_, '_>,
-    session: u64,
-    args: &[Value],
-    enter: bool,
-) -> Result<()> {
-    let panel = if enter {
-        let entry = args.first().ok_or("Missing reload entry")?;
-        context.get(entry, "parent")?
-    } else {
-        let button = args.get(1).ok_or("Missing reload button")?;
-        let internal = context.get(button, "internal")?;
-        if context.text(&internal)? != "OK" {
-            return Ok(());
-        }
-        context.get(button, "parent")?
-    };
-    let submitted = context.get(&panel, "luabuddySubmitted")?;
-    if context.truth(&submitted)? {
-        return Ok(());
-    }
-    let entry = context.get(&panel, "entry")?;
-    let text = first(context.invoke(&entry, "getText", &[])?);
-    let id = ModId::new(context.text(&text)?).map_err(|e| e.to_string())?;
-    let yes = context.boolean(true)?;
-    context.set(&panel, "luabuddySubmitted", &yes)?;
-    close(context, &panel)?;
-    let result = runtime::apply(context, session, Operation::Reload(id));
-    message_guard(context, session, &result.unwrap_or_else(|e| e), enter)
 }
 
 fn patch_diagnostics(context: &mut Context<'_, '_>, session: u64, retry: bool) -> Result<()> {
@@ -3601,7 +3709,7 @@ mod tests {
         assert!(description.contains("Use the original"));
         assert!(description.contains("\n• First\n• Second"));
         assert!(description.ends_with("[B42]中文"));
-        assert!(!description.contains("banner.png"));
+        assert!(description.contains("https://example.test/banner.png"));
         assert!(description.contains("[Image on original Workshop page]"));
     }
 
@@ -3612,5 +3720,28 @@ mod tests {
         assert!(rendered.contains("&lt;RGB:1,0,0&gt;literal text"));
         assert!(rendered.contains("[unfinished"));
         assert!(!rendered.contains("<RGB:1,0,0>"));
+    }
+
+    #[test]
+    fn workshop_description_retains_link_targets_images_and_table_cells() {
+        let description = mod_description(
+            "[url=https://Example.test/docs?q=1&b=2]Read docs[/url][table][tr][td]Speed[/td][td]42[/td][/tr][tr][td]Weight[/td][td]5 kg[/td][/tr][/table][img]https://Example.test/banner.png[/img][B42]中文",
+        );
+        let visible = description.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            visible,
+            "Read docs (https://Example.test/docs?q=1&b=2) Speed | 42 Weight | 5 kg [Image on original Workshop page] https://Example.test/banner.png [B42]中文"
+        );
+    }
+
+    #[test]
+    fn malformed_workshop_markup_keeps_literal_text_and_unclosed_targets() {
+        let description = mod_description(
+            "literal | [tr][td]A[/td][td]B[/td][/tr][url=https://example.test]tail [unfinished",
+        );
+        assert!(description.starts_with("literal | "));
+        assert!(description.contains("A | B"));
+        assert!(description.contains("tail [unfinished"));
+        assert!(description.ends_with("(https://example.test)"));
     }
 }
