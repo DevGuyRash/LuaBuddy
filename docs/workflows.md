@@ -1,6 +1,6 @@
 # Use LuaBuddy for common tasks
 
-Open **Options > Mods > LuaBuddy > Manage mods**. The manager separates actions for **This session**, **Next launch**, **Workshop**, and **Diagnostics**. Use **Help & guides** for the in-game instructions. Apply or discard pending Options edits before changing a selection.
+Open **Options > Mods > LuaBuddy > Manage mods**. The manager separates actions for **This session**, **Next launch**, **Workshop**, and **Diagnostics**. In **Help & guides**, choose a workflow to see its goal, steps, result check, and undo instructions. Action names use the same accent color in instructions and tooltips. Apply or discard pending Options edits before changing a selection.
 
 ## Test an installed local mod
 
@@ -63,15 +63,18 @@ luabuddy deselect --profiles-dir /path/to/profiles --mod Example --once
 6. For eligible client or shared Lua, choose **This session > Enable late**, then **Load enabled**. Otherwise use **Next launch > Startup enable** and restart normally.
 7. Check the reported runtime or next-launch state. Selecting a dependency or downloading content alone does not activate it.
 
+**Open Workshop** requests the original item through the game's dedicated Workshop overlay action. When the overlay is unavailable, LuaBuddy uses the game's desktop-browser utility. If the game cannot start a browser, the dialog offers **Copy link**. A handoff message confirms the request, rather than claiming that a web page rendered successfully.
+
 Cancelling observation can leave Steam downloading when the native API cannot cancel the request. Disabling a LuaBuddy selection does not unsubscribe or delete Workshop content.
 
 ## Reload a cooperating profile
 
 1. Finish or discard pending Options edits.
-2. Choose **Reload a profile** and pick an installed ID, or enter a custom ID.
-3. Read its runtime state and cleanup support. The profile must be loaded by LuaBuddy and declare an upstream cleanup callable.
-4. Submit the request. LuaBuddy validates and compiles the replacement before asking the old generation to clean up.
-5. Read the result. A refusal preserves the old generation. Uncertain cleanup or failed replacement requires a reconnect.
+2. Choose **Reload a profile**. Search the installed dropdown by name or ID, or type in the custom-ID field to see matching suggestions.
+3. Choose a suggestion or keep typing a custom ID. Matching is case insensitive where it identifies one known ID. Exact IDs take precedence. If different IDs differ only in case, choose the intended ID explicitly.
+4. Read its runtime state and cleanup support. The profile must be loaded by LuaBuddy and declare an upstream cleanup callable.
+5. Submit the request. LuaBuddy validates and compiles the replacement before asking the old generation to clean up.
+6. Read the result's reason and next step. A refusal preserves the old generation. Uncertain cleanup or failed replacement requires a reconnect.
 
 The installed list helps identify a mod. It does not make every installed mod reloadable. Native-loaded code and arbitrary third-party side effects cannot be safely unloaded by selecting a row. See [the cleanup contract](runtime.md#refresh-and-reload).
 
