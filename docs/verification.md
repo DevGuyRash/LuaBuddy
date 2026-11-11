@@ -51,7 +51,7 @@ The native aggregate runs these distinct consumers.
 | --- | --- |
 | Production `proof-native` mode | Real Kahlua callable identity, values, reentrancy, exceptions, scoped retirement, native UI mouse callback, synchronous/nested/queued owner-thread dispatch, and actual native Workshop notification routing without an account action. |
 | `proofs/metadata` | Actual identity, dependencies, availability, native symlink and flat-root discovery, cache recovery, translation parser/fallback/placeholders, callback ownership/removal, and generated diagnostic contents. |
-| `proofs/runtime` | The actual production library, copied immutably into a disposable fixture, through native events and its public Lua-facing operations. Covers cache/alias/phase behavior, refresh, reconnect, preflight, failure isolation, cleanup consent/refusal/quarantine, and scoped callbacks. |
+| `proofs/runtime` | The actual production library, copied immutably into a disposable fixture, through native events and its public Lua-facing operations. Covers cache/alias/phase behavior, refresh, reconnect, preflight, failure isolation, cleanup consent/refusal/quarantine, and scoped callbacks. Three additional fresh JVMs exercise one-launch claims, reconnect retention, a queue created after initialization, expiry, and unchanged persistent selections and source files. |
 | `proofs/activation` | Actual native dependency metadata and preference serialization, explicit next-startup selection, preserved unrelated IDs and map order, unchanged current/server activation, and centralized live eligibility. |
 | `proofs/steam` | Required native Steam symbols and rejection before an initialized host Steam context. No account mutation is performed. |
 | The selected runtime's `proof-patcher` mode | Real unrelated JVM targets, both compiled Rust extensions, deterministic shared-hook order, mutation/replacement, original exceptions, reference identity, nesting/concurrency, stale targets, and exact disable. The standalone `proofs/patcher` consumer also builds. |
@@ -90,10 +90,12 @@ Use disposable client caches, displays, profiles, and loopback servers. Keep the
 1. Install a clean package with no selected profiles through the real launcher override. Confirm the native manager appears after an ordinary launch.
 2. Exercise installed discovery, details, search, unavailable Workshop, already subscribed read-only content, pagination, genuine per-item failures, and repeated open/close.
 3. Drive actual controls with mouse and keyboard. Check focus, held Return, Escape, pending Options preservation, bounded dialogs, and controller navigation where hardware is available.
-4. Add supported selections through actual native controls. Inspect saved preferences and profile contents, including Unicode names, continued properties, and file permissions.
-5. Join an isolated ordinary-role multiplayer client to a loopback server with `Mods=`, `WorkshopItems=`, and `DoLuaChecksum=true`. Check affected integrations alone and with relevant Auto All/AllTheInfo combinations.
-6. Cover initial restoration, reconnect, runtime addition, repeated no-op refresh, supported cleanup replacement, refusal, syntax failure, and uncertain cleanup. Inspect actual controls and saved state.
-7. Stop only the owned client, server, and display. Remove their disposable caches. Retain selected logs/screenshots outside Git.
+4. Type without submitting in each browse view. Confirm Installed filters cached rows immediately, network views debounce, active scope stays visible, and stale queries cannot replace current results. Keep subscription and download operations separate from observational query cancellation.
+5. Check action groups, full workflow guides, upstream descriptions, long unbroken paths, large diagnostic reports, keyboard hints, reload picker selection, and custom entry. Verify actual selection files and runtime states after actions, including failures and startup-only refusals.
+6. Add supported selections through actual native controls. Inspect saved preferences and profile contents, including Unicode names, continued properties, and file permissions.
+7. Join an isolated ordinary-role multiplayer client to a loopback server with `Mods=`, `WorkshopItems=`, and `DoLuaChecksum=true`. Check affected integrations alone and with relevant Auto All/AllTheInfo combinations.
+8. Cover initial restoration, reconnect, runtime addition, repeated no-op refresh, supported cleanup replacement, refusal, syntax failure, and uncertain cleanup. Inspect actual controls and saved state.
+9. Stop only the owned client, server, and display. Remove their disposable caches. Retain selected logs/screenshots outside Git.
 
 The aggregate does not launch that workflow automatically. Native unit/integration proofs and a graphical client establish different facts. Do not report the latter from the former.
 

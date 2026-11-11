@@ -12,6 +12,8 @@ Runtime commands remain unavailable until actual startup dispatch finishes. The 
 
 Each Lua environment owns a session, one retained require resolver, module values, generation metadata, and callback ownership. Reconnect creates a fresh environment. A captured resolver from a retired environment is refused. Foreign-thread and reentrant operations are refused before mutation.
 
+One-launch registrations have a separate process lifetime. The native runtime atomically claims the pending registration directory on its first client environment initialization, including the menu, and retains those profiles across reconnects. It consumes the owned registration files before third-party source execution. A later process does not restore them, including after a crash or a launch that exits at the menu. A registration queued after initialization belongs to a future process. Persistent profiles and upstream source directories remain untouched. Duplicate persistent IDs are refused. The CLI's `profiles` command lists unclaimed registrations separately from persistent profiles. See [one-launch testing](workflows.md#test-a-mod-for-one-game-launch).
+
 ## Profile fields
 
 A profile is a UTF-8 Java-properties file with one native mod ID. Empty installations select no profiles. The Rust reader preserves Java escaping, continuations, and ASCII trimming semantics. Unknown keys, duplicate IDs, invalid booleans, cycles, and invalid metadata receive source-scoped errors.
