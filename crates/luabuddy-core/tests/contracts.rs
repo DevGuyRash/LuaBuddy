@@ -627,3 +627,131 @@ fn management_subscription_download_activation_and_disable_have_distinct_verifie
         ActivationState::ReconnectRequired { .. }
     ));
 }
+
+#[test]
+fn selection_edits_preserve_properties_and_existing_sources() {
+    use luabuddy_core::selection::{self, Lifetime};
+    let root = Directory::new();
+    let source = root.0.join("source #= ü");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("original.txt"), "original source").unwrap();
+    let file = root.0.join("kept.properties");
+    fs::write(
+        &file,
+        "id=Kept\nenabled=false\nmount=true\nexclude=client/one.lua;\\\n client/two.lua\\",
+    )
+    .unwrap();
+    let before = read_profiles(&root.0).unwrap().remove(0);
+    let selected = selection::select(&root.0, &id("Kept"), None, Lifetime::Persistent).unwrap();
+    let mut expected = before.clone();
+    expected.enabled = true;
+    assert_eq!(selected, expected);
+    assert!(selection::deselect(&root.0, &id("Kept"), Lifetime::Persistent).unwrap());
+    assert_eq!(read_profiles(&root.0).unwrap(), vec![before]);
+    let queued =
+        selection::select(&root.0, &id("Temporary ü"), Some(&source), Lifetime::Once).unwrap();
+    assert_eq!(queued.path, Some(source.canonicalize().unwrap()));
+    assert_eq!(selection::pending(&root.0).unwrap(), vec![queued]);
+    assert!(selection::deselect(&root.0, &id("Temporary ü"), Lifetime::Once).unwrap());
+    assert!(!selection::deselect(&root.0, &id("Temporary ü"), Lifetime::Once).unwrap());
+    assert_eq!(
+        fs::read_to_string(source.join("original.txt")).unwrap(),
+        "original source"
+    );
+}
+
+#[test]
+fn one_launch_claim_has_one_consumer_and_preserves_normal_selection() {
+    use luabuddy_core::selection::{self, Lifetime};
+    let root = Directory::new();
+    let persistent = root.0.join("Kept.properties");
+    fs::write(&persistent, "id=Kept\nenabled=false\n").unwrap();
+    let before = fs::read(&persistent).unwrap();
+    assert!(selection::select(&root.0, &id("Kept"), None, Lifetime::Once).is_err());
+    selection::select(&root.0, &id("Temporary"), None, Lifetime::Once).unwrap();
+    assert!(selection::select(&root.0, &id("Temporary"), None, Lifetime::Persistent).is_err());
+    let barrier = std::sync::Barrier::new(2);
+    let (a, b) = std::thread::scope(|scope| {
+        let a = scope.spawn(|| {
+            barrier.wait();
+            selection::claim(&root.0).unwrap()
+        });
+        let b = scope.spawn(|| {
+            barrier.wait();
+            selection::claim(&root.0).unwrap()
+        });
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    assert_eq!(a.len() + b.len(), 1);
+    assert!(selection::pending(&root.0).unwrap().is_empty());
+    assert!(selection::claim(&root.0).unwrap().is_empty());
+    assert_eq!(fs::read(&persistent).unwrap(), before);
+}
+
+#[test]
+fn one_launch_refuses_a_persistent_selection_created_after_queuing() {
+    use luabuddy_core::selection::{self, Lifetime};
+    let root = Directory::new();
+    let source = root.0.join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("original.txt"), "keep this source").unwrap();
+    selection::select(&root.0, &id("Temporary"), Some(&source), Lifetime::Once).unwrap();
+    let persistent = root.0.join("user.properties");
+    let settings = b"id=Temporary\nenabled=false\nmount=true\n";
+    fs::write(&persistent, settings).unwrap();
+    let error = selection::claim(&root.0).unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("conflicts with a persistent profile")
+    );
+    assert_eq!(fs::read(&persistent).unwrap(), settings);
+    assert_eq!(
+        fs::read_to_string(source.join("original.txt")).unwrap(),
+        "keep this source"
+    );
+    assert!(selection::pending(&root.0).unwrap().is_empty());
+    assert!(selection::claim(&root.0).unwrap().is_empty());
+}
+
+#[test]
+fn malformed_one_launch_registration_reports_its_retained_location() {
+    use luabuddy_core::selection;
+    let root = Directory::new();
+    let persistent = root.0.join("user.properties");
+    let settings = b"id=Kept\nenabled=true\n";
+    fs::write(&persistent, settings).unwrap();
+    let pending = root.0.join(".launch-once/pending");
+    fs::create_dir_all(&pending).unwrap();
+    fs::write(
+        pending.join("Broken.properties"),
+        "id=Broken\nunknown=true\n",
+    )
+    .unwrap();
+    let error = selection::claim(&root.0).unwrap_err();
+    let retained = error.path.unwrap();
+    assert_eq!(
+        fs::read_to_string(&retained).unwrap(),
+        "id=Broken\nunknown=true\n"
+    );
+    assert_eq!(fs::read(&persistent).unwrap(), settings);
+    assert!(selection::pending(&root.0).unwrap().is_empty());
+    assert!(selection::claim(&root.0).unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn one_launch_refuses_symlink_registrations_without_following_them() {
+    use luabuddy_core::selection;
+    use std::os::unix::fs::symlink;
+    let root = Directory::new();
+    let source = Directory::new();
+    let original = source.0.join("Original.properties");
+    fs::write(&original, "id=Original\n").unwrap();
+    let pending = root.0.join(".launch-once/pending");
+    fs::create_dir_all(&pending).unwrap();
+    symlink(&original, pending.join("Original.properties")).unwrap();
+    assert!(selection::claim(&root.0).is_err());
+    assert_eq!(fs::read_to_string(&original).unwrap(), "id=Original\n");
+    assert!(selection::claim(&root.0).unwrap().is_empty());
+}

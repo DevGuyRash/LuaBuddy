@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::PathBuf;
 
-const HELP: &str = "LuaBuddy native installer\n\nCommands:\n  discover                                      Find the installed game and Steam libraries.\n  package --runtime FILE --profiles-dir DIR --out DIR\n                                                Create a native package and integrity manifest.\n  verify-package --package DIR                  Check all package files and native architecture.\n  install --package DIR [--mod ID]               Install without selecting any default mods.\n  update --package DIR                          Activate a verified package and retain rollback.\n  repair --package DIR                          Repair owned runtime files, preserving edits.\n  verify | doctor | status                      Inspect the installed files without changing them.\n  rollback                                      Restore the previous owned native generation.\n  recover                                       Undo an interrupted native installation.\n  uninstall                                     Remove owned integration and preserve profiles.\n  profiles --profiles-dir DIR                   Validate declarative mod profiles.\n  diagnostics [--cache-dir DIR]                 Read the last in-game diagnostic report.\n\nGame commands accept --game-dir DIR or PZ_GAME_DIR.\nInstallation accepts --profiles-dir DIR, --debug, --no-debug, --early-ui, --no-early-ui.\nAll results are JSON. No command downloads code or subscribes to Workshop items.\nLinux native launcher integration is the only verified installer platform.\nPackage integrity does not establish in-game runtime acceptance.\n";
+const HELP: &str = "LuaBuddy native installer\n\nCommands:\n  discover                                      Find the installed game and Steam libraries.\n  package --runtime FILE --profiles-dir DIR --out DIR\n                                                Create a native package and integrity manifest.\n  verify-package --package DIR                  Check all package files and native architecture.\n  install --package DIR [--mod ID]               Install without selecting any default mods.\n  update --package DIR                          Activate a verified package and retain rollback.\n  repair --package DIR                          Repair owned runtime files, preserving edits.\n  verify | doctor | status                      Inspect the installed files without changing them.\n  rollback                                      Restore the previous owned native generation.\n  recover                                       Undo an interrupted native installation.\n  uninstall                                     Remove owned integration and preserve profiles.\n  profiles --profiles-dir DIR                   Validate declarative mod profiles.\n  select --profiles-dir DIR --mod ID [--path ROOT] [--once]\n                                                Select eligible local/discovered Lua in place.\n  deselect --profiles-dir DIR --mod ID [--once]\n                                                Disable a future selection or cancel a queued launch.\n  diagnostics [--cache-dir DIR]                 Read the last in-game diagnostic report.\n\nGame commands accept --game-dir DIR or PZ_GAME_DIR.\nInstallation accepts --profiles-dir DIR, --debug, --no-debug, --early-ui, --no-early-ui.\n--once queues selection for the next game process, including reconnects, then expires.\nIt preserves mod source files and never hot-unloads running code.\nAll results are JSON. No command downloads code or subscribes to Workshop items.\nLinux native launcher integration is the only verified installer platform.\nPackage integrity does not establish in-game runtime acceptance.\n";
 
 struct Arguments {
     command: String,
@@ -30,7 +30,8 @@ impl Arguments {
             match arg.as_str() {
                 "--game-dir" | "--package" | "--runtime" | "--profiles-dir" | "--out"
                 | "--cache-dir" | "--artifact" | "--manifest" | "--sha256"
-                | "--manifest-sha256" | "--provenance" | "--allow" | "--extension-id" => {
+                | "--manifest-sha256" | "--provenance" | "--allow" | "--extension-id"
+                | "--path" => {
                     let value = args
                         .next()
                         .ok_or_else(|| format!("{arg} requires a value"))?;
@@ -46,7 +47,8 @@ impl Arguments {
                 | "--early-ui"
                 | "--no-early-ui"
                 | "--json"
-                | "--trust-native-code" => {
+                | "--trust-native-code"
+                | "--once" => {
                     result.switches.insert(arg);
                 }
                 "--help" | "-h" => {
@@ -172,11 +174,53 @@ fn execute(args: &Arguments) -> Result<Value, String> {
             }
             .map_err(|e| e.to_string())
         }
+        "select" | "deselect" => {
+            args.allow(
+                if args.command == "select" {
+                    &["--profiles-dir", "--path"]
+                } else {
+                    &["--profiles-dir"]
+                },
+                &["--once"],
+                true,
+            )?;
+            if args.mods.len() != 1 {
+                return Err(format!("{} requires exactly one --mod ID", args.command));
+            }
+            let id = luabuddy_core::ModId::new(&args.mods[0]).map_err(|e| e.to_string())?;
+            let directory = args.required_path("--profiles-dir")?;
+            let once = args.switches.contains("--once");
+            let lifetime = if once {
+                luabuddy_core::selection::Lifetime::Once
+            } else {
+                luabuddy_core::selection::Lifetime::Persistent
+            };
+            if args.command == "select" {
+                let profile = luabuddy_core::selection::select(
+                    &directory,
+                    &id,
+                    args.path("--path").as_deref(),
+                    lifetime,
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(
+                    json!({"ok":true,"profile":profile,"lifetime":if once {"next-game-process"} else {"persistent"},"loaded":false,"sourcePreserved":true}),
+                )
+            } else {
+                let changed = luabuddy_core::selection::deselect(&directory, &id, lifetime)
+                    .map_err(|e| e.to_string())?;
+                Ok(
+                    json!({"ok":true,"id":id,"changed":changed,"lifetime":if once {"next-game-process"} else {"persistent"},"runningCodeUnloaded":false,"sourcePreserved":true}),
+                )
+            }
+        }
         "profiles" => {
             args.allow(&["--profiles-dir"], &[], false)?;
             let directory = args.required_path("--profiles-dir")?;
             let profiles = luabuddy_core::read_profiles(&directory).map_err(|e| e.to_string())?;
-            Ok(json!({"ok":true, "profiles":profiles}))
+            let queued =
+                luabuddy_core::selection::pending(&directory).map_err(|e| e.to_string())?;
+            Ok(json!({"ok":true, "profiles":profiles,"queuedForNextLaunch":queued}))
         }
         "diagnostics" => {
             args.allow(&["--cache-dir"], &[], false)?;

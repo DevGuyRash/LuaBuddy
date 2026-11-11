@@ -136,7 +136,7 @@ fn report(fixture: &Fixture) -> Result<serde_json::Value> {
     .map_err(|e| e.to_string())
 }
 
-pub fn run(env: &mut JNIEnv<'_>, fixture: &Fixture) -> Result<()> {
+fn initialize(env: &mut JNIEnv<'_>, fixture: &Fixture) -> Result<()> {
     for class in [
         "zombie/core/random/RandStandard",
         "zombie/core/random/RandLua",
@@ -188,6 +188,11 @@ pub fn run(env: &mut JNIEnv<'_>, fixture: &Fixture) -> Result<()> {
         .map_err(|e| e.to_string())?;
     env.set_static_field("zombie/network/GameClient", client, JValue::Bool(1))
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn run(env: &mut JNIEnv<'_>, fixture: &Fixture) -> Result<()> {
+    initialize(env, fixture)?;
     let checks = [
         (
             "baseline",
@@ -1452,6 +1457,121 @@ fn profile_scan_order(env: &mut JNIEnv<'_>, fixture: &Fixture) -> Result<()> {
     )?;
     println!(
         "PASS original profile-file scan order, same-pass dependencies and winning module-provider precedence"
+    );
+    Ok(())
+}
+
+pub fn prepare_one_launch(fixture: &Fixture) -> Result<PathBuf> {
+    let directory = fixture.root.join("once-config");
+    for (id, variable) in [
+        ("OncePersistent", "oncePersistentRuns"),
+        ("OnceTemporary", "onceTemporaryRuns"),
+        ("OnceNext", "onceNextRuns"),
+    ] {
+        fixture.module(
+            id,
+            &format!("client/{id}.lua"),
+            &format!("{variable} = ({variable} or 0) + 1"),
+        )?;
+    }
+    fixture.write(
+        "once-config/OncePersistent.properties",
+        &format!(
+            "id=OncePersistent\npath={}\n",
+            fixture.root.join("mods/OncePersistent").display()
+        ),
+    )?;
+    fixture.write(
+        "once-config/.launch-once/pending/OnceTemporary.properties",
+        &format!(
+            "id=OnceTemporary\npath={}\n",
+            fixture.root.join("mods/OnceTemporary").display()
+        ),
+    )?;
+    Ok(directory)
+}
+
+pub fn one_launch_process(
+    env: &mut JNIEnv<'_>,
+    fixture: &Fixture,
+    directory: &Path,
+    phase: &str,
+) -> Result<()> {
+    initialize(env, fixture)?;
+    set_property(env, "luabuddy.config", directory.to_str())?;
+    let persistent = directory.join("OncePersistent.properties");
+    let original = std::fs::read(&persistent).map_err(|e| e.to_string())?;
+    let root = directory
+        .parent()
+        .ok_or("Missing one-launch fixture root")?;
+    let source = root.join("mods/OnceTemporary/42/media/lua/client/OnceTemporary.lua");
+    let source_before = std::fs::read(&source).map_err(|e| e.to_string())?;
+    let assertions = match phase {
+        "first" => {
+            "assert(onceTemporaryRuns == 1 and LuaBuddy.mods.OnceTemporary == 'loaded'); assert(onceNextRuns == nil and LuaBuddy.mods.OnceNext == nil)"
+        }
+        "next" => {
+            "assert(onceTemporaryRuns == nil and LuaBuddy.mods.OnceTemporary == nil); assert(onceNextRuns == 1 and LuaBuddy.mods.OnceNext == 'loaded')"
+        }
+        "expired" => {
+            "assert(onceTemporaryRuns == nil and LuaBuddy.mods.OnceTemporary == nil); assert(onceNextRuns == nil and LuaBuddy.mods.OnceNext == nil)"
+        }
+        _ => return Err("Unknown one-launch proof phase".into()),
+    };
+    let mut context = fresh(env)?;
+    lua(&mut context, "Events.OnMainMenuEnter.Add(function() end)")?;
+    trigger(&mut context, "OnMainMenuEnter")?;
+    let pending = directory.join(".launch-once/pending");
+    if pending.exists() {
+        return Err(
+            "The process did not consume its one-launch registrations at menu initialization"
+                .into(),
+        );
+    }
+    if phase == "first" {
+        std::fs::create_dir_all(&pending).map_err(|e| e.to_string())?;
+        std::fs::write(
+            pending.join("OnceNext.properties"),
+            format!(
+                "id=OnceNext\npath={}\n",
+                root.join("mods/OnceNext").display()
+            ),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    trigger(&mut context, "OnGameStart")?;
+    lua(
+        &mut context,
+        "assert(oncePersistentRuns == 1 and LuaBuddy.mods.OncePersistent == 'loaded')",
+    )?;
+    lua(&mut context, assertions)?;
+    let (ok, message) = refresh(&mut context)?;
+    if !ok {
+        return Err(format!("One-launch no-op refresh failed: {message}"));
+    }
+    lua(&mut context, assertions)?;
+    drop(context);
+    let mut context = fresh(env)?;
+    lua(&mut context, "Events.OnMainMenuEnter.Add(function() end)")?;
+    trigger(&mut context, "OnMainMenuEnter")?;
+    trigger(&mut context, "OnGameStart")?;
+    lua(
+        &mut context,
+        "assert(oncePersistentRuns == 1 and LuaBuddy.mods.OncePersistent == 'loaded')",
+    )?;
+    lua(&mut context, assertions)?;
+    if phase == "first" && !pending.join("OnceNext.properties").is_file() {
+        return Err(
+            "A registration queued after process initialization was consumed on reconnect".into(),
+        );
+    }
+    if std::fs::read(&persistent).map_err(|e| e.to_string())? != original
+        || std::fs::read(&source).map_err(|e| e.to_string())? != source_before
+    {
+        return Err("One-launch loading changed persistent selections or original source".into());
+    }
+    println!(
+        "PASS one-launch {phase} process, menu consumption, no-op refresh, reconnect, and preserved selections/source"
     );
     Ok(())
 }

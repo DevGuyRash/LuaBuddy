@@ -33,11 +33,15 @@ Use `--game-dir` or `PZ_GAME_DIR` when Steam discovery does not identify one ins
 
 Open **Options > Mods > LuaBuddy > Manage mods**. Browse installed content or search Workshop through the initialized game Steam context. Details show identity, available metadata, dependencies, source, and observed delivery and activation states. Network failures and unavailable items remain visible as failures.
 
+Related actions are grouped under **This session**, **Next launch**, **Workshop**, and **Diagnostics**. Action feedback distinguishes saved selections, actual runtime loading, pending delivery, and failures. **Help & guides** covers complete workflows. See [common tasks](docs/workflows.md) for local testing, one-launch selections, downloads, reload, and troubleshooting.
+
 An explicit Add or Download action requests the corresponding Steam operation. A subscribed item remains distinct from an installed item, and installed content remains distinct from a loaded profile. Closing a download view stops observation where native cancellation is unavailable; Steam can continue downloading.
 
 Use **Enable late** for an eligible client/shared profile and **Startup enable** for the game's next normal native loading path. These selections have separate persisted states. Apply or discard pending Options edits before changing either selection. **Load new profiles** restores eligible multiplayer client/shared content; repeated refresh preserves loaded module objects and callbacks. [Runtime behavior](docs/runtime.md) defines native-startup, missing-server-code, ordering, and lifecycle limits.
 
 **Reload a profile** requires explicit upstream cleanup cooperation. LuaBuddy compiles and validates the replacement before calling the running generation's captured cleanup function. A refusal retains the old generation. Uncertain cleanup or failed activation quarantines it and requires reconnecting. Bundled profiles do not gain safe reload simply because they load successfully.
+
+Local mods use the game's native discovery or an explicit `path=` root. The CLI can save a generic local selection with `select --profiles-dir DIR --mod ID --path ROOT`. Add `--once` to queue it for one game process, including reconnects. LuaBuddy consumes only its temporary registration and leaves source directories and normal profiles intact. `deselect` disables a future selection, while `deselect --once` cancels an unclaimed registration. See [the full testing workflow](docs/workflows.md#test-a-mod-for-one-game-launch).
 
 ## Select optional integrations
 

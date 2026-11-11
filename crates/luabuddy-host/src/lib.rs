@@ -5,6 +5,7 @@ mod agent;
 mod bridge;
 mod callables;
 mod classfile;
+mod diagnostic_text;
 mod download_events;
 mod events;
 mod extensions;
@@ -17,6 +18,7 @@ pub mod patcher;
 mod proof;
 mod report;
 mod runtime;
+mod selections;
 pub mod steam;
 mod ui;
 

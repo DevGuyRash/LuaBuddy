@@ -168,6 +168,9 @@ fn start(context: &mut Context<'_, '_>, load: bool, start_entered: bool) -> Resu
             "The LuaBuddy namespace is already owned by another runtime in this environment".into(),
         );
     }
+    if let Err(error) = crate::selections::initialize(context) {
+        game::log(&format!("One-launch selections unavailable: {error}"));
+    }
     let session_id = NEXT.fetch_add(1, Ordering::Relaxed);
     let base_require = context.global("require")?;
     let state = context.table()?;
@@ -639,11 +642,7 @@ fn apply_inner(
     token: &luabuddy_core::lifecycle::OperationToken,
     operation: &Operation,
 ) -> Result<String> {
-    let directory = PathBuf::from(
-        game::property(context, "luabuddy.config")?
-            .ok_or("Missing -Dluabuddy.config=<profile directory>")?,
-    );
-    let mut profiles = read_profiles(&directory).map_err(|e| e.to_string())?;
+    let mut profiles = crate::selections::configured(context)?;
     with(session_id, |session| {
         for profile in &profiles {
             session

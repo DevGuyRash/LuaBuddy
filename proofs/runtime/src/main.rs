@@ -57,12 +57,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let vm = JavaVM::new(options)?;
     let mut env = vm.attach_current_thread()?;
-    if let Err(error) = runtime_proof::run(&mut env, &fixture) {
+    let args = std::env::args().collect::<Vec<_>>();
+    let result = if let Some(phase) = args.get(3) {
+        let directory = args
+            .get(4)
+            .ok_or("Provide the shared one-launch fixture directory")?;
+        runtime_proof::one_launch_process(
+            &mut env,
+            &fixture,
+            std::path::Path::new(directory),
+            phase,
+        )
+    } else {
+        runtime_proof::run(&mut env, &fixture)
+    };
+    if let Err(error) = result {
         if env.exception_check().unwrap_or(false) {
             let _ = env.exception_describe();
             let _ = env.exception_clear();
         }
         return Err(error.into());
+    }
+    if args.get(3).is_none() {
+        let directory = runtime_proof::prepare_one_launch(&fixture)?;
+        for phase in ["first", "next", "expired"] {
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .arg(&game)
+                .arg(&agent)
+                .arg(phase)
+                .arg(&directory)
+                .output()?;
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            if !output.status.success() {
+                return Err(
+                    format!("One-launch {phase} process failed with {}", output.status).into(),
+                );
+            }
+        }
     }
     println!("PASS production runtime parity proof");
     Ok(())
