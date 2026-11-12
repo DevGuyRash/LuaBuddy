@@ -8,6 +8,8 @@ The native adapter and installer currently target Linux x86_64. Windows and macO
 
 This Rust migration is a release candidate. The [verification report](docs/evolution/verification-report.md) records the exercised functional paths and the open performance and Workshop acceptance gates.
 
+The [Steam Workshop page](https://steamcommunity.com/sharedfiles/filedetails/?id=3838682402) explains the product and supplies a setup guide. Download the native Linux package from the [release page](https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.1) and follow the [setup guide](workshop/Contents/mods/LuaBuddy_SetupGuide/SETUP.md). Subscribing to the guide does not install or activate the runtime. See [publishing](docs/publishing.md) for how the listing and native downloads are maintained.
+
 ## Build and install
 
 Build with the pinned Rust toolchain and lockfile, then create an integrity-checked package. Do not copy proprietary game files into a package.
