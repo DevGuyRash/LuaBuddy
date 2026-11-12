@@ -1,0 +1,6 @@
+name=LuaBuddy - Setup guide (installer required)
+id=LuaBuddy_SetupGuide
+description=Documentation only. Download and install the native Linux x86_64 LuaBuddy package from https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.1 . Subscribing or enabling this guide does not activate the runtime. Read SETUP.md in this Workshop item's mod folder. No gameplay code is included.
+modversion=0.1.0
+versionMin=42.22
+url=https://github.com/DevGuyRash/LuaBuddy
