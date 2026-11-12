@@ -11,11 +11,11 @@ The current release targets Linux x86_64 with glibc 2.34 or newer and the native
 3. Open a terminal in that directory and run the following commands. Stop if either verification command fails.
 
 ```sh
-sha256sum --check SHA256SUMS
-mkdir -p LuaBuddy
-tar -xzf LuaBuddy-0.1.0-linux-x86_64.tar.gz -C LuaBuddy
-chmod +x LuaBuddy/luabuddy
-LuaBuddy/luabuddy verify-package --package LuaBuddy
+sha256sum --check SHA256SUMS &&
+mkdir -p LuaBuddy &&
+tar -xzf LuaBuddy-0.1.0-linux-x86_64.tar.gz -C LuaBuddy &&
+chmod +x LuaBuddy/luabuddy &&
+LuaBuddy/luabuddy verify-package --package LuaBuddy &&
 LuaBuddy/luabuddy install --package LuaBuddy
 ```
 
