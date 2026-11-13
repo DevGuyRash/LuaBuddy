@@ -1467,10 +1467,16 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
     )
 }
 
-pub fn verify_install(game: &Path) -> Result<Value> {
+#[derive(Debug, Clone)]
+pub struct InstallationStatus {
+    pub package_version: String,
+    pub package_digest: String,
+    pub previous_version: Option<String>,
+    pub problems: Vec<String>,
+}
+
+fn installation_problems(game: &Path, record: &InstallRecord) -> Result<Vec<String>> {
     let (_, site) = launcher_paths(game)?;
-    let record =
-        read_record(game)?.ok_or_else(|| invalid("LuaBuddy native runtime is not installed"))?;
     let mut problems = Vec::new();
     for (path, digest) in &record.current.files {
         match optional_bytes(path, RUNTIME_LIMIT)? {
@@ -1498,6 +1504,33 @@ pub fn verify_install(game: &Path) -> Result<Value> {
     if game.join(INSTALL_DIR).join(JOURNAL_FILE).exists() {
         problems.push("An interrupted operation awaits recover, install, or uninstall".into());
     }
+    Ok(problems)
+}
+
+pub fn installation_status(game: &Path) -> Result<Option<InstallationStatus>> {
+    launcher_paths(game)?;
+    let Some(record) = read_record(game)? else {
+        return Ok(None);
+    };
+    let problems = match installation_problems(game, &record) {
+        Ok(problems) => problems,
+        Err(error) => vec![format!(
+            "Installation checks could not be completed: {error}"
+        )],
+    };
+    Ok(Some(InstallationStatus {
+        package_version: record.current.package_version,
+        package_digest: record.current.package_digest,
+        previous_version: record.previous.map(|generation| generation.package_version),
+        problems,
+    }))
+}
+
+pub fn verify_install(game: &Path) -> Result<Value> {
+    launcher_paths(game)?;
+    let record =
+        read_record(game)?.ok_or_else(|| invalid("LuaBuddy native runtime is not installed"))?;
+    let problems = installation_problems(game, &record)?;
     let ok = problems.is_empty();
     Ok(
         json!({"ok":ok, "game":game, "profiles":record.profiles, "packageVersion":record.current.package_version, "packageDigest":record.current.package_digest, "runtime":record.current.runtime, "runtimeVerified":false, "problems":problems, "jvm":record.jvm}),

@@ -83,6 +83,19 @@ cargo xtask check --offline --audit --game-dir /path/to/ProjectZomboid --runtime
 
 The installer verifies every manifest entry and the native artifact architecture. Entries beneath `profiles/` must be direct `.properties` templates. Nested entries and non-template catalog files are rejected. The aggregate also requires package runtime and CLI hashes to match the exact tested artifact snapshots. A release package paired with default debug inputs fails that identity check. To inspect package integrity alone, use `luabuddy verify-package --package DIR`. The aggregate additionally refuses symlinks and executable `.lua`, `.java`, `.class`, `.jar`, `.py`, `.js`, or `.wasm` payload files in the package. Current verification checks strict profile-option rejection and native installation behavior without a legacy conversion layer.
 
+## Exercise graphical setup
+
+Build the complete release and its verified native package first. Stage the Workshop download with `cargo xtask workshop --package DIR --out DIR`. This developer command requires GNU tar; it does not publish or install anything. Use a private desktop session, home, configuration, cache, and disposable game copy for the following checks. An inherited file-manager profile can restore unrelated tabs, and a sandboxed archive manager can hide `/tmp`; distinguish those verification conditions from package failures.
+
+1. Open the staged setup archive through a file manager and extract it with the desktop archive manager. Confirm that the extracted `luabuddy` remains executable and its package passes integrity verification.
+2. Double-click `luabuddy`, including from a working directory outside the package. Confirm that setup identifies the adjacent package and the selected disposable game. Cancel before installation and verify that no installation files changed.
+3. Install through the GUI. Confirm an owned launcher override, a verified immutable generation, no automatic profile selection, and visible instructions to restart normally through Steam. Repeat installation and confirm truthful no-op feedback.
+4. Apply another verified native package through graphical package selection, then test rollback and its cancellation. Repair changed owned bytes and verify that the recovery copy preserves them. Test explicit transaction recovery and automatic recovery followed by an otherwise idempotent action.
+5. Test invalid packages, invalid user profiles, unsafe installation metadata, long paths containing markup characters, and many missing files. Valid ownership must remain distinguishable from incomplete inspection. Full diagnostics and action buttons must remain reachable. Remove through the GUI and verify that user profile bytes and unrelated launcher settings survive.
+6. Repeat the supported dialog paths with Zenity and KDialog, including native folder selection, cancellation, and helper-wrapper invocation. Confirm that progress helpers exit and that no verification desktop or client remains running.
+
+Keep screenshots, actual file/hash comparisons, and the exact CLI/runtime/package identities outside Git. CLI integration tests cover ownership and invocation gaps; they do not establish archive-manager extraction or desktop controls. A final authorized Steam journey must also confirm that the published archive downloads through Workshop and matches the verified package. Subscription alone does not activate the native runtime, and downloading an update does not switch the installed generation.
+
 ## Exercise the graphical product
 
 Use disposable client caches, displays, profiles, and loopback servers. Keep the user's game and personal saves untouched. Match the exact native artifact SHA256 to each evidence set.

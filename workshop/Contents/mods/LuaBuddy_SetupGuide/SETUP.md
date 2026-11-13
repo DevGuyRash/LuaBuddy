@@ -1,33 +1,33 @@
-# Install LuaBuddy on native Linux
+# Install LuaBuddy through graphical setup
 
-This Workshop item contains documentation. Subscribing or enabling `LuaBuddy_SetupGuide` does not install the native runtime. You do not need to enable the guide to use LuaBuddy.
+Steam supplies the native Linux package and this guide. One-time graphical setup activates LuaBuddy for normal Steam launches. Subscribing or enabling `LuaBuddy_SetupGuide` alone does not activate the runtime. You do not need to enable the guide to use LuaBuddy.
 
-The current release targets Linux x86_64 with glibc 2.34 or newer and the native Linux Project Zomboid client. It was tested on game version 42.22.2. Windows, macOS, and Proton execution are not supported by this release.
+The package targets Linux x86_64 with glibc 2.34 or newer and the native Linux Project Zomboid client. The runtime was tested on game version 42.22.2. Graphical setup uses an existing Zenity or KDialog utility. A Linux desktop without either utility cannot use this graphical flow. Windows, macOS, and Proton execution are not supported by this release.
 
-## Install the native package
+## Find the setup archive
 
-1. Quit Project Zomboid.
-2. Open the [Linux release](https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.1). Download `LuaBuddy-0.1.0-linux-x86_64.tar.gz` and `SHA256SUMS` into the same directory.
-3. Open a terminal in that directory and run the following commands. Stop if either verification command fails.
+1. Subscribe to [LuaBuddy on Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3838682402) and let Steam finish downloading it.
+2. Quit Project Zomboid.
+3. In your Steam Library, right-click **Project Zomboid** and choose **Manage > Browse local files**.
+4. In the file manager, move up through the parent folders until you reach `steamapps`.
+5. Open `workshop/content/108600/3838682402/mods/LuaBuddy_SetupGuide/common/setup`.
+6. Open `LuaBuddy-Setup-linux-x86_64.tar.gz` with your desktop archive manager and extract it to a folder you can keep.
 
-```sh
-sha256sum --check SHA256SUMS &&
-mkdir -p LuaBuddy &&
-tar -xzf LuaBuddy-0.1.0-linux-x86_64.tar.gz -C LuaBuddy &&
-chmod +x LuaBuddy/luabuddy &&
-LuaBuddy/luabuddy verify-package --package LuaBuddy &&
-LuaBuddy/luabuddy install --package LuaBuddy
-```
+The archive contains a folder named `LuaBuddy-` followed by a package identifier. Each package has its own identifier, so a new update can be extracted separately from an earlier package. Use the archive manager's normal extraction action to preserve the executable permissions.
 
-Steam discovery normally locates the game. If it fails, use the directory containing `projectzomboid.jar` and `ProjectZomboid64`. For a standard Steam layout, the explicit command is:
+## Activate LuaBuddy
 
-```sh
-LuaBuddy/luabuddy install --package LuaBuddy --game-dir "$HOME/.local/share/Steam/steamapps/common/ProjectZomboid/projectzomboid"
-```
+1. Open the extracted `LuaBuddy-...` folder and double-click `luabuddy`. If your file manager asks whether to run the executable, choose **Run**.
+2. Check the game folder shown in setup. If discovery needs help, choose the folder containing `projectzomboid.jar` and `ProjectZomboid64`, or its enclosing `ProjectZomboid` folder.
+3. Choose **Install / update** and read the result.
+4. Close setup and launch Project Zomboid normally through Steam.
+5. Open **Options > Mods > LuaBuddy > Manage mods**.
 
-Supply your actual game path if your Steam library is elsewhere. The installer probes the bundled JVM, copies an integrity-checked native generation, and writes a reversible `ProjectZomboid64.site.json` launcher override. It preserves the base launcher JSON and unrelated settings. A checksum checks downloaded bytes, not the publisher's identity. Use a release from the linked project you trust.
+Setup verifies the adjacent package before installation. Keep its executable, native library, manifests, profiles, and licenses together. Do not move `luabuddy` out of the extracted folder. A failed package check is an error to resolve before installation, not a successful activation.
 
-Launch the game normally through Steam. Open **Options > Mods > LuaBuddy > Manage mods**. A fresh installation selects no mods. You need neither ZombieBuddy nor a Rust toolchain, Python, or another Lua interpreter to use the prebuilt package.
+The installer uses the game's bundled JVM, copies an integrity-checked native generation, and writes a reversible `ProjectZomboid64.site.json` launcher override. It preserves the base launcher JSON and unrelated settings. A fresh installation selects no mods. Existing profiles and settings survive an update. Setup does not stop or restart a running game, and native runtime changes apply after the next normal Steam launch.
+
+The prebuilt package needs no ZombieBuddy, Rust toolchain, Python, or additional Lua interpreter. The [GitHub prerelease](https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.2) is an optional download source if you do not use Workshop delivery.
 
 ## Choose a mod
 
@@ -41,35 +41,33 @@ Apply or discard pending Options edits first. Disabling a selection does not hot
 
 Use **Help & guides** for full in-game workflows. The [workflow reference](https://github.com/DevGuyRash/LuaBuddy/blob/main/docs/workflows.md) covers local mods, one-launch testing, downloads, and troubleshooting.
 
-## Verify or diagnose
+## Update the native runtime
 
-From the directory containing the extracted package, run:
+1. Let Steam download the updated Workshop item, then quit Project Zomboid.
+2. Open the Workshop setup archive again and extract the newly supplied package to its own folder.
+3. Open that new folder, double-click `luabuddy`, and choose **Install / update**.
+4. Read the result and relaunch the game normally through Steam.
 
-```sh
-LuaBuddy/luabuddy verify
-LuaBuddy/luabuddy doctor
-LuaBuddy/luabuddy diagnostics
-```
+Steam updates the delivered archive. It does not replace the native generation already installed in the game. Opening an older extracted package still selects that older package. Keep the current package for maintenance and use the newly delivered package when applying an update.
 
-Add `--game-dir /your/game/directory` when discovery needs help. Diagnostics accepts `--cache-dir /your/Zomboid/cache` when you use a custom game cache. Commands return JSON. Installation verification checks files. In-game diagnostics establishes whether profiles loaded.
+## Verify, repair, recover, or roll back
 
-## Update or remove
+Close the game, then open setup from an intact extracted package. Choose **Maintenance**, select the action you need, and read its result.
 
-Workshop updates refresh this guide. They do not update an installed native library. Close the game, download and verify the replacement package, extract it to a new directory, and use that package's executable:
+- **Verify installed files** checks installed file integrity and launcher ownership. It does not establish that a mod loaded in the current game session.
+- **Repair** restores package files while preserving modified owned files in recovery storage.
+- **Recover interrupted setup** handles an interrupted installation transaction. It preserves an independently changed file and reports when manual attention is needed.
+- **Roll back** restores the prior native generation when one is available. Review the confirmation before proceeding. Existing profile files remain intact.
 
-```sh
-NewLuaBuddy/luabuddy update --package NewLuaBuddy
-```
+For actual mod loading state, inspect the in-game manager's runtime state and action results. Read the [installation and recovery reference](https://github.com/DevGuyRash/LuaBuddy/blob/main/docs/evolution/install.md) for the command-line interface and detailed ownership rules.
 
-An update retains the previous native generation for rollback. From an extracted package, these commands roll back or uninstall:
+## Remove LuaBuddy
 
-```sh
-LuaBuddy/luabuddy rollback
-LuaBuddy/luabuddy uninstall
-```
+1. Quit Project Zomboid and open setup from an intact extracted package.
+2. Choose **Maintenance**, then **Remove LuaBuddy**. Review the confirmation and confirm removal.
+3. Read the result, then launch through Steam normally if you want to play without LuaBuddy.
+4. Unsubscribe from the Workshop item if you also want Steam to stop delivering its files.
 
-Add `--game-dir` when needed. Restart normally after installation, update, repair, rollback, or uninstall. These commands do not stop or change an already running JVM. Uninstall preserves user profiles, Workshop mods, and user-modified recovery files. Unsubscribing from this guide alone does not uninstall the native runtime.
+Removal preserves user profiles, Workshop mods, and user-modified recovery files. Unsubscribing alone does not uninstall a native runtime already installed in the game.
 
-Read the [installation and recovery reference](https://github.com/DevGuyRash/LuaBuddy/blob/main/docs/evolution/install.md) for repair and interrupted installation. Report reproducible problems in [GitHub issues](https://github.com/DevGuyRash/LuaBuddy/issues), with the game version, OS, mod IDs, and relevant diagnostic result. Remove private information before posting logs.
-
-LuaBuddy source is available under the [MIT license](https://github.com/DevGuyRash/LuaBuddy/blob/main/LICENSE). No game files or upstream mods are included in this item.
+Report reproducible problems in [GitHub issues](https://github.com/DevGuyRash/LuaBuddy/issues), with the game version, OS, mod IDs, and relevant diagnostic result. Remove private information before posting logs. LuaBuddy source is available under the [MIT license](https://github.com/DevGuyRash/LuaBuddy/blob/main/LICENSE). No game files or upstream mods are included in this item.

@@ -9,3 +9,4 @@ publish = false
 [dependencies]
 serde_json.workspace = true
 sha2.workspace = true
+luabuddy = { path = "../crates/luabuddy-cli" }

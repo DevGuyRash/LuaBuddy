@@ -8,10 +8,12 @@ use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod workshop;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 const ARTIFACT_LIMIT: u64 = 256 * 1024 * 1024;
-const HELP: &str = "LuaBuddy verification\n\n  cargo xtask check [--offline] [--portable] [--game-dir DIR] [--package DIR] [--runtime FILE] [--cli FILE] [--audit] [--log-dir DIR]\n\nBuilds the application before tests, checks formatting and Clippy, runs contract tests, verifies compiled extensions and a native package. Native checks use the selected game's bundled JVM and disposable fixtures. --runtime and --cli select immutable snapshots of deciding artifacts, such as release binaries; omitted values use the completed debug build. An existing --package must contain those exact runtime and CLI bytes. --portable explicitly omits proprietary-game checks. --audit requires cargo-audit and a usable advisory database. --offline prevents dependency and advisory database fetches. No check subscribes to or downloads Workshop items, controls a running game, or launches a graphical client.\n";
+const HELP: &str = "LuaBuddy verification and distribution\n\n  cargo xtask check [--offline] [--portable] [--game-dir DIR] [--package DIR] [--runtime FILE] [--cli FILE] [--audit] [--log-dir DIR]\n  cargo xtask workshop --package DIR --out DIR\n\nBuilds the application before tests, checks formatting and Clippy, runs contract tests, verifies compiled extensions and a native package. Native checks use the selected game's bundled JVM and disposable fixtures. --runtime and --cli select immutable snapshots of deciding artifacts, such as release binaries; omitted values use the completed debug build. An existing --package must contain those exact runtime and CLI bytes. --portable explicitly omits proprietary-game checks. --audit requires cargo-audit and a usable advisory database. --offline prevents dependency and advisory database fetches. No check subscribes to or downloads Workshop items, controls a running game, or launches a graphical client.\n\nworkshop stages the tracked Workshop guide and an already verified Linux x86_64 package. Its tar.gz preserves executable permissions for graphical extraction and setup. It requires GNU tar and does not upload content or activate a runtime.\n";
 
 #[derive(Default)]
 struct Options {
@@ -1191,6 +1193,15 @@ fn run(options: Options) -> Result<bool> {
 }
 
 fn main() -> ExitCode {
+    if env::args_os().nth(1).is_some_and(|arg| arg == "workshop") {
+        return match workshop::run(env::args_os().skip(2)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("LuaBuddy Workshop staging failed: {error}");
+                ExitCode::from(2)
+            }
+        };
+    }
     match Options::parse().and_then(|options| match options {
         None => {
             print!("{HELP}");

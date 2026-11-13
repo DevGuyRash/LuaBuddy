@@ -1,1 +1,1 @@
-This documentation-only Workshop item includes no shared media or executable code. Read ../SETUP.md for native installation instructions.
+Open setup/LuaBuddy-Setup-linux-x86_64.tar.gz with your desktop archive manager, extract it, and double-click luabuddy in the extracted LuaBuddy folder. Read ../SETUP.md for the full graphical setup and removal workflow. The guide itself does not need to be enabled.

@@ -37,6 +37,10 @@ The inspected game loader discovers installed Workshop mod roots and mounts comm
 
 The smallest demonstrated additional activation mechanism is the reversible native installer, which owns a launcher site override containing `-agentpath`. That is an additional setup step. It does not meet a subscribe-only one-click acceptance target.
 
+The accepted player workflow adds a graphical front end to that installer and delivers its complete package through Workshop as `LuaBuddy-Setup-linux-x86_64.tar.gz`. Players extract the archive and open `luabuddy`, which uses an existing Zenity or KDialog utility. The native runtime, package verifier, installation ownership, and profile-preservation rules remain in Rust. The graphical flow requires a compatible Linux desktop with one of those utilities; portable compilation does not establish that every desktop provides it. [The setup guide](../workshop/Contents/mods/LuaBuddy_SetupGuide/SETUP.md) describes the player path without terminal commands or a separate download.
+
+Steam refreshing the archive does not activate a new installed native generation. Players run the newly extracted setup package to apply an update. Unsubscribing removes Workshop delivery, while the installer's removal action owns native uninstallation. These boundaries remain distinct from the runtime and Workshop evidence recorded here.
+
 A clean LuaBuddy subscription, ordinary Steam launch, interface appearance, offline relaunch, update, and removal still need a complete activation-path proof before one-click setup can be claimed. [The Workshop capability record](evolution/workshop.md) distinguishes native activation from browsing and the successful delivery of one ordinary client mod.
 
 The current Steam adapter attaches only to the game's already initialized context. It neither initializes/shuts down Steam nor takes over its callback pump. Exact native ABI declarations follow the observed UGC021 interface. Native download-result observation still requires installed-state and path verification before success.

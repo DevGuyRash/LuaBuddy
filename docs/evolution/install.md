@@ -1,5 +1,13 @@
 # Install a native LuaBuddy package
 
+Players can install without terminal commands through the [Workshop graphical setup guide](../../workshop/Contents/mods/LuaBuddy_SetupGuide/SETUP.md). Steam supplies `LuaBuddy-Setup-linux-x86_64.tar.gz` under the item's `mods/LuaBuddy_SetupGuide/common/setup` folder. Extract it with a desktop archive manager, keep the extracted package together, and double-click `luabuddy`. Graphical setup uses an existing Zenity or KDialog utility and the same Rust installer functions as the commands below. It finds the adjacent package independently of the file manager's working directory.
+
+Close Project Zomboid before setup. Choose the game folder if discovery needs help, then choose **Install / update**. A fresh installation selects no mods. The setup interface also provides verification, repair, rollback, recovery, and removal. Cancel closes the current choice without requesting a mutation. Native runtime changes apply after the next normal Steam launch. Setup does not control a running game.
+
+Steam updates the supplied archive. To activate a native update, extract the newly delivered package and open its setup interface again. Subscribing alone does not activate a JVM agent, and unsubscribing alone does not remove an installed native generation. The graphical flow targets native Linux x86_64; it does not establish Windows, macOS, Proton, or every Linux desktop environment as supported.
+
+## Build and use the command line
+
 Build the Rust workspace with the pinned toolchain and locked dependencies. An offline build needs those exact dependencies in the Cargo cache.
 
 ```sh
@@ -14,6 +22,8 @@ target/release/luabuddy verify-package --package dist/LuaBuddy-linux-x86_64
 ```
 
 Use a package from a source you trust. SHA256 checks detect changed package contents. They do not establish the author's identity or prove runtime compatibility.
+
+Developer tooling can open graphical mode explicitly with `luabuddy setup --package /path/to/package --game-dir /path/to/ProjectZomboid`. Ordinary file-manager launches find the adjacent package without those arguments. Existing explicit CLI commands retain their JSON output.
 
 Install into a discovered game, or supply its Steam installation directory. Installation probes the actual bundled JVM process architecture before changing launcher settings.
 
@@ -90,4 +100,4 @@ luabuddy uninstall --game-dir /path/to/ProjectZomboid
 
 Uninstall preserves selected profiles, native repair recovery copies, Workshop content, and user-modified native files. It restores the original site override when safe. If the override has unrelated user changes, it removes only recorded LuaBuddy arguments and retains the changes. A repeated uninstall succeeds without additional changes.
 
-Native launcher activation is currently evidenced on Linux. Windows and macOS runtime and installer behavior require native tests before a release can claim support. Workshop delivery alone does not activate this native runtime. Consult the platform capability report for the remaining one-click activation gate.
+Native launcher activation is currently evidenced on Linux. Windows and macOS runtime and installer behavior require native tests before a release can claim support. Graphical setup removes the terminal step from the accepted Workshop workflow, but it remains an explicit activation action. Consult the platform capability report for the remaining subscribe-only activation gate.
