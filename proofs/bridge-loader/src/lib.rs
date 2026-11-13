@@ -7,6 +7,8 @@ mod bridge;
 mod callables;
 #[path = "../../../crates/luabuddy-host/src/classfile.rs"]
 mod classfile;
+#[path = "../../../crates/luabuddy-host/src/events.rs"]
+mod events;
 #[path = "../../../crates/luabuddy-host/src/jvmti.rs"]
 mod jvmti;
 
@@ -152,6 +154,32 @@ fn run(env: &mut JNIEnv<'_>, jvmti: &jvmti::Jvmti) -> Result<(), Box<dyn std::er
     if value != 0 {
         return Err("The unsupported loader's original no-op behavior changed".into());
     }
+    let event = env.find_class("zombie/Lua/Event")?;
+    let entry = env.get_method_id(&event, "trigger", events::DESCRIPTOR)?;
+    let original = env.get_method_id(&event, events::ORIGINAL, events::DESCRIPTOR)?;
+    if !events::registered() || jvmti.method_modifiers(entry.into_raw())? & 0x0100 == 0 {
+        return Err("The supported event dispatcher was not registered as native".into());
+    }
+    events::verify(&jvmti.bytecodes(original.into_raw())?)?;
+    let name = env.new_string("zombie.Lua.Event")?;
+    let custom = env
+        .call_static_method(
+            "java/lang/Class",
+            "forName",
+            "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;",
+            &[
+                JValue::Object(&name),
+                JValue::Bool(1),
+                JValue::Object(SECOND.get().ok_or("Missing second loader")?.as_obj()),
+            ],
+        )?
+        .l()?;
+    let custom = JClass::from(custom);
+    let entry = env.get_method_id(&custom, "trigger", events::DESCRIPTOR)?;
+    if jvmti.method_modifiers(entry.into_raw())? & 0x0100 != 0 {
+        return Err("The unsupported loader's event dispatcher was transformed".into());
+    }
+    events::verify(&jvmti.bytecodes(entry.into_raw())?)?;
     Ok(())
 }
 

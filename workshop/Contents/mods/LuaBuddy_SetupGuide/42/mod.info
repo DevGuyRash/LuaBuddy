@@ -1,6 +1,6 @@
 name=LuaBuddy - Setup guide (native installer included)
 id=LuaBuddy_SetupGuide
 description=Steam supplies the native Linux x86_64 setup archive under this mod's common/setup folder. Extract it with your desktop archive manager, then double-click luabuddy in the extracted folder. Read SETUP.md for the full graphical walkthrough. Enabling this guide alone does not activate the runtime, and the guide adds no gameplay Lua.
-modversion=0.1.0-rc.2
+modversion=0.1.0-rc.3
 versionMin=42.22
 url=https://github.com/DevGuyRash/LuaBuddy

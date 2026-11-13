@@ -49,13 +49,13 @@ The native aggregate runs these distinct consumers.
 
 | Consumer | What it exercises |
 | --- | --- |
-| Production `proof-native` mode | Real Kahlua callable identity, values, reentrancy, exceptions, scoped retirement, native UI mouse callback, synchronous/nested/queued owner-thread dispatch, and actual native Workshop notification routing without an account action. |
+| Production `proof-native` mode | Real Kahlua callable identity, values, reentrancy, exceptions, scoped retirement, native UI mouse callback, synchronous/nested/queued owner-thread dispatch, unchanged original dispatcher bytecodes, boolean returns, Unicode event names, exceptional exits, and actual native Workshop notification routing without an account action. |
 | `proofs/metadata` | Actual identity, dependencies, availability, native symlink and flat-root discovery, cache recovery, translation parser/fallback/placeholders, callback ownership/removal, and generated diagnostic contents. |
 | `proofs/runtime` | The actual production library, copied immutably into a disposable fixture, through native events and its public Lua-facing operations. Covers cache/alias/phase behavior, refresh, reconnect, preflight, failure isolation, cleanup consent/refusal/quarantine, and scoped callbacks. Three additional fresh JVMs exercise one-launch claims, reconnect retention, a queue created after initialization, expiry, and unchanged persistent selections and source files. |
 | `proofs/activation` | Actual native dependency metadata and preference serialization, explicit next-startup selection, preserved unrelated IDs and map order, unchanged current/server activation, and centralized live eligibility. |
 | `proofs/steam` | Required native Steam symbols and rejection before an initialized host Steam context. No account mutation is performed. |
 | The selected runtime's `proof-patcher` mode | Real unrelated JVM targets, both compiled Rust extensions, deterministic shared-hook order, mutation/replacement, original exceptions, reference identity, nesting/concurrency, stale targets, and exact disable. The standalone `proofs/patcher` consumer also builds. |
-| `proofs/bridge-loader` | An unsupported classloader copy prepared during the transform-to-register interval retains its original declaration and does not poison native registration. |
+| `proofs/bridge-loader` | An unsupported classloader copy prepared during the transform-to-register interval retains its original declaration and does not poison native registration. The event dispatcher in another loader also retains its original declaration and bytecodes. |
 | `proofs/extensions` | The selected normal product agent and CLI approval workflow across seven fresh JVM cases. Covers disabled and unapproved code, changed artifact/manifest, unchanged-binary metadata updates, approved native execution, and explicit retry after normal target preparation. |
 | `proofs/performance` build and tests | The measurement program's ownership and provenance behavior. This does not run graphical workloads or establish a performance result. |
 
@@ -119,6 +119,17 @@ The isolated aggregate performs no Steam account operations. A separate, explici
 Choose a fixed workload and acceptance budget before collecting deciding baseline/enabled results. Alternate matched release-build runs. Record startup time, frame-time percentiles, CPU, memory, and growth across repeated reconnect/reload cycles. Verify that the changed work actually ran and count failures alongside timings.
 
 A callback microbenchmark is not a game frame-time result. Cross-compilation is not platform gameplay evidence. Report passed, failed, and not-run checks separately, with actual game/JVM/OS versions, artifact hashes, and limits.
+
+For a headless event-dispatch comparison, build `proofs/runtime` in release mode. Its optional measurement mode accepts the actual game directory, an immutable runtime library, `--event-benchmark`, and an iteration count between 1 and 1000000. Use the game's bundled JVM through `JAVA_HOME` and its native directory through `LD_LIBRARY_PATH`, as the aggregate does.
+
+```sh
+cargo build --release --locked --offline --manifest-path proofs/runtime/Cargo.toml --target-dir target/verify-runtime
+target/verify-runtime/release/luabuddy-runtime-proof /path/to/ProjectZomboid /path/to/runtime.so --event-benchmark 100000
+```
+
+The measurement uses a disposable home, cache, and empty profile directory. It warms each case with 10000 calls, then checks every empty dispatch result and the completed Lua loop and callback counts. The direct empty case reaches `Event.trigger`; the other cases enter through the real Lua event API with a listener present. Setup and compilation stay outside the timed region. Normal runtime proofs retain `-Xcheck:jni`; measurement mode omits that instrumentation. Alternate at least five unchanged and candidate release runs and retain their printed artifact hashes, raw samples, errors, and machine load.
+
+To record VM operations separately, append an absolute `.jfr` output path after the iteration count. That mode starts a narrowly configured JFR recording, then explicitly stops, dumps, and closes it before the invocation process exits. Exclude recorded runs from the timing comparison. The event measurements and recordings do not establish game frame times or the full performance budget. See [the event-dispatch result](evolution/event-dispatch.md).
 
 ## Evidence scope during the Rust migration
 

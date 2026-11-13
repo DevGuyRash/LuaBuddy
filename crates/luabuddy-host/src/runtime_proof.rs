@@ -191,6 +191,81 @@ fn initialize(env: &mut JNIEnv<'_>, fixture: &Fixture) -> Result<()> {
     Ok(())
 }
 
+/// Headless comparison of the actual native event path; not a frame-time test.
+pub fn measure_events(env: &mut JNIEnv<'_>, fixture: &Fixture, iterations: u64) -> Result<()> {
+    initialize(env, fixture)?;
+    let mut context = fresh(env)?;
+    lua(&mut context, "Events.OnMainMenuEnter.Add(function() end)")?;
+    trigger(&mut context, "OnMainMenuEnter")?;
+    lua(
+        &mut context,
+        "LuaEventManager.AddEvent('LuaBuddyMeasureCallback'); measureHits = 0; Events.LuaBuddyMeasureCallback.Add(function() measureHits = measureHits + 1 end); Events.OnTick.Add(function() measureHits = measureHits + 1 end)",
+    )?;
+    // The manager skips empty events. Call the real dispatcher directly so a
+    // skipped event cannot masquerade as a result for the hook being measured.
+    let empty = context.jni(|env| {
+        let class = env.find_class("zombie/Lua/Event")?;
+        let name = env.new_string("LuaBuddyMeasureEmpty")?;
+        let event = env.new_object(&class, "(Ljava/lang/String;I)V", &[JValue::Object(&name), JValue::Int(0)])?;
+        let method = env.get_method_id(&class, "trigger", "(Lse/krka/kahlua/vm/KahluaTable;Lse/krka/kahlua/integration/LuaCaller;[Ljava/lang/Object;)Z")?;
+        let args = [jni::sys::jvalue { l: std::ptr::null_mut() }; 3];
+        let mut run = |count| -> jni::errors::Result<u64> {
+            let mut completed = 0;
+            for _ in 0..count {
+                // SAFETY: The method belongs to this live Event. Its three
+                // reference parameters are unused with no callbacks. Check
+                // the boolean result on every invocation.
+                let value = unsafe { env.call_method_unchecked(&event, method, jni::signature::ReturnType::Primitive(jni::signature::Primitive::Boolean), &args) }?.z()?;
+                if !value { completed += 1; }
+            }
+            Ok(completed)
+        };
+        run(10_000)?;
+        let start = std::time::Instant::now();
+        let completed = run(iterations)?;
+        Ok((completed, start.elapsed()))
+    })?;
+    if empty.0 != iterations {
+        return Err("empty dispatcher returned true".into());
+    }
+    let mut samples = vec![
+        serde_json::json!({"event":"direct-empty","completed":empty.0,"callbacks":0,"errors":0,"nanosecondsPerDispatch":empty.1.as_nanos() as f64 / iterations as f64}),
+    ];
+    for name in ["LuaBuddyMeasureCallback", "OnTick"] {
+        let warmup = context.compile(
+            &format!("for i = 1, 10000 do triggerEvent('{name}') end"),
+            "LuaBuddy/event-measure/warmup.lua",
+        )?;
+        context.call(&warmup, &[])?;
+        lua(&mut context, "measureHits = 0; measureCompleted = 0")?;
+        let workload = context.compile(&format!("for i = 1, {iterations} do triggerEvent('{name}'); measureCompleted = measureCompleted + 1 end"), "LuaBuddy/event-measure/timed.lua")?;
+        let start = std::time::Instant::now();
+        context.call(&workload, &[])?;
+        let elapsed = start.elapsed();
+        let completed = context.global("measureCompleted")?;
+        let hits = context.global("measureHits")?;
+        let (completed, hits) = context.jni(|env| {
+            Ok((
+                env.call_method(completed.object(), "longValue", "()J", &[])?
+                    .j()? as u64,
+                env.call_method(hits.object(), "longValue", "()J", &[])?
+                    .j()? as u64,
+            ))
+        })?;
+        if completed != iterations || hits != iterations {
+            return Err(format!(
+                "event measurement did not complete its workload: {name} completed={completed} callbacks={hits}"
+            ));
+        }
+        samples.push(serde_json::json!({"event":name,"completed":completed,"callbacks":hits,"errors":0,"nanosecondsPerDispatch":elapsed.as_nanos() as f64 / iterations as f64}));
+    }
+    println!(
+        "EVENT_MEASUREMENT {}",
+        serde_json::json!({"scope":"headless event dispatch only; no FPS claim","samples":samples})
+    );
+    Ok(())
+}
+
 pub fn run(env: &mut JNIEnv<'_>, fixture: &Fixture) -> Result<()> {
     initialize(env, fixture)?;
     let checks = [

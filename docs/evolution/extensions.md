@@ -23,7 +23,7 @@ The saved enable takes effect in the next JVM process. At normal LuaBuddy initia
 
 Target classes must reach their normal prepared lifecycle. LuaBuddy checks target signatures, fingerprints, and supported hook kinds before loading an approved library. It reports unavailable or unprepared targets instead of initializing classes just to inspect them. An explicit in-game retry can retry the original approved generation after that lifecycle has advanced. It does not reread new approval records or activate changed approvals in the running process.
 
-`LuaBuddy.patches` publishes actual capabilities, extension approval identities, installed or rejected patch states, target descriptors, and callback failures. Its separate `runtimeHooks` inventory reports the actual callable bridge, lifecycle breakpoints, and Workshop completion observer. These built-in adapter mechanisms are not represented as fictitious reusable-registry receipts. An enabled approval alone is not evidence that its patches installed successfully.
+`LuaBuddy.patches` publishes actual capabilities, extension approval identities, installed or rejected patch states, target descriptors, and callback failures. Its separate `runtimeHooks` inventory reports the actual callable bridge, native lifecycle bridge, and Workshop completion observer. These built-in adapter mechanisms are not represented as fictitious reusable-registry receipts. An enabled approval alone is not evidence that its patches installed successfully.
 
 Disable execution for the next process through the saved approval.
 

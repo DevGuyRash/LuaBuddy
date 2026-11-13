@@ -27,7 +27,7 @@ Setup verifies the adjacent package before installation. Keep its executable, na
 
 The installer uses the game's bundled JVM, copies an integrity-checked native generation, and writes a reversible `ProjectZomboid64.site.json` launcher override. It preserves the base launcher JSON and unrelated settings. A fresh installation selects no mods. Existing profiles and settings survive an update. Setup does not stop or restart a running game, and native runtime changes apply after the next normal Steam launch.
 
-The prebuilt package needs no ZombieBuddy, Rust toolchain, Python, or additional Lua interpreter. The [GitHub prerelease](https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.2) is an optional download source if you do not use Workshop delivery.
+The prebuilt package needs no ZombieBuddy, Rust toolchain, Python, or additional Lua interpreter. The [GitHub prerelease](https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.3) is an optional download source if you do not use Workshop delivery.
 
 ## Choose a mod
 

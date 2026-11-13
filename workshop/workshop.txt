@@ -60,7 +60,7 @@ description=Steam updates the included archive. To activate a native update, clo
 description=
 description=[url=https://github.com/DevGuyRash/LuaBuddy/blob/main/workshop/Contents/mods/LuaBuddy_SetupGuide/SETUP.md]Full graphical setup and removal guide[/url] | [url=https://github.com/DevGuyRash/LuaBuddy/blob/main/docs/workflows.md]Common workflows[/url] | [url=https://github.com/DevGuyRash/LuaBuddy/blob/main/docs/runtime.md]Profile and lifecycle reference[/url] | [url=https://github.com/DevGuyRash/LuaBuddy/issues]Report a problem[/url]
 description=
-description=[url=https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.2]Optional GitHub download[/url]. Workshop players do not need this separate download.
+description=[url=https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.3]Optional GitHub download[/url]. Workshop players do not need this separate download.
 description=
 description=When reporting a problem, include your game version, OS, mod IDs, and the relevant LuaBuddy diagnostic result. Remove personal paths or other private details before posting logs.
 description=
