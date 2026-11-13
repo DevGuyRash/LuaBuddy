@@ -152,7 +152,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "luabuddy"
-version = "0.1.0"
+version = "0.1.0-rc.2"
 dependencies = [
  "luabuddy-core",
  "luabuddy-patcher",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "luabuddy-core"
-version = "0.1.0"
+version = "0.1.0-rc.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "luabuddy-host"
-version = "0.1.0"
+version = "0.1.0-rc.2"
 dependencies = [
  "jni",
  "libloading",
@@ -184,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "luabuddy-patcher"
-version = "0.1.0"
+version = "0.1.0-rc.2"
 dependencies = [
  "libloading",
  "serde",
@@ -194,8 +194,9 @@ dependencies = [
 
 [[package]]
 name = "luabuddy-verify"
-version = "0.1.0"
+version = "0.1.0-rc.2"
 dependencies = [
+ "luabuddy",
  "serde_json",
  "sha2",
 ]

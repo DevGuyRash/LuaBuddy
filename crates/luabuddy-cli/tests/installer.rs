@@ -652,3 +652,160 @@ fn a_package_without_bundled_profiles_keeps_a_usable_empty_template_directory() 
     fs::remove_dir(f.profile_dir()).unwrap();
     assert_eq!(f.command("verify", &[]).status.code(), Some(1));
 }
+
+#[test]
+fn installation_status_keeps_owned_identity_when_user_profiles_are_invalid() {
+    let f = Fixture::new();
+    assert!(luabuddy::installation_status(&f.game).unwrap().is_none());
+    f.install();
+    let record = f.record();
+    let profile = f.profile_dir().join("UserPreference.properties");
+    let content = b"id=UserPreference\nunsupported=preserve-me\n";
+    fs::write(&profile, content).unwrap();
+
+    let status = luabuddy::installation_status(&f.game)
+        .unwrap()
+        .expect("a validated installation remains present");
+    assert_eq!(status.package_version, record["current"]["package_version"]);
+    assert_eq!(status.package_digest, record["current"]["package_digest"]);
+    assert!(!status.problems.is_empty());
+    assert!(luabuddy::verify_install(&f.game).is_err());
+    assert_eq!(f.command("verify", &[]).status.code(), Some(2));
+
+    assert_eq!(f.success("uninstall", &[])["changed"], true);
+    assert_eq!(fs::read(&profile).unwrap(), content);
+    assert!(luabuddy::installation_status(&f.game).unwrap().is_none());
+}
+
+#[test]
+fn installation_status_refuses_malformed_or_mismatched_receipt_ownership() {
+    let f = Fixture::new();
+    f.install();
+    let receipt = f.game.join(".luabuddy/native-install.json");
+    let original = fs::read(&receipt).unwrap();
+    fs::write(&receipt, b"not a native installation record").unwrap();
+    assert!(luabuddy::installation_status(&f.game).is_err());
+
+    let mut mismatched: Value = serde_json::from_slice(&original).unwrap();
+    mismatched["game"] = json!(f.root.join("another-game"));
+    fs::write(&receipt, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+    assert!(luabuddy::installation_status(&f.game).is_err());
+    assert_eq!(
+        fs::read(&receipt).unwrap(),
+        serde_json::to_vec(&mismatched).unwrap()
+    );
+    fs::write(receipt, original).unwrap();
+}
+
+fn cancel_dialog_marker(f: &Fixture) -> PathBuf {
+    let helpers = f.root.join("helpers");
+    fs::create_dir(&helpers).unwrap();
+    let source = f.root.join("dialog_dispatcher.rs");
+    fs::write(
+        &source,
+        r#"use std::{env, fs, path::Path, process};
+fn main() {
+    let invoked = env::args_os().next().expect("an executable name is supplied");
+    fs::write(env::var_os("LUABUDDY_TEST_DIALOG_MARKER").expect("a marker is supplied"), invoked.as_encoded_bytes()).expect("the marker is writable");
+    if Path::new(&invoked).file_name().is_some_and(|name| name == "zenity") {
+        process::exit(1);
+    }
+    process::exit(99);
+}
+"#,
+    )
+    .unwrap();
+    let dispatcher = f.root.join("dialog-dispatcher");
+    let output = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+        .args(["--edition=2024", "--crate-name=dialog_dispatcher"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&dispatcher)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::os::unix::fs::symlink(dispatcher, helpers.join("zenity")).unwrap();
+    f.root.join("dialog-invocation")
+}
+
+fn graphical_command(f: &Fixture, marker: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_luabuddy"));
+    command
+        .current_dir(&f.root)
+        .env("DISPLAY", ":unavailable-test-display")
+        .env_remove("WAYLAND_DISPLAY")
+        .env("XDG_CURRENT_DESKTOP", "GNOME")
+        .env("PATH", "helpers")
+        .env("LUABUDDY_TEST_DIALOG_MARKER", marker)
+        .env_remove("PZ_GAME_DIR");
+    command
+}
+
+#[test]
+fn explicit_cli_boundaries_do_not_open_graphical_setup() {
+    let f = Fixture::new();
+    let marker = cancel_dialog_marker(&f);
+    let help = graphical_command(&f, &marker).arg("help").output().unwrap();
+    assert!(help.status.success());
+    assert!(!help.stdout.is_empty());
+    assert!(!marker.exists(), "explicit help must not open a dialog");
+
+    let json = graphical_command(&f, &marker)
+        .args(["setup", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(json.status.code(), Some(2));
+    assert!(json.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&json.stderr).contains("--json"));
+    assert!(!marker.exists(), "JSON rejection must precede any dialog");
+
+    let headless = graphical_command(&f, &marker)
+        .arg("setup")
+        .arg("--package")
+        .arg(&f.package)
+        .arg("--game-dir")
+        .arg(&f.game)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .output()
+        .unwrap();
+    assert_eq!(headless.status.code(), Some(2));
+    assert!(headless.stdout.is_empty());
+    assert!(!headless.stderr.is_empty());
+    assert!(
+        !marker.exists(),
+        "headless refusal must not launch a helper"
+    );
+    assert!(!f.game.join(".luabuddy").exists());
+}
+
+#[test]
+fn graphical_cancel_preserves_symlinked_helper_invocation_and_game_files() {
+    let f = Fixture::new();
+    let marker = cancel_dialog_marker(&f);
+    let base = fs::read(f.game.join("ProjectZomboid64.json")).unwrap();
+    let output = graphical_command(&f, &marker)
+        .arg("setup")
+        .arg("--package")
+        .arg(&f.package)
+        .arg("--game-dir")
+        .arg(&f.game)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let invoked = PathBuf::from(String::from_utf8(fs::read(marker).unwrap()).unwrap());
+    assert_eq!(invoked.file_name(), Some(std::ffi::OsStr::new("zenity")));
+    assert_eq!(
+        base,
+        fs::read(f.game.join("ProjectZomboid64.json")).unwrap()
+    );
+    assert!(!f.game.join(".luabuddy").exists());
+}

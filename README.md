@@ -8,9 +8,11 @@ The native adapter and installer currently target Linux x86_64. Windows and macO
 
 This Rust migration is a release candidate. The [verification report](docs/evolution/verification-report.md) records the exercised functional paths and the open performance and Workshop acceptance gates.
 
-The [Steam Workshop page](https://steamcommunity.com/sharedfiles/filedetails/?id=3838682402) explains the product and supplies a setup guide. Download the native Linux package from the [release page](https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.1) and follow the [setup guide](workshop/Contents/mods/LuaBuddy_SetupGuide/SETUP.md). Subscribing to the guide does not install or activate the runtime. See [publishing](docs/publishing.md) for how the listing and native downloads are maintained.
+The [Steam Workshop item](https://steamcommunity.com/sharedfiles/filedetails/?id=3838682402) supplies the native Linux package and a [graphical setup guide](workshop/Contents/mods/LuaBuddy_SetupGuide/SETUP.md). Subscribe, extract the included archive with your desktop archive manager, and double-click `luabuddy` in the extracted folder. Setup finds the game or lets you choose its folder, then installs through the existing Rust installer. It uses an existing Zenity or KDialog desktop utility. No terminal command or separate download is needed for this flow. A one-time setup action is still required before the next normal Steam launch. The [GitHub prerelease](https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.2) is an optional download source. See [publishing](docs/publishing.md) for how the Workshop package and listing are maintained.
 
 ## Build and install
+
+Players can use [graphical setup](workshop/Contents/mods/LuaBuddy_SetupGuide/SETUP.md). The commands below are for building a checkout or using the installer from a terminal.
 
 Build with the pinned Rust toolchain and lockfile, then create an integrity-checked package. Do not copy proprietary game files into a package.
 
@@ -21,7 +23,7 @@ target/release/luabuddy verify-package --package dist/LuaBuddy-linux-x86_64
 dist/LuaBuddy-linux-x86_64/luabuddy install --package dist/LuaBuddy-linux-x86_64 --game-dir /path/to/ProjectZomboid
 ```
 
-Quit and relaunch the game through its normal native launcher. Installation writes a reversible `ProjectZomboid64.site.json` override and leaves Steam's base launcher JSON intact. A running JVM keeps its current library until exit. See [installation, repair, rollback, and uninstall](docs/evolution/install.md).
+Close the game before setup, then relaunch through Steam. Installation writes a reversible `ProjectZomboid64.site.json` override and leaves Steam's base launcher JSON intact. Setup does not stop or restart a running game. A running JVM keeps its current library until exit. See [installation, repair, rollback, and uninstall](docs/evolution/install.md).
 
 The installer copies the full declarative template catalog into an immutable generation. It copies only explicitly selected profiles into the active configuration.
 

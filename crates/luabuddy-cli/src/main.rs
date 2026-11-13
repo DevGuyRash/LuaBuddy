@@ -7,7 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::PathBuf;
 
-const HELP: &str = "LuaBuddy native installer\n\nCommands:\n  discover                                      Find the installed game and Steam libraries.\n  package --runtime FILE --profiles-dir DIR --out DIR\n                                                Create a native package and integrity manifest.\n  verify-package --package DIR                  Check all package files and native architecture.\n  install --package DIR [--mod ID]               Install without selecting any default mods.\n  update --package DIR                          Activate a verified package and retain rollback.\n  repair --package DIR                          Repair owned runtime files, preserving edits.\n  verify | doctor | status                      Inspect the installed files without changing them.\n  rollback                                      Restore the previous owned native generation.\n  recover                                       Undo an interrupted native installation.\n  uninstall                                     Remove owned integration and preserve profiles.\n  profiles --profiles-dir DIR                   Validate declarative mod profiles.\n  select --profiles-dir DIR --mod ID [--path ROOT] [--once]\n                                                Select eligible local/discovered Lua in place.\n  deselect --profiles-dir DIR --mod ID [--once]\n                                                Disable a future selection or cancel a queued launch.\n  diagnostics [--cache-dir DIR]                 Read the last in-game diagnostic report.\n\nGame commands accept --game-dir DIR or PZ_GAME_DIR.\nInstallation accepts --profiles-dir DIR, --debug, --no-debug, --early-ui, --no-early-ui.\n--once queues selection for the next game process, including reconnects, then expires.\nIt preserves mod source files and never hot-unloads running code.\nAll results are JSON. No command downloads code or subscribes to Workshop items.\nLinux native launcher integration is the only verified installer platform.\nPackage integrity does not establish in-game runtime acceptance.\n";
+mod setup;
+
+const HELP: &str = "LuaBuddy native installer\n\nCommands:\n  setup [--package DIR] [--game-dir DIR]         Open graphical native setup on Linux.\n  discover                                      Find the installed game and Steam libraries.\n  package --runtime FILE --profiles-dir DIR --out DIR\n                                                Create a native package and integrity manifest.\n  verify-package --package DIR                  Check all package files and native architecture.\n  install --package DIR [--mod ID]               Install without selecting any default mods.\n  update --package DIR                          Activate a verified package and retain rollback.\n  repair --package DIR                          Repair owned runtime files, preserving edits.\n  verify | doctor | status                      Inspect the installed files without changing them.\n  rollback                                      Restore the previous owned native generation.\n  recover                                       Undo an interrupted native installation.\n  uninstall                                     Remove owned integration and preserve profiles.\n  profiles --profiles-dir DIR                   Validate declarative mod profiles.\n  select --profiles-dir DIR --mod ID [--path ROOT] [--once]\n                                                Select eligible local/discovered Lua in place.\n  deselect --profiles-dir DIR --mod ID [--once]\n                                                Disable a future selection or cancel a queued launch.\n  diagnostics [--cache-dir DIR]                 Read the last in-game diagnostic report.\n\nGame commands accept --game-dir DIR or PZ_GAME_DIR.\nInstallation accepts --profiles-dir DIR, --debug, --no-debug, --early-ui, --no-early-ui.\n--once queues selection for the next game process, including reconnects, then expires.\nIt preserves mod source files and never hot-unloads running code.\nExplicit CLI command results are JSON; setup opens native desktop dialogs.\nWith no arguments, a Linux desktop session opens setup.\nGraphical setup requires Zenity or KDialog from the desktop.\nNo command downloads code or subscribes to Workshop items.\nLinux native launcher integration is the only verified installer platform.\nPackage integrity does not establish in-game runtime acceptance.\n";
 
 struct Arguments {
     command: String,
@@ -297,6 +299,16 @@ fn execute(args: &Arguments) -> Result<Value, String> {
 }
 
 fn main() {
+    if env::args_os().len() == 1 && setup::graphical_session() {
+        if let Err(error) = setup::run(setup::Options {
+            package: None,
+            game: None,
+        }) {
+            eprintln!("LuaBuddy setup: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     let args = match Arguments::parse() {
         Ok(args) => args,
         Err(error) => {
@@ -304,6 +316,25 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if args.command == "setup" {
+        let result = args
+            .allow(&["--package", "--game-dir"], &[], false)
+            .and_then(|()| {
+                if args.switches.contains("--json") {
+                    Err("setup is graphical and does not accept --json".into())
+                } else {
+                    setup::run(setup::Options {
+                        package: args.path("--package"),
+                        game: args.path("--game-dir"),
+                    })
+                }
+            });
+        if let Err(error) = result {
+            eprintln!("LuaBuddy setup: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     if matches!(args.command.as_str(), "help" | "--help" | "-h") {
         print!(
             "{HELP}\nNative extension commands require --profiles-dir DIR:\n  extension-install --artifact FILE --manifest FILE --sha256 SHA --manifest-sha256 MANIFEST_SHA --provenance SOURCE --allow PRIVILEGES --trust-native-code\n  extension-enable --extension-id ID --sha256 SHA --manifest-sha256 MANIFEST_SHA --provenance SOURCE --allow PRIVILEGES --trust-native-code\n  extension-disable --extension-id ID\n  extensions\nInstall stores native execution disabled. Enable and disable take effect in the next JVM process. Native extensions have full process privileges.\n"
