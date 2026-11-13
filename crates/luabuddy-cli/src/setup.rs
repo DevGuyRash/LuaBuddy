@@ -255,7 +255,7 @@ impl Dialogs {
                     .args(["--no-label", "Cancel"]);
             }
         }
-        Ok(selection(command)?.is_some())
+        self.message_box(command)
     }
 
     fn message(&self, error: bool, title: &str, text: &str) -> Result<()> {
@@ -280,7 +280,19 @@ impl Dialogs {
                     .arg(rich_text(text));
             }
         }
-        selection(command).map(|_| ())
+        self.message_box(command).map(|_| ())
+    }
+
+    fn message_box(&self, mut command: Command) -> Result<bool> {
+        let output = command
+            .output()
+            .map_err(|error| format!("Could not open the desktop message box: {error}"))?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            Some(2) if matches!(self, Self::KDialog(_)) => Ok(false),
+            _ => Err(dialog_failure(output)),
+        }
     }
 
     fn details(&self, title: &str, text: &str, accept: &str) -> Result<bool> {
@@ -824,5 +836,15 @@ mod tests {
             };
             assert_eq!(dialog_selection(result).unwrap().as_deref(), Some(path));
         }
+    }
+
+    #[test]
+    fn selection_errors_are_not_message_box_cancellation() {
+        let result = Output {
+            status: ExitStatus::from_raw(2 << 8),
+            stdout: Vec::new(),
+            stderr: b"invalid selection invocation".to_vec(),
+        };
+        assert!(dialog_selection(result).is_err());
     }
 }
