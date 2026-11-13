@@ -1,5 +1,10 @@
 const CALL_DESCRIPTOR: &[u8] = b"(Lse/krka/kahlua/vm/LuaCallFrame;I)I";
 
+enum Bridge {
+    Callable,
+    Event,
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     position: usize,
@@ -45,6 +50,16 @@ impl<'a> Reader<'a> {
 /// Replaces only the existing, verified no-op callable body with a native declaration.
 /// No instructions, helper classes, or application bytecode are inserted.
 pub(crate) fn native_callable(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    native_method(bytes, Bridge::Callable)
+}
+
+/// Retains the fingerprint-checked dispatcher as a private method and exposes
+/// its original signature through JNI. The original Code attribute is unchanged.
+pub(crate) fn native_event(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    native_method(bytes, Bridge::Event)
+}
+
+fn native_method(bytes: &[u8], bridge: Bridge) -> Result<Vec<u8>, String> {
     let mut reader = Reader { bytes, position: 0 };
     if reader.u4()? != 0xcafe_babe {
         return Err("invalid classfile magic".to_owned());
@@ -76,6 +91,14 @@ pub(crate) fn native_callable(bytes: &[u8]) -> Result<Vec<u8>, String> {
         }
         index += 1;
     }
+    let pool_end = reader.position;
+    let (target_name, target_descriptor) = match bridge {
+        Bridge::Callable => (b"call".as_slice(), CALL_DESCRIPTOR),
+        Bridge::Event => (b"trigger".as_slice(), crate::events::DESCRIPTOR.as_bytes()),
+    };
+    if matches!(bridge, Bridge::Event) && utf8.contains(&Some(crate::events::ORIGINAL.as_bytes())) {
+        return Err("event bridge method name already exists".into());
+    }
     reader.take(6)?;
     let interfaces = reader.u2()? as usize;
     reader.take(interfaces * 2)?;
@@ -84,9 +107,26 @@ pub(crate) fn native_callable(bytes: &[u8]) -> Result<Vec<u8>, String> {
         reader.take(6)?;
         reader.skip_attributes()?;
     }
+    let methods_offset = reader.position;
     let methods = reader.u2()?;
     let mut output = Vec::with_capacity(bytes.len());
     let mut copied = 0;
+    if matches!(bridge, Bridge::Event) {
+        let new_pool_count = u16::try_from(pool_count)
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .ok_or("event bridge constant pool is full")?;
+        let new_methods = methods.checked_add(1).ok_or("event method table is full")?;
+        output.extend_from_slice(&bytes[..8]);
+        output.extend_from_slice(&new_pool_count.to_be_bytes());
+        output.extend_from_slice(&bytes[10..pool_end]);
+        output.push(1);
+        output.extend_from_slice(&(crate::events::ORIGINAL.len() as u16).to_be_bytes());
+        output.extend_from_slice(crate::events::ORIGINAL.as_bytes());
+        output.extend_from_slice(&bytes[pool_end..methods_offset]);
+        output.extend_from_slice(&new_methods.to_be_bytes());
+        copied = reader.position;
+    }
     let mut changed = false;
     for _ in 0..methods {
         let method_start = reader.position;
@@ -94,8 +134,8 @@ pub(crate) fn native_callable(bytes: &[u8]) -> Result<Vec<u8>, String> {
         let name = reader.u2()? as usize;
         let descriptor = reader.u2()? as usize;
         let attributes = reader.u2()?;
-        let target = utf8.get(name).copied().flatten() == Some(b"call".as_slice())
-            && utf8.get(descriptor).copied().flatten() == Some(CALL_DESCRIPTOR);
+        let target = utf8.get(name).copied().flatten() == Some(target_name)
+            && utf8.get(descriptor).copied().flatten() == Some(target_descriptor);
         let mut retained = Vec::new();
         let mut code = None;
         for _ in 0..attributes {
@@ -104,6 +144,9 @@ pub(crate) fn native_callable(bytes: &[u8]) -> Result<Vec<u8>, String> {
             let length = reader.u4()? as usize;
             let body = reader.take(length)?;
             if target && utf8.get(attribute_name).copied().flatten() == Some(b"Code".as_slice()) {
+                if code.is_some() {
+                    return Err("duplicate method Code attribute".into());
+                }
                 code = Some(body);
             } else {
                 retained.push(&bytes[start..reader.position]);
@@ -113,9 +156,9 @@ pub(crate) fn native_callable(bytes: &[u8]) -> Result<Vec<u8>, String> {
             continue;
         }
         if changed || flags != 0x0001 {
-            return Err("unsupported duplicate/native/abstract/static callable method".to_owned());
+            return Err("unsupported duplicate/native/abstract/static bridge target".to_owned());
         }
-        let body = code.ok_or("callable method has no Code attribute")?;
+        let body = code.ok_or("bridge target has no Code attribute")?;
         let mut code_reader = Reader {
             bytes: body,
             position: 0,
@@ -123,15 +166,23 @@ pub(crate) fn native_callable(bytes: &[u8]) -> Result<Vec<u8>, String> {
         let max_stack = code_reader.u2()?;
         let max_locals = code_reader.u2()?;
         let code_size = code_reader.u4()? as usize;
-        if max_stack != 1 || max_locals != 3 || code_reader.take(code_size)? != [0x03, 0xac] {
-            return Err("callable method is no longer the expected host no-op".to_owned());
+        let instructions = code_reader.take(code_size)?;
+        match bridge {
+            Bridge::Callable => {
+                if max_stack != 1 || max_locals != 3 || instructions != [0x03, 0xac] {
+                    return Err("callable method is no longer the expected host no-op".into());
+                }
+            }
+            Bridge::Event => crate::events::verify(instructions)?,
         }
-        if code_reader.u2()? != 0 {
-            return Err("unexpected callable exception table".to_owned());
+        let exceptions = code_reader.u2()? as usize;
+        if matches!(bridge, Bridge::Callable) && exceptions != 0 {
+            return Err("unexpected callable exception table".into());
         }
+        code_reader.take(exceptions * 8)?;
         code_reader.skip_attributes()?;
         if code_reader.position != body.len() {
-            return Err("malformed callable Code attribute".to_owned());
+            return Err("malformed bridge Code attribute".to_owned());
         }
         output.extend_from_slice(&bytes[copied..method_start]);
         output.extend_from_slice(&(flags | 0x0100).to_be_bytes());
@@ -141,6 +192,13 @@ pub(crate) fn native_callable(bytes: &[u8]) -> Result<Vec<u8>, String> {
         for attribute in retained {
             output.extend_from_slice(attribute);
         }
+        if matches!(bridge, Bridge::Event) {
+            // The final Event class cannot be subclassed. Keeping the original
+            // body private also prevents virtual dispatch back into the bridge.
+            output.extend_from_slice(&0x1002_u16.to_be_bytes());
+            output.extend_from_slice(&(pool_count as u16).to_be_bytes());
+            output.extend_from_slice(&bytes[method_start + 4..reader.position]);
+        }
         copied = reader.position;
         changed = true;
     }
@@ -149,7 +207,7 @@ pub(crate) fn native_callable(bytes: &[u8]) -> Result<Vec<u8>, String> {
         return Err("trailing classfile data".to_owned());
     }
     if !changed {
-        return Err("host callable method not found".to_owned());
+        return Err("host bridge target method not found".to_owned());
     }
     output.extend_from_slice(&bytes[copied..]);
     Ok(output)

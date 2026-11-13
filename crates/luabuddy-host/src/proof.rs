@@ -211,7 +211,9 @@ fn run_jni(env: &mut JNIEnv<'_>, jvmti: &Jvmti) -> Result<(), Box<dyn std::error
     if !retired.is_null() || CALLBACKS.load(Ordering::SeqCst) != 4 {
         return Err("retired callback executed".into());
     }
-    event_proof(env, jvmti, &table, &thread)?;
+    if NATIVE.load(Ordering::SeqCst) {
+        event_proof(env, jvmti, &table, &thread)?;
+    }
     ui_proof(env)?;
     download_notification_proof(env, jvmti)?;
     let core = env
@@ -452,7 +454,7 @@ fn event_proof(
         "(Ljava/lang/Object;Ljava/lang/Object;)V",
         &[JValue::Object(&events_key), JValue::Object(&events)],
     )?;
-    crate::events::prepare(env, jvmti, event_handler)?;
+    crate::events::prepare(env, event_handler)?;
     let math_key = env.new_string("math")?;
     let math = env
         .call_method(
@@ -546,6 +548,84 @@ fn event_proof(
     eprintln!(
         "[LuaBuddy native proof] PASS actual dispatch, nested events, worker queue, owner-thread drain"
     );
+    let class = env.find_class("zombie/Lua/Event")?;
+    let native = env.get_method_id(&class, "trigger", crate::events::DESCRIPTOR)?;
+    let original = env.get_method_id(&class, crate::events::ORIGINAL, crate::events::DESCRIPTOR)?;
+    if jvmti.method_modifiers(native.into_raw())? != 0x0101
+        || jvmti.method_modifiers(original.into_raw())? != 0x1002
+    {
+        return Err("event bridge did not retain a private original and native entry".into());
+    }
+    crate::events::verify(&jvmti.bytecodes(original.into_raw())?)?;
+    let name_text = "LuaBuddyNative\0🌙";
+    let name = env.new_string(name_text)?;
+    let event = env.new_object(
+        &class,
+        "(Ljava/lang/String;I)V",
+        &[JValue::Object(&name), JValue::Int(0)],
+    )?;
+    let caller = env
+        .get_static_field(
+            "zombie/Lua/LuaManager",
+            "caller",
+            "Lse/krka/kahlua/integration/LuaCaller;",
+        )?
+        .l()?;
+    let args = env.new_object_array(0, "java/lang/Object", JObject::null())?;
+    let parameters = [
+        JValue::Object(table),
+        JValue::Object(&caller),
+        JValue::Object(&args),
+    ];
+    EVENTS.lock().map_err(|_| "proof trace poisoned")?.clear();
+    if env
+        .call_method(&event, "trigger", crate::events::DESCRIPTOR, &parameters)?
+        .z()?
+    {
+        return Err("empty event return changed".into());
+    }
+    let callbacks = env
+        .get_field(&event, "callbacks", "Ljava/util/ArrayList;")?
+        .l()?;
+    env.call_method(
+        callbacks,
+        "add",
+        "(Ljava/lang/Object;)Z",
+        &[JValue::Object(&host_callback)],
+    )?;
+    if !env
+        .call_method(&event, "trigger", crate::events::DESCRIPTOR, &parameters)?
+        .z()?
+    {
+        return Err("populated event return changed".into());
+    }
+    // A null callback list fails at the original method's first dereference,
+    // outside its own handler catches. JNI must retain this game exception.
+    env.set_field(
+        &event,
+        "callbacks",
+        "Ljava/util/ArrayList;",
+        JValue::Object(&JObject::null()),
+    )?;
+    if env
+        .call_method(&event, "trigger", crate::events::DESCRIPTOR, &parameters)
+        .is_ok()
+    {
+        return Err("original dispatcher exception was swallowed".into());
+    }
+    let exception = env.exception_occurred()?;
+    env.exception_clear()?;
+    if !env.is_instance_of(exception, "java/lang/NullPointerException")? {
+        return Err("original dispatcher exception type changed".into());
+    }
+    let trace = EVENTS.lock().map_err(|_| "proof trace poisoned")?.clone();
+    let expected = [true, false, true, false, true].map(|enter| (name_text.to_owned(), enter));
+    if trace != expected {
+        return Err(format!("normal/exception dispatch or Unicode name changed: {trace:?}").into());
+    }
+    eprintln!(
+        "[LuaBuddy native proof] PASS unchanged original bytecodes, boolean returns, Unicode names and exceptional exit without normal-return callback"
+    );
     Ok(())
 }
 
@@ -583,8 +663,6 @@ unsafe extern "system" fn breakpoint(
         }
         // SAFETY: All handles come from the JVM's current breakpoint callback.
         unsafe { crate::callables::dispatch(raw, jni, thread, _method) }?;
-        // SAFETY: These are the same callback-local handles used by the callable router.
-        unsafe { crate::events::dispatch(raw, jni, thread, _method, _location) }?;
         Ok(())
     });
     match outcome {

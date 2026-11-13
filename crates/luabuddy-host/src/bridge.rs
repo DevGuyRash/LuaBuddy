@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static TRANSFORMED: AtomicBool = AtomicBool::new(false);
+static EVENT_TRANSFORMED: AtomicBool = AtomicBool::new(false);
 static REGISTERED: AtomicBool = AtomicBool::new(false);
 static LOADER: OnceLock<GlobalRef> = OnceLock::new();
 
@@ -51,9 +52,11 @@ pub(crate) unsafe extern "system" fn class_load(
             return Ok(());
         }
         // SAFETY: JVMTI supplies a NUL-terminated internal class name.
-        if unsafe { CStr::from_ptr(name) }.to_bytes() != b"zombie/Lua/LuaEventManager" {
-            return Ok(());
-        }
+        let event = match unsafe { CStr::from_ptr(name) }.to_bytes() {
+            b"zombie/Lua/LuaEventManager" => false,
+            b"zombie/Lua/Event" => true,
+            _ => return Ok(()),
+        };
         let expected_loader = LOADER
             .get()
             .ok_or("game class loaded before native bridge was prepared")?;
@@ -65,10 +68,10 @@ pub(crate) unsafe extern "system" fn class_load(
             .is_same_object(loader, expected_loader.as_obj())
             .map_err(|e| e.to_string())?
         {
-            return Err("unsupported LuaEventManager classloader".to_owned());
+            return Err("unsupported native bridge classloader".to_owned());
         }
         if !redefined.is_null() {
-            return Err("native callable requires initial class definition".to_owned());
+            return Err("native bridge requires initial class definition".to_owned());
         }
         if length <= 0
             || length > 16 * 1024 * 1024
@@ -78,12 +81,21 @@ pub(crate) unsafe extern "system" fn class_load(
         {
             return Err("invalid classfile hook inputs".to_owned());
         }
-        if TRANSFORMED.load(Ordering::SeqCst) {
-            return Err("duplicate LuaEventManager classloader rejected".to_owned());
+        let transformed_flag = if event {
+            &EVENT_TRANSFORMED
+        } else {
+            &TRANSFORMED
+        };
+        if transformed_flag.load(Ordering::SeqCst) {
+            return Err("duplicate native bridge classloader rejected".to_owned());
         }
         // SAFETY: JVMTI guarantees length initialized classfile bytes during callback.
         let original = unsafe { std::slice::from_raw_parts(bytes, length as usize) };
-        let transformed = crate::classfile::native_callable(original)?;
+        let transformed = if event {
+            crate::classfile::native_event(original)?
+        } else {
+            crate::classfile::native_callable(original)?
+        };
         // SAFETY: The environment belongs to the current ClassFileLoadHook callback.
         let jvmti = unsafe { Jvmti::from_raw(raw) };
         let allocation = jvmti.allocate(transformed.len())?;
@@ -94,7 +106,7 @@ pub(crate) unsafe extern "system" fn class_load(
             *new_length = transformed.len() as i32;
             *new_bytes = allocation;
         }
-        TRANSFORMED.store(true, Ordering::SeqCst);
+        transformed_flag.store(true, Ordering::SeqCst);
         Ok(())
     });
     match result {
@@ -110,7 +122,9 @@ pub(crate) unsafe extern "system" fn class_prepare(
     _thread: jobject,
     class: jclass,
 ) {
-    if !TRANSFORMED.load(Ordering::SeqCst) || REGISTERED.load(Ordering::SeqCst) {
+    let callable_pending = TRANSFORMED.load(Ordering::SeqCst) && !REGISTERED.load(Ordering::SeqCst);
+    let event_pending = EVENT_TRANSFORMED.load(Ordering::SeqCst) && !crate::events::registered();
+    if !callable_pending && !event_pending {
         return;
     }
     let result = std::panic::catch_unwind(|| -> Result<(), String> {
@@ -118,9 +132,11 @@ pub(crate) unsafe extern "system" fn class_prepare(
         let mut env = unsafe { JNIEnv::from_raw(jni) }.map_err(|e| e.to_string())?;
         // SAFETY: raw is the callback's JVMTI environment.
         let jvmti = unsafe { Jvmti::from_raw(raw) };
-        if jvmti.class_signature(class)? != "Lzombie/Lua/LuaEventManager;" {
-            return Ok(());
-        }
+        let event = match jvmti.class_signature(class)?.as_str() {
+            "Lzombie/Lua/LuaEventManager;" if callable_pending => false,
+            "Lzombie/Lua/Event;" if event_pending => true,
+            _ => return Ok(()),
+        };
         // SAFETY: ClassPrepare supplies a live local jclass reference.
         let class = unsafe { JClass::from_raw(class) };
         let expected = LOADER
@@ -135,6 +151,9 @@ pub(crate) unsafe extern "system" fn class_prepare(
             .map_err(|error| error.to_string())?
         {
             return Ok(());
+        }
+        if event {
+            return crate::events::register(&mut env, &class);
         }
         env.register_native_methods(
             class,

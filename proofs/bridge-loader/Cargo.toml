@@ -11,3 +11,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 jni = "=0.21.1"
+serde_json = "=1.0.145"
+sha2 = "=0.10.9"

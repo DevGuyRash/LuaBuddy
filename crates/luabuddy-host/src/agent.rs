@@ -27,7 +27,7 @@ unsafe extern "system" fn vm_init(raw: CallbackEnv, jni: *mut RawJni, _thread: j
         // SAFETY: raw belongs to the active VMInit callback.
         let jvmti = unsafe { Jvmti::from_raw(raw) };
         crate::bridge::expect_system_loader(&mut env)?;
-        crate::events::prepare(&mut env, &jvmti, crate::runtime::event)?;
+        crate::events::prepare(&mut env, crate::runtime::event)?;
         if let Err(error) = crate::download_events::prepare(&mut env, &jvmti) {
             if matches!(env.exception_check(), Ok(true)) {
                 let _ = env.exception_clear();
@@ -48,10 +48,6 @@ unsafe extern "system" fn breakpoint(
     location: i64,
 ) {
     let outcome = std::panic::catch_unwind(|| -> Result<(), String> {
-        // SAFETY: Both dispatchers borrow only the current breakpoint's handles.
-        if unsafe { crate::events::dispatch(raw, jni, thread, method, location) }? {
-            return Ok(());
-        }
         // SAFETY: The download observer receives the same callback-local environment and event thread.
         if unsafe { crate::download_events::dispatch(raw, thread, method) }? {
             return Ok(());

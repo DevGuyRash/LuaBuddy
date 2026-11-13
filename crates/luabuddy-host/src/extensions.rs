@@ -447,7 +447,7 @@ pub fn diagnostics() -> Json {
     let status = |installed| if installed { "installed" } else { "inactive" };
     let runtime_hooks = json!([
         {"id":"luabuddy.callable-bridge","owner":"LuaBuddy","state":status(crate::bridge::ready()),"mechanism":"native declaration and RegisterNatives","disable":"restart required","target":{"class":"zombie/Lua/LuaEventManager","method":"call","descriptor":"(Lse/krka/kahlua/vm/LuaCallFrame;I)I","loader":"system","originalCode":"03ac"}},
-        {"id":"luabuddy.lifecycle","owner":"LuaBuddy","state":status(crate::events::installed()),"mechanism":"entry and normal-return breakpoints","targets":targets("zombie/Lua/Event")},
+        {"id":"luabuddy.lifecycle","owner":"LuaBuddy","state":status(crate::events::installed()),"mechanism":"native bridge around unchanged original dispatcher","disable":"restart required","targets":targets("zombie/Lua/Event")},
         {"id":"luabuddy.workshop-download-observer","owner":"LuaBuddy","state":status(crate::download_events::installed()),"mechanism":"entry breakpoints","targets":targets("zombie/core/znet/SteamWorkshop")}
     ]);
     json!({"schemaVersion":1,"store":state.root,"storeError":state.store_error,"capabilities":state.engine.capabilities(),"runtimeHooks":runtime_hooks,"extensions":entries,"patches":patches,"callbackFailures":state.engine.callback_failures().unwrap_or_else(|error| vec![("diagnostics".into(),error.to_string())]),"settingsApply":"next JVM process"})
