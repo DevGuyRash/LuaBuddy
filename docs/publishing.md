@@ -2,7 +2,7 @@
 
 The [LuaBuddy Workshop item](https://steamcommunity.com/sharedfiles/filedetails/?id=3838682402) supplies a verified native Linux package and its graphical setup guide. Players extract the included archive and open `luabuddy` without terminal commands or another download. One-time activation remains separate from subscription. Native updates require opening the newly extracted package and applying the update, and unsubscribing alone does not uninstall the native integration.
 
-The tracked [workshop folder](../workshop) owns the listing text, preview, and guide. `workshop.txt` is the description's source of truth. `preview.svg` is the editable preview source. Generate the required 256 by 256 PNG with `rsvg-convert workshop/preview.svg -o workshop/preview.png` when changing it. The existing item ID and [workshop-publisher.json](../workshop-publisher.json) keep updates attached to the same item. Do not create another item for routine updates.
+The tracked [workshop folder](../workshop) owns the listing text, preview, and guide. `workshop.txt` is the description's source of truth. [cover-master.png](../workshop/cover-master.png) is the full-resolution generated cover, and [artwork.md](../workshop/artwork.md) records its exact prompt and tool. Generate the required 256 by 256 PNG with `magick workshop/cover-master.png -resize 256x256 -strip workshop/preview.png` when changing it. The existing item ID and [workshop-publisher.json](../workshop-publisher.json) keep updates attached to the same item. Do not create another item for routine updates.
 
 The tracked folder does not contain generated native binaries. Upload the staged Workshop folder produced below. Uploading the raw tracked folder would omit the native setup package.
 
