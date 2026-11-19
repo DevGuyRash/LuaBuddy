@@ -51,7 +51,7 @@ Bundled integration rules and Rust hook behavior remain under `profiles/`. Addin
 
 `live=auto` is conservative. Content with native definitions, maps, animation assets, texture packs, or server Lua requires normal startup. `live=client-shared` explicitly requests only the client/shared portion and reports the native components that remain outside LuaBuddy's activation. `live=startup` refuses late restoration. When neither the selected profile nor its bundled template sets `live`, LuaBuddy uses `auto`.
 
-**Startup enable** and **Startup disable** edit the native default selection for the next ordinary loading path, with native dependency and dependent checks. They preserve the running world's selection and multiplayer server IDs. Restart confirmation uses the game's ordinary exit flow. Saving a future selection is distinct from activating the content in the current session.
+**Startup enable** and **Startup disable** edit the native default selection for the next ordinary loading path, with native dependency and dependent checks. They preserve the running world's selection and multiplayer server IDs. Restart confirmation uses the game's ordinary exit flow. Saving a future selection is distinct from activating the content in the current session. In multiplayer the server supplies the native mod list for the connection. An installed Workshop item, a saved **Startup enable**, or a client boot log before joining does not prove a mod is active after joining. Check the current session instead. A late profile reported as `loaded` proves its client sources ran, not that a server component exists.
 
 ## Source and require behavior
 

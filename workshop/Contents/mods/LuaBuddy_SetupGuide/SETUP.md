@@ -41,6 +41,12 @@ Apply or discard pending Options edits first. Disabling a selection does not hot
 
 Use **Help & guides** for full in-game workflows. The [workflow reference](https://github.com/DevGuyRash/LuaBuddy/blob/main/docs/workflows.md) covers local mods, one-launch testing, downloads, and troubleshooting.
 
+### If a mod disappears after joining a server
+
+**Startup enable** saves a local preference. A multiplayer server supplies its own native mod list on join. Check the current session in **Manage mods** after connecting; a Workshop subscription or a loading message at the main menu is not enough.
+
+PourIntoContainer and Shelf Aware! are optional native-startup profiles, not **Enable late** profiles. On a server without them, LuaBuddy does not run PourIntoContainer's custom liquid actions or Shelf Aware's tracker and server backup. For modern fluid containers, use the game's **Fluid > Transfer Liquid** or **Fluid > Empty**. For Shelf Aware's multiplayer tracker, the server operator must enable the upstream mod.
+
 ## Update the native runtime
 
 1. Let Steam download the updated Workshop item, then quit Project Zomboid.
