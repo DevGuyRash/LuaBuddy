@@ -25,6 +25,13 @@ Use **Load enabled** in a ready multiplayer client to request loading. To disabl
 luabuddy deselect --profiles-dir /path/to/profiles --mod Example
 ```
 
+## Pour and Shelf Aware on a multiplayer client
+
+Install the two upstream Workshop items yourself. In a package containing these templates, choose **Enable late** for each in **Manage mods**, or install with `--mod PourIntoContainer --mod PinyosShelfAware`. Both are optional. If these mods were previously selected for native startup, turn **Startup disable** on each and use the next normal game launch. Enabling a profile cannot undo options or callbacks already in memory, and a mod loaded by the server is not replaced. An ID-only profile (including CLI `select --path`) does not copy the exclusions. Existing personal profiles are never silently rewritten: if you used the old `live=startup` templates, back them up and replace only the two files with the new complete templates.
+
+* **PourIntoContainer:** The original quick-pour and empty entries remain visible; showing an entry does not mean a server can complete its custom action. The late profile omits the upstream options module so it does not enable **Hide Vanilla Liquid Menus** in a fresh Lua environment. On a server without those actions, use the game's **Fluid > Transfer Liquid** or **Fluid > Empty** instead.
+* **Shelf Aware!:** Open the reference window with the numeric keypad’s multiply key (the mod's default binding) or the book icon. Its manual marks, memos and read progress are available; automatic sightings, shelf locations, scanner-based loot feedback and death recovery are not. The original Settings tab's scan toggles do not enable the excluded scanner. The profile does not run its registry backup sender or server handler. It adds no local save file and cannot promise that manual entries survive reconnect. For searched-book locations, the separate optional **Loot Tracker** can search its own local records from **Map > Items**.
+
 ## Test a mod for one game launch
 
 Queue an eligible mod for the next game process. This does not change normal profiles or copy the mod's source.
