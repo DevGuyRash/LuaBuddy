@@ -404,8 +404,16 @@ fn rollback_restores_the_previous_profile_directory_for_reports_and_future_updat
             ],
         );
     }
+    let same_directory = |reported: &Value, original: &Path| {
+        assert_eq!(
+            fs::canonicalize(reported.as_str().unwrap()).unwrap(),
+            fs::canonicalize(original).unwrap()
+        );
+    };
     let selected = |directory: &Path| {
-        let argument = format!("-Dluabuddy.config={}", directory.display());
+        let record = f.record();
+        same_directory(&record["profiles"], directory);
+        let argument = format!("-Dluabuddy.config={}", record["profiles"].as_str().unwrap());
         let site = f.site();
         let args = site["vmArgs"].as_array().unwrap();
         assert_eq!(
@@ -414,7 +422,6 @@ fn rollback_restores_the_previous_profile_directory_for_reports_and_future_updat
                 .collect::<Vec<_>>(),
             [&json!(argument)]
         );
-        assert_eq!(f.record()["profiles"], json!(directory));
         assert_eq!(f.record()["current"]["config_argument"], json!(argument));
         assert!(args.contains(&json!("-Dunrelated=preserve me")));
         assert!(args.contains(&json!("-javaagent:other.jar")));
@@ -427,18 +434,15 @@ fn rollback_restores_the_previous_profile_directory_for_reports_and_future_updat
             ),
         ] {
             assert_eq!(result["ok"], true);
-            assert_eq!(result["profiles"], json!(directory));
+            assert_eq!(result["profiles"], record["profiles"]);
         }
     };
-    assert_eq!(f.success("rollback", &[])["profilesPreserved"], json!(a));
+    same_directory(&f.success("rollback", &[])["profilesPreserved"], &a);
     selected(&a);
     f.success("update", &["--package", f.package.to_str().unwrap()]);
     selected(&a);
     for directory in [&b, &a] {
-        assert_eq!(
-            f.success("rollback", &[])["profilesPreserved"],
-            json!(directory)
-        );
+        same_directory(&f.success("rollback", &[])["profilesPreserved"], directory);
         selected(directory);
     }
     f.success("uninstall", &[]);
@@ -1002,4 +1006,41 @@ fn renamed_exe_is_not_a_windows_runtime_and_locked_dll_is_not_removed() {
     f.success("uninstall", &[]);
     assert!(!runtime.exists());
     assert!(!site.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_uninstall_does_not_need_the_new_vendor_schema_or_discard_prior_edits() {
+    for original_site in [false, true] {
+        let f = Fixture::new();
+        let site = f.game.join("ProjectZomboid64.site.json");
+        let base = f.game.join("ProjectZomboid64.json");
+        let original = br#"{ "vmArgs": ["-Xmx3g"], "personal": "keep original bytes" }"#;
+        if original_site {
+            fs::write(&site, original).unwrap();
+        }
+        f.install();
+        if !original_site {
+            let mut config = f.site();
+            config["editBeforeUpdate"] = json!(7);
+            fs::write(&site, serde_json::to_vec(&config).unwrap()).unwrap();
+            f.success(
+                "update",
+                &["--package", f.package.to_str().unwrap(), "--debug"],
+            );
+        }
+        fs::write(&base, br#"{"windows":{"newVmArgs":["-Xmx1g"]}}"#).unwrap();
+        let verify = f.command("verify", &[]);
+        assert_eq!(verify.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&verify.stdout).contains("base launcher JSON changed"));
+        // Even while the vendor config is absent, owned removal is possible.
+        fs::remove_file(&base).unwrap();
+        f.success("uninstall", &[]);
+        if original_site {
+            assert_eq!(fs::read(&site).unwrap(), original);
+        } else {
+            assert_eq!(f.site()["editBeforeUpdate"], 7);
+            assert!(!fs::read_to_string(&site).unwrap().contains("-agentpath:"));
+        }
+    }
 }

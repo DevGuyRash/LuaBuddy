@@ -530,7 +530,7 @@ pub fn game_directory(path: &Path) -> Option<PathBuf> {
         .and_then(|p| fs::canonicalize(p).ok());
     #[cfg(windows)]
     {
-        game.and_then(windows::launcher_directory)
+        game.and_then(windows::launcher_path)
     }
     #[cfg(not(windows))]
     {
@@ -631,6 +631,8 @@ pub fn find_game(explicit: Option<&Path>) -> Result<PathBuf> {
 }
 
 pub fn probe_jvm(game: &Path) -> Result<JvmIdentity> {
+    #[cfg(windows)]
+    let game = windows::jvm_spelling(game)?;
     let executable = game.join(if cfg!(windows) {
         "jre64/bin/java.exe"
     } else {
@@ -642,7 +644,16 @@ pub fn probe_jvm(game: &Path) -> Result<JvmIdentity> {
             executable.display()
         )));
     }
-    let output = Command::new(&executable)
+    // Resolve the explicitly selected executable, not a JDK from PATH. For
+    // linked JREs this also lets java.exe locate its actual sibling runtime.
+    #[cfg(windows)]
+    let probe = fs::canonicalize(&executable)
+        .ok()
+        .and_then(windows::launcher_path)
+        .ok_or_else(|| invalid("Cannot resolve the selected bundled java.exe"))?;
+    #[cfg(not(windows))]
+    let probe = &executable;
+    let output = Command::new(probe)
         .args(["-XshowSettings:properties", "-version"])
         .env_remove("JAVA_TOOL_OPTIONS")
         .env_remove("JDK_JAVA_OPTIONS")
@@ -650,9 +661,17 @@ pub fn probe_jvm(game: &Path) -> Result<JvmIdentity> {
         .output()
         .map_err(|e| io_error("Run bundled JVM architecture probe", &executable, e))?;
     if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail: String = detail
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(240)
+            .collect();
         return Err(invalid(format!(
-            "Bundled JVM probe failed with {}",
-            output.status
+            "Bundled JVM probe failed with {}: {}",
+            output.status, detail
         )));
     }
     if output.stderr.len() as u64 > METADATA_LIMIT {
@@ -701,7 +720,7 @@ pub fn probe_jvm(game: &Path) -> Result<JvmIdentity> {
     })
 }
 
-fn launcher_paths(game: &Path) -> Result<(PathBuf, PathBuf)> {
+fn supported_launcher_files(game: &Path) -> Result<(PathBuf, PathBuf)> {
     if !cfg!(any(
         target_os = "linux",
         all(windows, target_arch = "x86_64", target_env = "msvc")
@@ -710,20 +729,36 @@ fn launcher_paths(game: &Path) -> Result<(PathBuf, PathBuf)> {
             "Native launcher integration is available on Linux and experimental x64 MSVC Windows only",
         ));
     }
+    Ok((
+        game.join("ProjectZomboid64.json"),
+        game.join("ProjectZomboid64.site.json"),
+    ))
+}
+
+fn launcher_paths(game: &Path) -> Result<(PathBuf, PathBuf)> {
+    let (base, site) = supported_launcher_files(game)?;
     #[cfg(windows)]
     if !game.join("ProjectZomboid64.exe").is_file() {
         return Err(invalid(
             "The normal Windows ProjectZomboid64.exe launcher is missing",
         ));
     }
-    let base = game.join("ProjectZomboid64.json");
     if !base.is_file() {
         return Err(invalid(format!(
             "Native launcher configuration missing: {}",
             base.display()
         )));
     }
-    Ok((base, game.join("ProjectZomboid64.site.json")))
+    Ok((base, site))
+}
+
+fn vendor_digest(data: &[u8]) -> Result<String> {
+    let value: Value = serde_json::from_slice(data).map_err(|e| {
+        invalid(format!(
+            "Invalid vendor launcher JSON: {e}. You can still uninstall LuaBuddy."
+        ))
+    })?;
+    Ok(sha256(&json_bytes(&value)?))
 }
 
 fn launcher_config(data: &[u8]) -> Result<Value> {
@@ -985,7 +1020,7 @@ fn validate_transaction(game: &Path, journal: &Journal) -> Result<()> {
             "Native transaction journal identity does not match this game",
         ));
     }
-    let (_, site) = launcher_paths(game)?;
+    let (_, site) = supported_launcher_files(game)?;
     let root = game.join(INSTALL_DIR);
     let mut seen = BTreeSet::new();
     for change in &journal.changes {
@@ -1289,7 +1324,7 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
     let original_site = optional_bytes(&site, METADATA_LIMIT)?;
     let base_bytes = bytes(&base, METADATA_LIMIT)?;
     let windows_base_digest = if cfg!(windows) {
-        Some(sha256(&json_bytes(&launcher_config(&base_bytes)?)?))
+        Some(vendor_digest(&base_bytes)?)
     } else {
         None
     };
@@ -1327,6 +1362,20 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
     }
     let profile_files = selected_profile_files(&options.mods, &profiles, &package)?;
     plain_directory(&profiles)?;
+    #[cfg(windows)]
+    let (profiles, profile_files) = {
+        let spelled = windows::jvm_spelling(&profiles)?;
+        let selected = profile_files
+            .into_iter()
+            .map(|(path, data)| {
+                let name = path
+                    .file_name()
+                    .ok_or_else(|| invalid("Invalid selected profile filename"))?;
+                Ok((spelled.join(name), data))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        (spelled, selected)
+    };
     let runtime_content = bytes(
         &package.directory.join(&package.manifest.runtime),
         RUNTIME_LIMIT,
@@ -1581,11 +1630,7 @@ fn installation_problems(game: &Path, record: &InstallRecord) -> Result<Vec<Stri
     let (base, site) = launcher_paths(game)?;
     let mut problems = Vec::new();
     if let Some(saved) = &record.windows_base_digest
-        && *saved
-            != sha256(&json_bytes(&launcher_config(&bytes(
-                &base,
-                METADATA_LIMIT,
-            )?)?)?)
+        && *saved != vendor_digest(&bytes(&base, METADATA_LIMIT)?)?
     {
         problems.push(BASE_CHANGED.into());
     }
@@ -1663,11 +1708,7 @@ pub fn rollback(game: &Path) -> Result<Value> {
     let mut record =
         read_record(game)?.ok_or_else(|| invalid("LuaBuddy native runtime is not installed"))?;
     if let Some(saved) = &record.windows_base_digest
-        && *saved
-            != sha256(&json_bytes(&launcher_config(&bytes(
-                &base,
-                METADATA_LIMIT,
-            )?)?)?)
+        && *saved != vendor_digest(&bytes(&base, METADATA_LIMIT)?)?
     {
         return Err(invalid(BASE_CHANGED));
     }
@@ -1749,7 +1790,7 @@ pub fn rollback(game: &Path) -> Result<Value> {
 }
 
 pub fn uninstall(game: &Path) -> Result<Value> {
-    let (_, site) = launcher_paths(game)?;
+    let (base, site) = supported_launcher_files(game)?;
     let lock = InstallLock::acquire(game)?;
     let recovered = recover(game)?;
     let Some(record) = read_record(game)? else {
@@ -1761,18 +1802,17 @@ pub fn uninstall(game: &Path) -> Result<Value> {
     let current_site = optional_bytes(&site, METADATA_LIMIT)?;
     let restored = if let Some(content) = &current_site {
         let clean = without_integration(content, &record)?;
-        let (base, _) = launcher_paths(game)?;
-        let original = record
-            .original_site
-            .clone()
-            .unwrap_or(bytes(&base, METADATA_LIMIT)?);
-        let original_config = launcher_config(&original)?;
-        let original_clean = without_integration(&original, &record)?;
-        let derived_from_old_base = record.original_site.is_none()
-            && record.windows_base_digest.as_ref().is_some_and(|saved| {
-                json_bytes(&clean).is_ok_and(|bytes| *saved == sha256(&bytes))
-            });
-        if derived_from_old_base || (clean == original_clean && original_config == original_clean) {
+        // Windows has the original semantic base digest. Removal of its
+        // complete site override must not depend on Steam retaining the old
+        // JSON schema, or on the replacement base file even existing.
+        let matches_baseline = if let Some(original) = &record.original_site {
+            clean == launcher_config(original)?
+        } else if let Some(saved) = &record.windows_base_digest {
+            *saved == sha256(&json_bytes(&clean)?)
+        } else {
+            clean == launcher_config(&bytes(&base, METADATA_LIMIT)?)?
+        };
+        if matches_baseline {
             record.original_site.clone()
         } else {
             Some(json_bytes(&clean)?)

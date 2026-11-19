@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string] $Package,
-    [Parameter(Mandatory)][string] $Jdk
+    [Parameter(Mandatory)][string] $Jdk,
+    [switch] $UnicodePath
 )
 $ErrorActionPreference = 'Stop'
 if (!$IsWindows -or [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne 'X64') {
@@ -10,7 +11,7 @@ if (!$IsWindows -or [Runtime.InteropServices.RuntimeInformation]::ProcessArchite
 }
 $packageRoot = (Get-Item -LiteralPath $Package).FullName
 $cli = Join-Path $packageRoot 'luabuddy.exe'
-function Cli([string[]]$Argv) {
+function Invoke-LuaBuddyCli([string[]]$Argv) {
     $text = & $cli @Argv
     if ($LASTEXITCODE -ne 0) { throw "luabuddy $($Argv[0]) failed (exit $LASTEXITCODE)" }
     return ($text -join "`n" | ConvertFrom-Json)
@@ -20,12 +21,13 @@ function Check([bool]$Ok,[string]$Message) {
 }
 function Hash([string]$Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
 $root = Join-Path ([IO.Path]::GetTempPath()) ('LuaBuddy install ' + [Guid]::NewGuid().ToString('N'))
-$game = Join-Path $root 'Steam library/steamapps/common/ProjectZomboid'
+$library = if ($UnicodePath) { 'Steam library 雪' } else { 'Steam library' }
+$game = Join-Path $root "$library/steamapps/common/ProjectZomboid"
 $site = Join-Path $game 'ProjectZomboid64.site.json'
 $base = Join-Path $game 'ProjectZomboid64.json'
 $receipt = Join-Path $game '.luabuddy/native-install.json'
 $setupGuide = Join-Path $packageRoot 'WINDOWS-SETUP.md'
-$before = (Cli @('verify-package','--package',$packageRoot))
+$before = (Invoke-LuaBuddyCli @('verify-package','--package',$packageRoot))
 Check ($before.ok -and !$before.runtimeVerified) 'Manifest verification incorrectly claimed runtime acceptance'
 Check (Test-Path -LiteralPath $setupGuide -PathType Leaf) 'Windows package lacks setup instructions'
 [void][IO.Directory]::CreateDirectory($game)
@@ -38,7 +40,7 @@ try {
     $packageDll = Join-Path $packageRoot 'luabuddy_host.dll'
     $packageHash = Hash $packageDll
     $argsFirst = @('--package',$packageRoot,'--game-dir',$game)
-    $installed = Cli (@('install') + $argsFirst)
+    $installed = Invoke-LuaBuddyCli (@('install') + $argsFirst)
     Check ($installed.changed -and !$installed.runtimeVerified) 'Installer did not record the new generation'
     $profileDir = $installed.profiles
     Check (@(Get-ChildItem -LiteralPath $profileDir -Force).Count -eq 0) 'Fresh install selected a profile'
@@ -49,9 +51,9 @@ try {
     Check (($dll -ceq $installed.runtime) -and ((Hash $dll) -ceq $packageHash)) 'Active DLL differs from the verified package'
     Check ($siteJson.vmArgs -ccontains '-Dunchanged=keep spaces') 'Unrelated VM option lost'
     Check ((Hash $base) -ceq $baseHash) 'Base launcher changed'
-    $check = Cli @('verify','--game-dir',$game)
+    $check = Invoke-LuaBuddyCli @('verify','--game-dir',$game)
     Check ($check.ok -and !$check.runtimeVerified -and ($check.jvm.architecture -ceq 'x86_64')) 'Incorrect installed file/JVM status'
-    Check (!(Cli (@('install') + $argsFirst)).changed) 'Reinstallation was not idempotent'
+    Check (!(Invoke-LuaBuddyCli (@('install') + $argsFirst)).changed) 'Reinstallation was not idempotent'
 
     & (Join-Path $PSScriptRoot '../windows-jvm/verify.ps1') -Runtime $dll -Jdk $Jdk
 
@@ -62,17 +64,17 @@ try {
     $newPackage = Join-Path $root 'new package'
     [void][IO.Directory]::CreateDirectory($newTemplates)
     [IO.File]::WriteAllText((Join-Path $newTemplates 'Fixture.properties'),"id=Fixture`n")
-    $null = Cli @('package','--runtime',$packageDll,'--profiles-dir',$newTemplates,'--out',$newPackage)
-    $update = Cli @('update','--package',$newPackage,'--game-dir',$game)
+    $null = Invoke-LuaBuddyCli @('package','--runtime',$packageDll,'--profiles-dir',$newTemplates,'--out',$newPackage)
+    $update = Invoke-LuaBuddyCli @('update','--package',$newPackage,'--game-dir',$game)
     Check (($update.runtime -cne $dll) -and ((Hash $update.runtime) -ceq $packageHash)) 'Update did not select distinct package generation'
-    $null = Cli @('rollback','--game-dir',$game)
-    Check ((Cli @('verify','--game-dir',$game)).runtime -ceq $dll) 'Rollback selected a different DLL'
-    $null = Cli @('uninstall','--game-dir',$game)
+    $null = Invoke-LuaBuddyCli @('rollback','--game-dir',$game)
+    Check ((Invoke-LuaBuddyCli @('verify','--game-dir',$game)).runtime -ceq $dll) 'Rollback selected a different DLL'
+    $null = Invoke-LuaBuddyCli @('uninstall','--game-dir',$game)
     Check (!(Test-Path -LiteralPath $site) -and !(Test-Path -LiteralPath $receipt)) 'Removal left an override or receipt'
     Check (!(Test-Path -LiteralPath $dll) -and !(Test-Path -LiteralPath $update.runtime)) 'Removal left a generation DLL'
     Check (!(Test-Path -LiteralPath (Join-Path $game '.luabuddy/native-install.lock'))) 'Removal left an active installer lock'
     Check (((Hash $base) -ceq $baseHash) -and ((Hash $sentinel) -ceq $sentinelHash)) 'Removal changed vendor config or personal profile'
-    Check (!(Cli @('uninstall','--game-dir',$game)).changed) 'Repeated uninstall was not a no-op'
+    Check (!(Invoke-LuaBuddyCli @('uninstall','--game-dir',$game)).changed) 'Repeated uninstall was not a no-op'
     Write-Host "PASS Windows release package, empty selection, installed DLL startup, update/rollback, reversible uninstall, preserved base and personal files; SHA256=$packageHash"
 } finally {
     # Remove the test-only directory junction itself before cleaning our fixture.

@@ -46,6 +46,18 @@ jobs:
       - name: Install, start the exact DLL in JDK 25, update, roll back, and uninstall
         shell: pwsh
         run: ./proofs/windows-install/verify.ps1 -Package ./dist/LuaBuddy-windows-x86_64 -Jdk $env:JAVA_HOME_25_X64
+      - name: Exercise a Unicode Steam library path on the same Windows runner
+        shell: pwsh
+        run: ./proofs/windows-install/verify.ps1 -Package ./dist/LuaBuddy-windows-x86_64 -Jdk $env:JAVA_HOME_25_X64 -UnicodePath
+      - name: Record the tested binary and manifest identities
+        shell: pwsh
+        run: |
+          $root = 'dist/LuaBuddy-windows-x86_64'
+          "Windows x64 native package and JDK 25 fixture passed at $env:GITHUB_SHA (not a licensed game launch)." >> $env:GITHUB_STEP_SUMMARY
+          foreach ($file in 'luabuddy.exe','luabuddy_host.dll','manifest.json') {
+            $digest = (Get-FileHash (Join-Path $root $file) -Algorithm SHA256).Hash
+            "$file SHA256: $digest" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
       - name: Retain the tested package (not a release)
         uses: actions/upload-artifact@v7.0.2
         with:

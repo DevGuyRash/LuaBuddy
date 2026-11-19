@@ -13,4 +13,4 @@ luabuddy-core = { path = "../luabuddy-core" }
 luabuddy-patcher = { path = "../luabuddy-patcher" }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.45.0", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Registry"] }
+windows-sys = { version = "=0.45.0", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_System_Registry"] }
