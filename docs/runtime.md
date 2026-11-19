@@ -49,7 +49,7 @@ cleanup=Example.cleanup
 
 Bundled integration rules and Rust hook behavior remain under `profiles/`. Adding a bundled template does not enable it in an existing user configuration.
 
-`live=auto` is conservative. Content with native definitions, maps, animation assets, texture packs, or server Lua requires normal startup. `live=client-shared` explicitly requests only the client/shared portion and reports the native components that remain outside LuaBuddy's activation. `live=startup` refuses late restoration. The bundled profiles declare their partial client/shared scope explicitly; that does not claim complete activation of their server or startup-only features.
+`live=auto` is conservative. Content with native definitions, maps, animation assets, texture packs, or server Lua requires normal startup. `live=client-shared` explicitly requests only the client/shared portion and reports the native components that remain outside LuaBuddy's activation. `live=startup` refuses late restoration. When neither the selected profile nor its bundled template sets `live`, LuaBuddy uses `auto`.
 
 **Startup enable** and **Startup disable** edit the native default selection for the next ordinary loading path, with native dependency and dependent checks. They preserve the running world's selection and multiplayer server IDs. Restart confirmation uses the game's ordinary exit flow. Saving a future selection is distinct from activating the content in the current session.
 
