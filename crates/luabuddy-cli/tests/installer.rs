@@ -1,4 +1,7 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(
+    target_os = "linux",
+    all(windows, target_arch = "x86_64", target_env = "msvc")
+))]
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -8,6 +11,69 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(target_os = "linux")]
+fn test_jre(game: &Path) {
+    let java = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|p| p.join("java"))
+        .find(|p| p.is_file())
+        .expect("Installer integration checks require an actual JVM on PATH");
+    fs::create_dir_all(game.join("jre64/bin")).unwrap();
+    std::os::unix::fs::symlink(fs::canonicalize(java).unwrap(), game.join("jre64/bin/java"))
+        .unwrap();
+}
+
+#[cfg(windows)]
+fn junction(path: &Path, target: &Path) {
+    // NTFS junctions do not need Administrator/Developer Mode and avoid copying
+    // a whole private JRE into every independent test. Paths are data, not code.
+    let output = Command::new("powershell.exe")
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+            "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:LB_DEST -Target $env:LB_SOURCE | Out-Null"])
+        .env("LB_DEST", path).env("LB_SOURCE", target).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+#[cfg(windows)]
+fn test_jre(game: &Path) {
+    let jdk = std::env::var_os("JAVA_HOME_25_X64")
+        .or_else(|| std::env::var_os("JAVA_HOME"))
+        .expect("Installer tests require JAVA_HOME pointing to a real x64 JDK");
+    junction(&game.join("jre64"), Path::new(&jdk));
+}
+
+#[cfg(target_os = "linux")]
+fn fixture_library() -> Vec<u8> {
+    let mut elf = vec![0; 64];
+    elf[..6].copy_from_slice(b"\x7fELF\x02\x01");
+    elf[16..18].copy_from_slice(&3u16.to_le_bytes());
+    elf[18..20].copy_from_slice(
+        &(if cfg!(target_arch = "aarch64") {
+            183u16
+        } else {
+            62u16
+        })
+        .to_le_bytes(),
+    );
+    elf
+}
+
+#[cfg(windows)]
+fn fixture_library() -> Vec<u8> {
+    // Identity fixture only. CI separately loads the actual packaged DLL into a JVM.
+    let mut pe = vec![0; 512];
+    pe[..2].copy_from_slice(b"MZ");
+    pe[60..64].copy_from_slice(&128u32.to_le_bytes());
+    pe[128..132].copy_from_slice(b"PE\0\0");
+    pe[132..134].copy_from_slice(&0x8664u16.to_le_bytes());
+    pe[148..150].copy_from_slice(&240u16.to_le_bytes());
+    pe[150..152].copy_from_slice(&0x2002u16.to_le_bytes());
+    pe[152..154].copy_from_slice(&0x020bu16.to_le_bytes());
+    pe
+}
 
 struct Fixture {
     root: PathBuf,
@@ -25,32 +91,19 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
-        let game = root.join("Steam library 雪/projectzomboid");
+        let game = root.join("Steam library 雪").join("projectzomboid");
         let templates = root.join("templates");
-        fs::create_dir_all(game.join("jre64/bin")).unwrap();
+        fs::create_dir_all(&game).unwrap();
         fs::create_dir(&templates).unwrap();
         fs::write(game.join("projectzomboid.jar"), []).unwrap();
-        let java = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-            .map(|p| p.join("java"))
-            .find(|p| p.is_file())
-            .expect("Installer integration checks require an actual JVM on PATH");
-        std::os::unix::fs::symlink(fs::canonicalize(java).unwrap(), game.join("jre64/bin/java"))
-            .unwrap();
+        #[cfg(windows)]
+        fs::write(game.join("ProjectZomboid64.exe"), []).unwrap();
+        let game = luabuddy::game_directory(&game).unwrap();
+        test_jre(&game);
         fs::write(game.join("ProjectZomboid64.json"), serde_json::to_vec_pretty(&json!({"mainClass":"missing/InstallerFixture", "vmArgs":["-Xmx512m", "-Dunrelated=preserve me", "-javaagent:other.jar"], "custom":{"value":7}})).unwrap()).unwrap();
         fs::write(templates.join("Example.properties"), "id=Example\n").unwrap();
-        let runtime = root.join("runtime.so");
-        let mut elf = vec![0; 64];
-        elf[..6].copy_from_slice(b"\x7fELF\x02\x01");
-        elf[16..18].copy_from_slice(&3u16.to_le_bytes());
-        elf[18..20].copy_from_slice(
-            &(if cfg!(target_arch = "aarch64") {
-                183u16
-            } else {
-                62u16
-            })
-            .to_le_bytes(),
-        );
-        fs::write(&runtime, elf).unwrap();
+        let runtime = root.join(std::env::consts::DLL_SUFFIX);
+        fs::write(&runtime, fixture_library()).unwrap();
         let package = root.join("package-one");
         let fixture = Self {
             root,
@@ -114,11 +167,14 @@ impl Fixture {
             .unwrap()
     }
     fn profile_dir(&self) -> PathBuf {
-        self.game.join(".luabuddy/profiles")
+        self.game.join(".luabuddy").join("profiles")
     }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        // Remove the junction entry itself before walking our disposable dir.
+        #[cfg(windows)]
+        fs::remove_dir(self.game.join("jre64")).unwrap();
         fs::remove_dir_all(&self.root).unwrap();
     }
 }
@@ -196,7 +252,13 @@ fn package_rejects_corruption_and_unlisted_files() {
         Some(2)
     );
     fs::remove_file(f.package.join("extra.so")).unwrap();
-    fs::write(f.package.join("libluabuddy_host.so"), "changed").unwrap();
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(f.package.join("manifest.json")).unwrap()).unwrap();
+    fs::write(
+        f.package.join(manifest["runtime"].as_str().unwrap()),
+        "changed",
+    )
+    .unwrap();
     assert_eq!(
         f.command(
             "verify-package",
@@ -342,8 +404,16 @@ fn rollback_restores_the_previous_profile_directory_for_reports_and_future_updat
             ],
         );
     }
+    let same_directory = |reported: &Value, original: &Path| {
+        assert_eq!(
+            fs::canonicalize(reported.as_str().unwrap()).unwrap(),
+            fs::canonicalize(original).unwrap()
+        );
+    };
     let selected = |directory: &Path| {
-        let argument = format!("-Dluabuddy.config={}", directory.display());
+        let record = f.record();
+        same_directory(&record["profiles"], directory);
+        let argument = format!("-Dluabuddy.config={}", record["profiles"].as_str().unwrap());
         let site = f.site();
         let args = site["vmArgs"].as_array().unwrap();
         assert_eq!(
@@ -352,7 +422,6 @@ fn rollback_restores_the_previous_profile_directory_for_reports_and_future_updat
                 .collect::<Vec<_>>(),
             [&json!(argument)]
         );
-        assert_eq!(f.record()["profiles"], json!(directory));
         assert_eq!(f.record()["current"]["config_argument"], json!(argument));
         assert!(args.contains(&json!("-Dunrelated=preserve me")));
         assert!(args.contains(&json!("-javaagent:other.jar")));
@@ -365,18 +434,15 @@ fn rollback_restores_the_previous_profile_directory_for_reports_and_future_updat
             ),
         ] {
             assert_eq!(result["ok"], true);
-            assert_eq!(result["profiles"], json!(directory));
+            assert_eq!(result["profiles"], record["profiles"]);
         }
     };
-    assert_eq!(f.success("rollback", &[])["profilesPreserved"], json!(a));
+    same_directory(&f.success("rollback", &[])["profilesPreserved"], &a);
     selected(&a);
     f.success("update", &["--package", f.package.to_str().unwrap()]);
     selected(&a);
     for directory in [&b, &a] {
-        assert_eq!(
-            f.success("rollback", &[])["profilesPreserved"],
-            json!(directory)
-        );
+        same_directory(&f.success("rollback", &[])["profilesPreserved"], directory);
         selected(directory);
     }
     f.success("uninstall", &[]);
@@ -697,6 +763,7 @@ fn installation_status_refuses_malformed_or_mismatched_receipt_ownership() {
     fs::write(receipt, original).unwrap();
 }
 
+#[cfg(target_os = "linux")]
 fn cancel_dialog_marker(f: &Fixture) -> PathBuf {
     let helpers = f.root.join("helpers");
     fs::create_dir(&helpers).unwrap();
@@ -732,6 +799,7 @@ fn main() {
     f.root.join("dialog-invocation")
 }
 
+#[cfg(target_os = "linux")]
 fn graphical_command(f: &Fixture, marker: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_luabuddy"));
     command
@@ -745,6 +813,7 @@ fn graphical_command(f: &Fixture, marker: &Path) -> Command {
     command
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn explicit_cli_boundaries_do_not_open_graphical_setup() {
     let f = Fixture::new();
@@ -783,6 +852,7 @@ fn explicit_cli_boundaries_do_not_open_graphical_setup() {
     assert!(!f.game.join(".luabuddy").exists());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn graphical_cancel_preserves_symlinked_helper_invocation_and_game_files() {
     let f = Fixture::new();
@@ -808,4 +878,169 @@ fn graphical_cancel_preserves_symlinked_helper_invocation_and_game_files() {
         fs::read(f.game.join("ProjectZomboid64.json")).unwrap()
     );
     assert!(!f.game.join(".luabuddy").exists());
+}
+
+#[test]
+fn existing_launcher_override_is_restored_byte_for_byte() {
+    let f = Fixture::new();
+    let site = f.game.join("ProjectZomboid64.site.json");
+    let custom = br#"{ "vmArgs": ["-Xms400m", "-Dspace=keep this"], "custom": 73 }"#;
+    fs::write(&site, custom).unwrap();
+    let vanilla = fs::read(f.game.join("ProjectZomboid64.json")).unwrap();
+    f.install();
+    assert_eq!(f.site()["custom"], 73);
+    assert_eq!(f.record()["jvm"]["architecture"], std::env::consts::ARCH);
+    assert_eq!(f.success("verify", &[])["runtimeVerified"], false);
+    f.success("uninstall", &[]);
+    assert_eq!(fs::read(&site).unwrap(), custom);
+    assert_eq!(
+        fs::read(f.game.join("ProjectZomboid64.json")).unwrap(),
+        vanilla
+    );
+    assert!(!f.game.join(".luabuddy/native-install.lock").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_refuses_stale_full_launcher_override_and_uninstalls_to_updated_base() {
+    for edited in [false, true] {
+        let f = Fixture::new();
+        f.install();
+        let site = f.game.join("ProjectZomboid64.site.json");
+        if edited {
+            let mut custom = f.site();
+            custom["personal"] = json!("never overwrite me");
+            fs::write(&site, serde_json::to_vec(&custom).unwrap()).unwrap();
+        }
+        let old = fs::read(&site).unwrap();
+        let base = f.game.join("ProjectZomboid64.json");
+        let fresh = br#"{"vmArgs":["-Xmx3g"],"classpath":["updated.jar"]}"#;
+        fs::write(&base, fresh).unwrap();
+        let inspect = f.command("verify", &[]);
+        assert_eq!(inspect.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&inspect.stdout).contains("base launcher JSON changed"));
+        for (command, args) in [
+            ("install", vec!["--package", f.package.to_str().unwrap()]),
+            ("repair", vec!["--package", f.package.to_str().unwrap()]),
+            ("rollback", vec![]),
+        ] {
+            let result = f.command(command, &args);
+            assert_eq!(result.status.code(), Some(2));
+            assert!(String::from_utf8_lossy(&result.stderr).contains("base launcher JSON changed"));
+        }
+        assert_eq!(fs::read(&site).unwrap(), old);
+        f.success("uninstall", &[]);
+        assert_eq!(fs::read(&base).unwrap(), fresh);
+        if edited {
+            assert_eq!(f.site()["personal"], "never overwrite me");
+        } else {
+            assert!(!site.exists());
+            f.install();
+            assert_eq!(f.site()["classpath"], json!(["updated.jar"]));
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_refuses_a_foreign_locked_file_and_destination_junction() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = Fixture::new();
+    let state = f.game.join(".luabuddy");
+    fs::create_dir(&state).unwrap();
+    let lock = state.join("native-install.lock");
+    let foreign = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .share_mode(0)
+        .open(&lock)
+        .unwrap();
+    let args = ["--package", f.package.to_str().unwrap()];
+    assert_eq!(f.command("install", &args).status.code(), Some(2));
+    assert!(!f.game.join("ProjectZomboid64.site.json").exists());
+    drop(foreign);
+    fs::remove_file(&lock).unwrap();
+
+    let outside = f.root.join("unrelated storage");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("sentinel"), b"keep").unwrap();
+    junction(&state.join("native"), &outside);
+    assert_eq!(f.command("install", &args).status.code(), Some(2));
+    assert!(!f.game.join("ProjectZomboid64.site.json").exists());
+    assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"keep");
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    fs::remove_dir(state.join("native")).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn renamed_exe_is_not_a_windows_runtime_and_locked_dll_is_not_removed() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = Fixture::new();
+    let result = f.command(
+        "package",
+        &[
+            "--runtime",
+            env!("CARGO_BIN_EXE_luabuddy"),
+            "--profiles-dir",
+            f.templates.to_str().unwrap(),
+            "--out",
+            f.root.join("bad-pe").to_str().unwrap(),
+        ],
+    );
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("PE32+ DLL"));
+    f.install();
+    let site = f.game.join("ProjectZomboid64.site.json");
+    let before = fs::read(&site).unwrap();
+    let runtime = PathBuf::from(f.record()["current"]["runtime"].as_str().unwrap());
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&runtime)
+        .unwrap();
+    assert_eq!(f.command("uninstall", &[]).status.code(), Some(2));
+    assert_eq!(fs::read(&site).unwrap(), before);
+    assert!(runtime.exists());
+    drop(held);
+    f.success("uninstall", &[]);
+    assert!(!runtime.exists());
+    assert!(!site.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_uninstall_does_not_need_the_new_vendor_schema_or_discard_prior_edits() {
+    for original_site in [false, true] {
+        let f = Fixture::new();
+        let site = f.game.join("ProjectZomboid64.site.json");
+        let base = f.game.join("ProjectZomboid64.json");
+        let original = br#"{ "vmArgs": ["-Xmx3g"], "personal": "keep original bytes" }"#;
+        if original_site {
+            fs::write(&site, original).unwrap();
+        }
+        f.install();
+        if !original_site {
+            let mut config = f.site();
+            config["editBeforeUpdate"] = json!(7);
+            fs::write(&site, serde_json::to_vec(&config).unwrap()).unwrap();
+            f.success(
+                "update",
+                &["--package", f.package.to_str().unwrap(), "--debug"],
+            );
+        }
+        fs::write(&base, br#"{"windows":{"newVmArgs":["-Xmx1g"]}}"#).unwrap();
+        let verify = f.command("verify", &[]);
+        assert_eq!(verify.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&verify.stdout).contains("base launcher JSON changed"));
+        // Even while the vendor config is absent, owned removal is possible.
+        fs::remove_file(&base).unwrap();
+        f.success("uninstall", &[]);
+        if original_site {
+            assert_eq!(fs::read(&site).unwrap(), original);
+        } else {
+            assert_eq!(f.site()["editBeforeUpdate"], 7);
+            assert!(!fs::read_to_string(&site).unwrap().contains("-agentpath:"));
+        }
+    }
 }

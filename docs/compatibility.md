@@ -2,6 +2,8 @@
 
 The Rust adapter uses Project Zomboid's existing JVM, Kahlua runtime, UI, discovery, metadata, translations, and Steam context. Private game APIs remain explicit compatibility dependencies. Rust does not make those APIs permanently stable.
 
+The [Windows x64 setup guide](windows-cli.md) distinguishes the packaged EXE/DLL and native fixture tests from gameplay. The Indie Stone [documents the site override](https://theindiestone.com/forums/topic/16470-released-build-3230/) read by the normal Windows launcher. This is not evidence for the BAT alternate launch, live game layouts, Windows UI or the Steam SDK ABI. Windows Workshop browsing and downloads remain disabled in LuaBuddy; the Linux native Steam library layout is not used as a Windows fallback.
+
 ## Observed host
 
 The implementation proofs use Linux x86_64, Project Zomboid `42.22.2 3d39148846 integrity=pending`, and bundled Azul Java `25.0.5+8-LTS`. The game JAR SHA256 observed by the native review is `3c4a7c5f149d784758c6fb5f8fa85f3a21d572e38bc081400e89035f8120d287`. This describes one tested host, not a fixed assumption about future installations.
@@ -10,7 +12,7 @@ The installer probes the selected bundled JVM process architecture. It does not 
 
 | Capability | Linux x86_64 | Windows | macOS |
 | --- | --- | --- | --- |
-| Ordinary native launcher integration | Installed `.site.json`, actual menu and Rust callback, offline relaunch, update, rollback, and uninstall passed through the copied real native executable. A later normal Steam launch mapped runtime `17ffaedb`, and fresh diagnostics plus `doctor` confirmed all 24 existing selections loaded with no failed, pending, or restart-required profiles. | Not verified. | Not verified. |
+| Ordinary native launcher integration | Installed `.site.json`, actual menu and Rust callback, offline relaunch, update, rollback, and uninstall passed through the copied real native executable. A later normal Steam launch mapped runtime `17ffaedb`, and fresh diagnostics plus `doctor` confirmed all 24 existing selections loaded with no failed, pending, or restart-required profiles. | Experimental x64 CLI, supported site override mechanism and hosted installer/stock-JVM checks. Ordinary licensed game launch not verified. | Not verified. |
 | Native callable, dispatch, classloader and patcher mechanisms | Actual bundled JVM proofs with verifier and JNI checking. | Not verified. | Not verified. |
 | Native discovery, translations and diagnostic files | Actual game-class consumers. | Not verified. | Not verified. |
 | Menu management and read-only initialized Workshop browsing | Isolated graphical client evidence in the implementation run. | Not verified. | Not verified. |

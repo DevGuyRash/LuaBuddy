@@ -1,5 +1,7 @@
 use luabuddy_core::{ModId, Profile, read_profiles};
 pub mod extensions;
+#[cfg(windows)]
+mod windows;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -11,6 +13,8 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(windows)]
+use windows::InstallLock;
 
 const SCHEMA: u32 = 1;
 const METADATA_LIMIT: u64 = 4 * 1024 * 1024;
@@ -43,9 +47,29 @@ fn invalid(message: impl Into<String>) -> Error {
 fn io_error(action: &str, path: &Path, error: std::io::Error) -> Error {
     invalid(format!("{action} {}: {error}", path.display()))
 }
+fn link_like(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    if windows::reparse(metadata) {
+        return true;
+    }
+    metadata.file_type().is_symlink()
+}
+
+fn reject_link_ancestors(path: &Path) -> Result<()> {
+    for ancestor in path.ancestors() {
+        if fs::symlink_metadata(ancestor).is_ok_and(|metadata| link_like(&metadata)) {
+            return Err(invalid(format!(
+                "Refusing a symlink or reparse point in an install destination: {}",
+                ancestor.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn bytes(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path).map_err(|e| io_error("Inspect", path, e))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
+    if !metadata.is_file() || link_like(&metadata) || metadata.len() > limit {
         return Err(invalid(format!(
             "Expected a regular file of at most {limit} bytes: {}",
             path.display()
@@ -110,19 +134,10 @@ fn absolute(path: &Path) -> Result<PathBuf> {
     }
 }
 fn plain_directory(path: &Path) -> Result<()> {
-    for ancestor in path.ancestors() {
-        if let Ok(metadata) = fs::symlink_metadata(ancestor)
-            && metadata.file_type().is_symlink()
-        {
-            return Err(invalid(format!(
-                "Refusing symlink in an install destination: {}",
-                ancestor.display()
-            )));
-        }
-    }
+    reject_link_ancestors(path)?;
     if path.exists() {
         let metadata = fs::symlink_metadata(path).map_err(|e| io_error("Inspect", path, e))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        if !metadata.is_dir() || link_like(&metadata) {
             return Err(invalid(format!(
                 "Refusing non-directory or symlink at {}",
                 path.display()
@@ -164,10 +179,8 @@ fn walk_files(root: &Path, directory: &Path, result: &mut BTreeSet<String>) -> R
     for entry in fs::read_dir(directory).map_err(|e| io_error("Read directory", directory, e))? {
         let entry = entry.map_err(|e| io_error("Read directory entry", directory, e))?;
         let path = entry.path();
-        let kind = entry
-            .file_type()
-            .map_err(|e| io_error("Inspect", &path, e))?;
-        if kind.is_symlink() {
+        let kind = fs::symlink_metadata(&path).map_err(|e| io_error("Inspect", &path, e))?;
+        if link_like(&kind) {
             return Err(invalid(format!(
                 "Package contains a symlink: {}",
                 path.display()
@@ -259,12 +272,55 @@ pub fn verify_package(directory: &Path) -> Result<Package> {
             "Runtime binary architecture does not match its manifest",
         ));
     }
+    if os == "windows" {
+        if manifest.runtime != "luabuddy_host.dll" || !manifest.files.contains_key("luabuddy.exe") {
+            return Err(invalid(
+                "Windows package must own luabuddy.exe and luabuddy_host.dll",
+            ));
+        }
+        let cli = bytes(&directory.join("luabuddy.exe"), RUNTIME_LIMIT)?;
+        if binary_identity(&cli)? != (os, architecture) {
+            return Err(invalid(
+                "Windows package CLI and runtime architectures disagree",
+            ));
+        }
+        verify_pe_role(&cli, false)?;
+        verify_pe_role(&runtime_bytes, true)?;
+    }
     read_profiles_if_exists(&directory.join("profiles"))?;
     Ok(Package {
         directory,
         manifest,
         digest,
     })
+}
+
+// COFF Characteristics and PE32+ magic distinguish a native x64 DLL from
+// a renamed executable or a truncated PE-signature-only file.
+fn verify_pe_role(data: &[u8], dll: bool) -> Result<()> {
+    let valid = (|| {
+        let offset = u32::from_le_bytes(data.get(60..64)?.try_into().ok()?) as usize;
+        let nt = data.get(offset..)?;
+        let header = nt.get(..24)?;
+        let opt_size = u16::from_le_bytes(header[20..22].try_into().ok()?) as usize;
+        let flags = u16::from_le_bytes(header[22..24].try_into().ok()?);
+        let optional = nt.get(24..)?.get(..opt_size)?;
+        Some(
+            &header[..4] == b"PE\0\0"
+                && optional.get(..2)? == [0x0b, 0x02]
+                && flags & 0x0002 != 0
+                && (flags & 0x2000 != 0) == dll,
+        )
+    })();
+    if valid == Some(true) {
+        Ok(())
+    } else {
+        Err(invalid(if dll {
+            "Windows runtime must be a PE32+ DLL"
+        } else {
+            "Windows CLI must be a PE32+ executable"
+        }))
+    }
 }
 
 fn binary_identity(data: &[u8]) -> Result<(&'static str, &'static str)> {
@@ -340,6 +396,9 @@ pub fn make_package(runtime: &Path, templates: &Path, output: &Path) -> Result<P
     }
     let runtime_content = bytes(runtime, RUNTIME_LIMIT)?;
     let (os, architecture) = binary_identity(&runtime_content)?;
+    if os == "windows" {
+        verify_pe_role(&runtime_content, true)?;
+    }
     let runtime_name = match os {
         "linux" => "libluabuddy_host.so",
         "windows" => "luabuddy_host.dll",
@@ -416,6 +475,15 @@ pub fn make_package(runtime: &Path, templates: &Path, output: &Path) -> Result<P
                 false,
             )?;
         }
+        if os == "windows" {
+            add_package_file(
+                &stage,
+                &mut files,
+                "WINDOWS-SETUP.md",
+                include_bytes!("../../../docs/windows-cli.md"),
+                false,
+            )?;
+        }
         let manifest = PackageManifest {
             schema: SCHEMA,
             product: "LuaBuddy".into(),
@@ -454,17 +522,25 @@ pub struct JvmIdentity {
 }
 
 pub fn game_directory(path: &Path) -> Option<PathBuf> {
-    [path.to_owned(), path.join("projectzomboid")]
+    let game = [path.to_owned(), path.join("projectzomboid")]
         .into_iter()
         .find(|p| {
             p.join("projectzomboid.jar").is_file() || p.join("java/projectzomboid.jar").is_file()
         })
-        .and_then(|p| fs::canonicalize(p).ok())
+        .and_then(|p| fs::canonicalize(p).ok());
+    #[cfg(windows)]
+    {
+        game.and_then(windows::launcher_path)
+    }
+    #[cfg(not(windows))]
+    {
+        game
+    }
 }
 
 fn vdf_strings(text: &str) -> Vec<String> {
     let mut result = Vec::new();
-    let mut chars = text.chars();
+    let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '"' {
             continue;
@@ -473,10 +549,8 @@ fn vdf_strings(text: &str) -> Vec<String> {
         while let Some(c) = chars.next() {
             match c {
                 '"' => break,
-                '\\' => {
-                    if let Some(c) = chars.next() {
-                        value.push(c);
-                    }
+                '\\' if matches!(chars.peek(), Some('\\' | '"')) => {
+                    value.push(chars.next().expect("matched VDF escape"));
                 }
                 _ => value.push(c),
             }
@@ -487,11 +561,9 @@ fn vdf_strings(text: &str) -> Vec<String> {
 }
 
 pub fn steam_libraries() -> Result<Vec<PathBuf>> {
-    let home = env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
-        .map(PathBuf::from);
     let mut roots = BTreeSet::new();
-    if let Some(home) = home {
+    #[cfg(not(windows))]
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
         roots.extend([
             home.join(".local/share/Steam"),
             home.join(".steam/steam"),
@@ -499,11 +571,19 @@ pub fn steam_libraries() -> Result<Vec<PathBuf>> {
             home.join("Library/Application Support/Steam"),
         ]);
     }
-    for key in ["ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"] {
-        if let Some(path) = env::var_os(key) {
-            roots.insert(PathBuf::from(path).join("Steam"));
+    #[cfg(windows)]
+    {
+        roots.extend(windows::steam_root());
+        for key in ["ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"] {
+            if let Some(path) = env::var_os(key) {
+                roots.insert(PathBuf::from(path).join("Steam"));
+            }
         }
     }
+    libraries_from(roots)
+}
+
+fn libraries_from(roots: BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
     let mut libraries = roots.clone();
     for root in roots {
         if let Some(data) =
@@ -551,6 +631,8 @@ pub fn find_game(explicit: Option<&Path>) -> Result<PathBuf> {
 }
 
 pub fn probe_jvm(game: &Path) -> Result<JvmIdentity> {
+    #[cfg(windows)]
+    let game = windows::jvm_spelling(game)?;
     let executable = game.join(if cfg!(windows) {
         "jre64/bin/java.exe"
     } else {
@@ -562,7 +644,16 @@ pub fn probe_jvm(game: &Path) -> Result<JvmIdentity> {
             executable.display()
         )));
     }
-    let output = Command::new(&executable)
+    // Resolve the explicitly selected executable, not a JDK from PATH. For
+    // linked JREs this also lets java.exe locate its actual sibling runtime.
+    #[cfg(windows)]
+    let probe = fs::canonicalize(&executable)
+        .ok()
+        .and_then(windows::launcher_path)
+        .ok_or_else(|| invalid("Cannot resolve the selected bundled java.exe"))?;
+    #[cfg(not(windows))]
+    let probe = &executable;
+    let output = Command::new(probe)
         .args(["-XshowSettings:properties", "-version"])
         .env_remove("JAVA_TOOL_OPTIONS")
         .env_remove("JDK_JAVA_OPTIONS")
@@ -570,16 +661,25 @@ pub fn probe_jvm(game: &Path) -> Result<JvmIdentity> {
         .output()
         .map_err(|e| io_error("Run bundled JVM architecture probe", &executable, e))?;
     if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail: String = detail
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(240)
+            .collect();
         return Err(invalid(format!(
-            "Bundled JVM probe failed with {}",
-            output.status
+            "Bundled JVM probe failed with {}: {}",
+            output.status, detail
         )));
     }
-    let text = String::from_utf8(output.stderr)
-        .map_err(|_| invalid("Bundled JVM identity output is not UTF-8"))?;
-    if text.len() as u64 > METADATA_LIMIT {
+    if output.stderr.len() as u64 > METADATA_LIMIT {
         return Err(invalid("Bundled JVM identity output is too large"));
     }
+    // Windows launchers can render unrelated settings (e.g. user.home)
+    // in a legacy code page. The identity property and accepted values are ASCII.
+    let text = String::from_utf8_lossy(&output.stderr);
     let architecture = text
         .lines()
         .find_map(|line| line.trim().strip_prefix("os.arch = "))
@@ -620,20 +720,45 @@ pub fn probe_jvm(game: &Path) -> Result<JvmIdentity> {
     })
 }
 
-fn launcher_paths(game: &Path) -> Result<(PathBuf, PathBuf)> {
-    if !cfg!(target_os = "linux") {
+fn supported_launcher_files(game: &Path) -> Result<(PathBuf, PathBuf)> {
+    if !cfg!(any(
+        target_os = "linux",
+        all(windows, target_arch = "x86_64", target_env = "msvc")
+    )) {
         return Err(invalid(
-            "Native launcher integration has only been proven on Linux; this platform is unverified",
+            "Native launcher integration is available on Linux and experimental x64 MSVC Windows only",
         ));
     }
-    let base = game.join("ProjectZomboid64.json");
+    Ok((
+        game.join("ProjectZomboid64.json"),
+        game.join("ProjectZomboid64.site.json"),
+    ))
+}
+
+fn launcher_paths(game: &Path) -> Result<(PathBuf, PathBuf)> {
+    let (base, site) = supported_launcher_files(game)?;
+    #[cfg(windows)]
+    if !game.join("ProjectZomboid64.exe").is_file() {
+        return Err(invalid(
+            "The normal Windows ProjectZomboid64.exe launcher is missing",
+        ));
+    }
     if !base.is_file() {
         return Err(invalid(format!(
             "Native launcher configuration missing: {}",
             base.display()
         )));
     }
-    Ok((base, game.join("ProjectZomboid64.site.json")))
+    Ok((base, site))
+}
+
+fn vendor_digest(data: &[u8]) -> Result<String> {
+    let value: Value = serde_json::from_slice(data).map_err(|e| {
+        invalid(format!(
+            "Invalid vendor launcher JSON: {e}. You can still uninstall LuaBuddy."
+        ))
+    })?;
+    Ok(sha256(&json_bytes(&value)?))
 }
 
 fn launcher_config(data: &[u8]) -> Result<Value> {
@@ -704,6 +829,10 @@ pub struct InstallRecord {
     pub game: PathBuf,
     pub profiles: PathBuf,
     pub original_site: Option<Vec<u8>>,
+    // Windows .site.json is a full replacement for Steam's base file. Detect
+    // a game update rather than silently pinning an old VM/classpath layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_base_digest: Option<String>,
     pub current: InstalledGeneration,
     pub previous: Option<InstalledGeneration>,
     pub jvm: JvmIdentity,
@@ -805,11 +934,13 @@ fn write_atomic(path: &Path, data: Option<&[u8]>, executable: bool) -> Result<()
     }
 }
 
+#[cfg(not(windows))]
 struct InstallLock {
     path: PathBuf,
     identity: String,
 }
 
+#[cfg(not(windows))]
 impl InstallLock {
     fn acquire(game: &Path) -> Result<Self> {
         let root = game.join(INSTALL_DIR);
@@ -849,6 +980,7 @@ impl InstallLock {
     }
 }
 
+#[cfg(not(windows))]
 impl Drop for InstallLock {
     fn drop(&mut self) {
         if fs::read(&self.path).ok().as_deref() == Some(self.identity.as_bytes()) {
@@ -857,6 +989,7 @@ impl Drop for InstallLock {
     }
 }
 
+#[cfg(not(windows))]
 fn process_identity(pid: u32) -> Result<String> {
     #[cfg(target_os = "linux")]
     {
@@ -887,7 +1020,7 @@ fn validate_transaction(game: &Path, journal: &Journal) -> Result<()> {
             "Native transaction journal identity does not match this game",
         ));
     }
-    let (_, site) = launcher_paths(game)?;
+    let (_, site) = supported_launcher_files(game)?;
     let root = game.join(INSTALL_DIR);
     let mut seen = BTreeSet::new();
     for change in &journal.changes {
@@ -901,6 +1034,7 @@ fn validate_transaction(game: &Path, journal: &Journal) -> Result<()> {
                 "Native transaction contains duplicate or traversing paths",
             ));
         }
+        reject_link_ancestors(&change.path)?;
         if change.path != site
             && !change.path.starts_with(&root)
             && change.path.parent() != Some(journal.profiles.as_path())
@@ -1058,16 +1192,7 @@ fn read_record(game: &Path) -> Result<Option<InstallRecord>> {
             {
                 return Err(invalid("Native generation contains an unowned file path"));
             }
-            for ancestor in path.ancestors() {
-                if fs::symlink_metadata(ancestor)
-                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
-                {
-                    return Err(invalid(format!(
-                        "Native generation contains a symlink path: {}",
-                        ancestor.display()
-                    )));
-                }
-            }
+            reject_link_ancestors(path)?;
         }
     }
     Ok(Some(record))
@@ -1197,9 +1322,18 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
     let recovered = recover(game)?;
     let prior = read_record(game)?;
     let original_site = optional_bytes(&site, METADATA_LIMIT)?;
-    let selected_launcher = original_site
-        .clone()
-        .unwrap_or(bytes(&base, METADATA_LIMIT)?);
+    let base_bytes = bytes(&base, METADATA_LIMIT)?;
+    let windows_base_digest = if cfg!(windows) {
+        Some(vendor_digest(&base_bytes)?)
+    } else {
+        None
+    };
+    if let Some(saved) = prior.as_ref().and_then(|r| r.windows_base_digest.as_ref())
+        && Some(saved) != windows_base_digest.as_ref()
+    {
+        return Err(invalid(BASE_CHANGED));
+    }
+    let selected_launcher = original_site.clone().unwrap_or(base_bytes);
     let mut config = launcher_config(&selected_launcher)?;
     let old_args: Vec<String> = config["vmArgs"]
         .as_array()
@@ -1228,6 +1362,20 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
     }
     let profile_files = selected_profile_files(&options.mods, &profiles, &package)?;
     plain_directory(&profiles)?;
+    #[cfg(windows)]
+    let (profiles, profile_files) = {
+        let spelled = windows::jvm_spelling(&profiles)?;
+        let selected = profile_files
+            .into_iter()
+            .map(|(path, data)| {
+                let name = path
+                    .file_name()
+                    .ok_or_else(|| invalid("Invalid selected profile filename"))?;
+                Ok((spelled.join(name), data))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        (spelled, selected)
+    };
     let runtime_content = bytes(
         &package.directory.join(&package.manifest.runtime),
         RUNTIME_LIMIT,
@@ -1371,6 +1519,7 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
             .as_ref()
             .map(|r| r.original_site.clone())
             .unwrap_or(original_site.clone()),
+        windows_base_digest,
         current: generation,
         previous: if same {
             prior.as_ref().and_then(|r| r.previous.clone())
@@ -1475,9 +1624,16 @@ pub struct InstallationStatus {
     pub problems: Vec<String>,
 }
 
+const BASE_CHANGED: &str = "Steam's base launcher JSON changed. Close the game and uninstall LuaBuddy. If a personal site override remains, compare it with the new base before reinstalling.";
+
 fn installation_problems(game: &Path, record: &InstallRecord) -> Result<Vec<String>> {
-    let (_, site) = launcher_paths(game)?;
+    let (base, site) = launcher_paths(game)?;
     let mut problems = Vec::new();
+    if let Some(saved) = &record.windows_base_digest
+        && *saved != vendor_digest(&bytes(&base, METADATA_LIMIT)?)?
+    {
+        problems.push(BASE_CHANGED.into());
+    }
     for (path, digest) in &record.current.files {
         match optional_bytes(path, RUNTIME_LIMIT)? {
             Some(data) if sha256(&data) == *digest => (),
@@ -1546,11 +1702,16 @@ pub fn recover_install(game: &Path) -> Result<Value> {
 }
 
 pub fn rollback(game: &Path) -> Result<Value> {
-    let (_, site) = launcher_paths(game)?;
+    let (base, site) = launcher_paths(game)?;
     let lock = InstallLock::acquire(game)?;
     recover(game)?;
     let mut record =
         read_record(game)?.ok_or_else(|| invalid("LuaBuddy native runtime is not installed"))?;
+    if let Some(saved) = &record.windows_base_digest
+        && *saved != vendor_digest(&bytes(&base, METADATA_LIMIT)?)?
+    {
+        return Err(invalid(BASE_CHANGED));
+    }
     let mut previous = record
         .previous
         .take()
@@ -1629,7 +1790,7 @@ pub fn rollback(game: &Path) -> Result<Value> {
 }
 
 pub fn uninstall(game: &Path) -> Result<Value> {
-    let (_, site) = launcher_paths(game)?;
+    let (base, site) = supported_launcher_files(game)?;
     let lock = InstallLock::acquire(game)?;
     let recovered = recover(game)?;
     let Some(record) = read_record(game)? else {
@@ -1641,14 +1802,17 @@ pub fn uninstall(game: &Path) -> Result<Value> {
     let current_site = optional_bytes(&site, METADATA_LIMIT)?;
     let restored = if let Some(content) = &current_site {
         let clean = without_integration(content, &record)?;
-        let (base, _) = launcher_paths(game)?;
-        let original = record
-            .original_site
-            .clone()
-            .unwrap_or(bytes(&base, METADATA_LIMIT)?);
-        let original_config = launcher_config(&original)?;
-        let original_clean = without_integration(&original, &record)?;
-        if clean == original_clean && original_config == original_clean {
+        // Windows has the original semantic base digest. Removal of its
+        // complete site override must not depend on Steam retaining the old
+        // JSON schema, or on the replacement base file even existing.
+        let matches_baseline = if let Some(original) = &record.original_site {
+            clean == launcher_config(original)?
+        } else if let Some(saved) = &record.windows_base_digest {
+            *saved == sha256(&json_bytes(&clean)?)
+        } else {
+            clean == launcher_config(&bytes(&base, METADATA_LIMIT)?)?
+        };
+        if matches_baseline {
             record.original_site.clone()
         } else {
             Some(json_bytes(&clean)?)
@@ -1867,4 +2031,59 @@ pub fn doctor(game: &Path, cache: &Path) -> Result<Value> {
         }
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod steam_discovery_tests {
+    use super::*;
+
+    #[test]
+    fn vdf_keeps_windows_drive_paths_spaces_and_escaped_or_literal_separators() {
+        assert_eq!(
+            vdf_strings(
+                r#""path" "D:\\Steam Libraries\\雪" "path" "E:\Other Games" "path" "\\\\host\\share""#
+            ),
+            [
+                "path",
+                r"D:\Steam Libraries\雪",
+                "path",
+                r"E:\Other Games",
+                "path",
+                r"\\host\share"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_secondary_library_is_discovered_without_consulting_a_real_steam_account() {
+        let root = env::temp_dir().join(format!("luabuddy-steam-test-{}", std::process::id()));
+        let primary = root.join("primary");
+        let secondary = root.join("second library 雪");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir_all(primary.join("steamapps")).unwrap();
+        let game = secondary
+            .join("steamapps")
+            .join("common")
+            .join("ProjectZomboid");
+        fs::create_dir_all(game.join("java")).unwrap();
+        fs::write(game.join("java").join("projectzomboid.jar"), []).unwrap();
+        let escaped = secondary.to_str().unwrap().replace('\\', "\\\\");
+        fs::write(
+            primary.join("steamapps").join("libraryfolders.vdf"),
+            format!(r#""libraryfolders" {{ "1" {{ "path" "{escaped}" }} }}"#),
+        )
+        .unwrap();
+        let found = libraries_from(BTreeSet::from([primary])).unwrap();
+        assert!(found.contains(&secondary));
+        assert!(game_directory(&game).is_some());
+        #[cfg(windows)]
+        assert!(
+            !game_directory(&game)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with(r"\\?\")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }

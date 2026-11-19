@@ -29,3 +29,39 @@ jobs:
         run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Check portable behavior and dependency advisories
         run: cargo xtask check --portable --audit
+
+  windows-release-package:
+    name: Windows x64 MSVC release package and JVM startup
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Build x64 EXE and DLL
+        run: cargo build --release --locked -p luabuddy -p luabuddy-host
+      - name: Create verified Windows package
+        run: ./target/release/luabuddy.exe package --runtime ./target/release/luabuddy_host.dll --profiles-dir profiles --out dist/LuaBuddy-windows-x86_64
+      - name: Install, start the exact DLL in JDK 25, update, roll back, and uninstall
+        shell: pwsh
+        run: ./proofs/windows-install/verify.ps1 -Package ./dist/LuaBuddy-windows-x86_64 -Jdk $env:JAVA_HOME_25_X64
+      - name: Exercise a Unicode Steam library path on the same Windows runner
+        shell: pwsh
+        run: ./proofs/windows-install/verify.ps1 -Package ./dist/LuaBuddy-windows-x86_64 -Jdk $env:JAVA_HOME_25_X64 -UnicodePath
+      - name: Record the tested binary and manifest identities
+        shell: pwsh
+        run: |
+          $root = 'dist/LuaBuddy-windows-x86_64'
+          "Windows x64 native package and JDK 25 fixture passed at $env:GITHUB_SHA (not a licensed game launch)." >> $env:GITHUB_STEP_SUMMARY
+          foreach ($file in 'luabuddy.exe','luabuddy_host.dll','manifest.json') {
+            $digest = (Get-FileHash (Join-Path $root $file) -Algorithm SHA256).Hash
+            "$file SHA256: $digest" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+      - name: Retain the tested package (not a release)
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: LuaBuddy-windows-x86_64
+          path: dist/LuaBuddy-windows-x86_64/
+          if-no-files-found: error
+          retention-days: 14
