@@ -4,7 +4,7 @@ LuaBuddy is a Rust-native client/shared Lua loader, in-game mod manager, and reu
 
 A fresh installation selects no mods. Bundled profiles are optional integrations. Profiles use supported Rust hooks and declarative fields. Obsolete `plugin` settings and Java-agent or Lua-hook migration are unsupported. Workshop subscription, download, installation, native activation, profile selection, and live loading are separate states.
 
-The native adapter and installer currently target Linux x86_64. Windows and macOS game execution remain unverified. Steam Workshop delivery does not yet provide a demonstrated subscribe-only activation route for this native runtime. [Compatibility](docs/compatibility.md) records that gate without treating an installer as one-click Workshop setup.
+Linux x86_64 is the game-verified platform. An [experimental Windows x64 CLI package](docs/windows-cli.md) uses the normal Windows launcher; Windows and macOS game execution remain unverified. Steam Workshop delivery does not yet provide a demonstrated subscribe-only activation route for this native runtime. [Compatibility](docs/compatibility.md) records that gate without treating an installer as one-click Workshop setup.
 
 This Rust migration is a release candidate. The [verification report](docs/evolution/verification-report.md) records the exercised functional paths and the open performance and Workshop acceptance gates.
 

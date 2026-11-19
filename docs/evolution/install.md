@@ -6,6 +6,8 @@ Close Project Zomboid before setup. Choose the game folder if discovery needs he
 
 Steam updates the supplied archive. To activate a native update, extract the newly delivered package and open its setup interface again. Subscribing alone does not activate a JVM agent, and unsubscribing alone does not remove an installed native generation. The graphical flow targets native Linux x86_64; it does not establish Windows, macOS, Proton, or every Linux desktop environment as supported.
 
+For Windows x64, use the [Windows CLI guide](../windows-cli.md), not the Linux Workshop archive. The Windows installer is experimental; game startup is a separate acceptance gate.
+
 ## Build and use the command line
 
 Build the Rust workspace with the pinned toolchain and locked dependencies. An offline build needs those exact dependencies in the Cargo cache.

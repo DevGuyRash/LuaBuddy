@@ -5,10 +5,8 @@ use jni::sys::{JNIEnv as RawJni, JavaVM, jmethodID, jobject};
 /// # Safety
 /// The invocation pointer is supplied by this JVM's Agent_OnLoad call.
 pub(crate) unsafe fn start(vm: *mut JavaVM) -> Result<(), String> {
-    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        return Err("native JVM boundary is currently verified only on Linux x86_64".to_owned());
-    }
     // SAFETY: Agent_OnLoad's JVM pointer remains live until JVM shutdown.
+    // from_vm checks the native ABI before accessing the invocation table.
     let jvmti = unsafe { Jvmti::from_vm(vm) }?;
     jvmti.enable_proof_capabilities()?;
     crate::patcher::initialize(&jvmti)?;

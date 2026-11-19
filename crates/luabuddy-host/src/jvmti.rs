@@ -27,8 +27,14 @@ impl Jvmti {
     /// # Safety
     /// `vm` must point to the current live JVM's invocation interface.
     pub(crate) unsafe fn from_vm(vm: *mut JavaVM) -> Result<Self, String> {
-        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            return Err("This native JVMTI ABI has been verified only on Linux x86_64".into());
+        if !cfg!(all(
+            target_arch = "x86_64",
+            any(
+                target_os = "linux",
+                all(target_os = "windows", target_env = "msvc")
+            )
+        )) {
+            return Err("unsupported JVMTI ABI: expected Linux x86_64 or Windows x64 MSVC".into());
         }
         let mut env = std::ptr::null_mut();
         // SAFETY: The caller owns a valid JVM pointer. GetEnv initializes env.
@@ -59,7 +65,8 @@ impl Jvmti {
             0,
         ];
         // SAFETY: JVMTI slot 142 is AddCapabilities. The four words match the
-        // JVMTI capability bit layout on the explicitly verified Linux x86_64 ABI.
+        // JVMTI capability bit layout on the enabled x64 ABIs. The Windows
+        // fixture checks the named bitfields against the actual JDK/MSVC headers.
         let call: unsafe extern "system" fn(RawEnv, *const u32) -> i32 =
             unsafe { std::mem::transmute(self.entry(142)) };
         // SAFETY: The borrowed bitfield is initialized and remains live in-call.
