@@ -39,7 +39,7 @@ A fresh installation selects no mods. Add an optional profile explicitly with `-
 dist/LuaBuddy-linux-x86_64/luabuddy install --package dist/LuaBuddy-linux-x86_64 --game-dir /path/to/ProjectZomboid --mod AllInfo --mod AutoAll
 ```
 
-Linux installation writes `ProjectZomboid64.site.json` beside the native launcher. It copies the existing site override when present, otherwise the base launcher configuration, and preserves unrelated JSON fields and JVM flags. Steam's base launcher JSON remains untouched. The override selects an immutable `.luabuddy/native/<package-manifest-sha256>/` generation through `-agentpath` and sets separate profile and template directory properties. Installing a profile template does not enable it in the selected configuration.
+Linux installation writes `ProjectZomboid64.site.json` beside the native launcher. It copies the existing site override when present, otherwise the base launcher configuration, and preserves unrelated JSON fields and JVM flags. Steam's base launcher JSON remains untouched. The override selects an immutable `.luabuddy/native/<package-manifest-sha256>/` generation through `-agentpath` and sets separate profile and template directory properties. On a fresh install, the active configuration defaults to `.luabuddy/profiles` beside the game launcher. The `profiles` field from `luabuddy verify` reports the actual active directory, including a custom `--profiles-dir`. Copying the template catalog does not enable any mods.
 
 Fully restart Project Zomboid through its normal launcher after installation, update, repair, rollback, or uninstall. These operations do not control an already running game.
 
@@ -102,4 +102,4 @@ luabuddy uninstall --game-dir /path/to/ProjectZomboid
 
 Uninstall preserves selected profiles, native repair recovery copies, Workshop content, and user-modified native files. It restores the original site override when safe. If the override has unrelated user changes, it removes only recorded LuaBuddy arguments and retains the changes. A repeated uninstall succeeds without additional changes.
 
-Native launcher activation is currently evidenced on Linux. Windows and macOS runtime and installer behavior require native tests before a release can claim support. Graphical setup removes the terminal step from the accepted Workshop workflow, but it remains an explicit activation action. Consult the platform capability report for the remaining subscribe-only activation gate.
+Native game launch is verified on Linux x86_64. The [experimental Windows x64 installer](../windows-cli.md) has installation, rollback, and stock-JDK tests, not verified gameplay. There is no macOS game-verified package. Graphical setup removes the terminal step from the accepted Workshop workflow, but it remains an explicit activation action. Consult the platform capability report for the remaining subscribe-only activation gate.

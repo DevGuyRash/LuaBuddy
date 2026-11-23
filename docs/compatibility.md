@@ -1,6 +1,6 @@
 # Native compatibility and platform evidence
 
-The Rust adapter uses Project Zomboid's existing JVM, Kahlua runtime, UI, discovery, metadata, translations, and Steam context. Private game APIs remain explicit compatibility dependencies. Rust does not make those APIs permanently stable.
+The Rust adapter uses Project Zomboid's existing JVM, Kahlua runtime, UI, discovery, metadata, translations, and Steam context. Private game APIs remain explicit compatibility dependencies. The native loader is a third-party integration, not part of the game's supported Lua modding interface. [The Indie Stone’s modding support statement](https://projectzomboid.com/blog/news/2026/10/a-note-on-java-mods-and-modding/) explains why game updates can break integrations that depend on internal code.
 
 The [Windows x64 setup guide](windows-cli.md) distinguishes the packaged EXE/DLL and native fixture tests from gameplay. The Indie Stone [documents the site override](https://theindiestone.com/forums/topic/16470-released-build-3230/) read by the normal Windows launcher. This is not evidence for the BAT alternate launch, live game layouts, Windows UI or the Steam SDK ABI. Windows Workshop browsing and downloads remain disabled in LuaBuddy; the Linux native Steam library layout is not used as a Windows fallback.
 
@@ -13,15 +13,15 @@ The installer probes the selected bundled JVM process architecture. It does not 
 | Capability | Linux x86_64 | Windows | macOS |
 | --- | --- | --- | --- |
 | Ordinary native launcher integration | Installed `.site.json`, actual menu and Rust callback, offline relaunch, update, rollback, and uninstall passed through the copied real native executable. A later normal Steam launch mapped runtime `17ffaedb`, and fresh diagnostics plus `doctor` confirmed all 24 existing selections loaded with no failed, pending, or restart-required profiles. | Experimental x64 CLI, supported site override mechanism and hosted installer/stock-JVM checks. Ordinary licensed game launch not verified. | Not verified. |
-| Native callable, dispatch, classloader and patcher mechanisms | Actual bundled JVM proofs with verifier and JNI checking. | Not verified. | Not verified. |
+| Native callable, dispatch, classloader and patcher mechanisms | Actual bundled JVM proofs with verifier and JNI checking. | Stock x64 JDK 25 checked DLL startup and rejection of absent or incompatible game classes; the game-specific mechanisms have not been verified on Windows. | Not verified. |
 | Native discovery, translations and diagnostic files | Actual game-class consumers. | Not verified. | Not verified. |
-| Menu management and read-only initialized Workshop browsing | Isolated graphical client evidence in the implementation run. | Not verified. | Not verified. |
-| New subscription/download account mutation | One authorized fresh item completed through actual Steam launches and the native manager on candidate `17ffaedb`. See [Workshop evidence](evolution/workshop.md). | Not verified. | Not verified. |
+| Menu management and read-only initialized Workshop browsing | Isolated graphical client evidence in the implementation run. | In-game UI not verified; in-manager Workshop access is disabled. | Not verified. |
+| New subscription/download account mutation | One authorized fresh item completed through actual Steam launches and the native manager on candidate `17ffaedb`. See [Workshop evidence](evolution/workshop.md). | Disabled in LuaBuddy; use the Steam client. | Not verified. |
 | Subscribe-only native activation | Unresolved. | Unverified. | Unverified. |
-| Gameplay | All 24 bundled profiles passed individually with required dependencies in distinct native environments. The all-24 combination, runtime addition, repeated no-op, reconnect, native controls, and saved preferences passed in disposable ordinary-role loopback sessions. | Not verified. | Not verified. |
+| Gameplay | The 24 profiles in the original test catalog passed individually with required dependencies in distinct native environments. The all-24 combination, runtime addition, repeated no-op, reconnect, native controls, and saved preferences passed in disposable ordinary-role loopback sessions. | Not verified. | Not verified. |
 | Matched performance acceptance | The earlier software-rendered five-pair comparison remains inconclusive. The later NVIDIA attempt completed only four of ten required runs before the user ended testing. Its 7,107 verified presentation intervals establish no speedup or budget pass. Scoped lifecycle references collected across refresh, reload, and reconnect. Reconnect resident growth also occurred in a native-only control; incremental loader cost remains unestablished. See [performance evidence](evolution/performance.md). | Not verified. | Not verified. |
 
-The later test-only platform correction produced runtime `1d44f599`, which passed its own 44-check native aggregate and two-path reproducibility. It is installed for the next normal Steam launch. The running game continued with `17ffaedb`, and its actual 24-profile startup remains scoped to that binary. No new graphical or performance journey is claimed for `1d44f599`. Portable CI for the current source head does not establish Windows or macOS gameplay support.
+These Linux results describe the named artifacts and the 24-profile test set, not every combination in the source catalog. For the published Linux prerelease, see the [v0.1.0-rc.3 release and provenance](https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.3) and its [headless event measurement](evolution/event-dispatch.md). The three [post-release profile templates](../README.md#select-optional-integrations) were not in that package. Portable CI on another OS is not evidence of gameplay there.
 
 ## Native boundaries
 
@@ -53,4 +53,4 @@ LuaBuddy does not supply missing server code, change multiplayer server policy, 
 
 Upstream Workshop updates are read in place. Native metadata decides version availability. Compatibility rules and optional integration code remain in the profile catalog, and no bundled mod is selected by default.
 
-The native-only purge package `1207d5d6` passed the exact-package 44-check native aggregate and current configuration/installer tests. Its source and package no longer contain the old migration paths or catalog. Actual normal-play startup evidence remains scoped to `1d44f599`; the newer native-only package is installed for the next normal launch.
+See the [migration verification report](evolution/verification-report.md) for earlier runtime hashes and the checks each one passed. A historical installation record is not the state of a player's current game.

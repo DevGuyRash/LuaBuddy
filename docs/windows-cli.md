@@ -2,6 +2,8 @@
 
 This is an experimental package for **native Windows x64**, not the Linux Workshop archive, Proton, ARM64 or the 32-bit launcher. It uses the game's existing launcher configuration; it doesn't attach to a running process. The x64 Windows CI uses a real JDK and a disposable game-shaped directory. It does not run a licensed copy of Project Zomboid, test the in-game UI, or enable the native Steam Workshop browsing/download ABI. Use Steam itself for Workshop content.
 
+**Get the test bundle:** Sign in to GitHub, open a successful `main` run of [Rust verification](https://github.com/DevGuyRash/LuaBuddy/actions/workflows/check.yml?query=branch%3Amain), and download **LuaBuddy-windows-x86_64** under **Artifacts**. The workflow retains artifacts for 14 days; if none is available, build the package from source as described below. The Linux GitHub prerelease and Steam archive do not contain `luabuddy.exe`.
+
 1. Close Project Zomboid. Extract the **entire** Windows CI artifact to a folder you trust; do not run the EXE from inside the ZIP. Open PowerShell in the extracted folder. Windows setup is a CLI, not the Linux graphical wizard.
 2. Verify the package, then ask where the game was found:
 

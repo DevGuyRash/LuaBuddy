@@ -2,7 +2,7 @@
 
 Steam supplies the native Linux package and this guide. One-time graphical setup activates LuaBuddy for normal Steam launches. Subscribing or enabling `LuaBuddy_SetupGuide` alone does not activate the runtime. You do not need to enable the guide to use LuaBuddy.
 
-The package targets Linux x86_64 with glibc 2.34 or newer and the native Linux Project Zomboid client. The runtime was tested on game version 42.22.2. Graphical setup uses an existing Zenity or KDialog utility. A Linux desktop without either utility cannot use this graphical flow. Windows, macOS, and Proton execution are not supported by this release.
+The package targets Linux x86_64 with glibc 2.34 or newer and the native Linux Project Zomboid client. The runtime was tested on game version 42.22.2. Graphical setup uses an existing Zenity or KDialog utility. A Linux desktop without either utility cannot use this graphical flow. This Workshop archive does not run on Windows, macOS, or Proton. The separate [experimental Windows x64 CLI test package](https://github.com/DevGuyRash/LuaBuddy/blob/main/docs/windows-cli.md) is not a game-verified release.
 
 ## Find the setup archive
 
@@ -27,13 +27,13 @@ Setup verifies the adjacent package before installation. Keep its executable, na
 
 The installer uses the game's bundled JVM, copies an integrity-checked native generation, and writes a reversible `ProjectZomboid64.site.json` launcher override. It preserves the base launcher JSON and unrelated settings. A fresh installation selects no mods. Existing profiles and settings survive an update. Setup does not stop or restart a running game, and native runtime changes apply after the next normal Steam launch.
 
-The prebuilt package needs no ZombieBuddy, Rust toolchain, Python, or additional Lua interpreter. The [GitHub prerelease](https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.3) is an optional download source if you do not use Workshop delivery.
+The prebuilt package includes its own Rust loader and patch engine. No other mod loader, Rust toolchain, Python, or additional Lua interpreter is required. The [GitHub prerelease](https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.3) is an optional download source if you do not use Workshop delivery.
 
 ## Choose a mod
 
 Install the upstream mod and its actual dependencies. Search **Installed** in LuaBuddy's manager. Inspect its description, dependency information, and observed states before selecting an action.
 
-- To load eligible client/shared Lua during play, use **This session > Enable late**, then **Load enabled**. Read the result for loaded, failed, reconnect, or restart instructions.
+- To load eligible client/shared Lua during a multiplayer session, use **This session > Enable late**, then **Load enabled**. Read the result for loaded, failed, reconnect, or restart instructions.
 - To use the normal startup lifecycle, use **Next launch > Startup enable**, then restart the game.
 - To reload, use **Reload a profile** and search the installed list or type an ID with suggestions. Reload requires an explicit cleanup contract. Otherwise reconnect.
 

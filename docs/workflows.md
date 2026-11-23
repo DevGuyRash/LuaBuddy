@@ -1,6 +1,6 @@
 # Use LuaBuddy for common tasks
 
-Open **Options > Mods > LuaBuddy > Manage mods**. The manager separates actions for **This session**, **Next launch**, **Workshop**, and **Diagnostics**. In **Help & guides**, choose a workflow to see its goal, steps, result check, and undo instructions. Action names use the same accent color in instructions and tooltips. Apply or discard pending Options edits before changing a selection.
+Open **Options > Mods > LuaBuddy > Manage mods**. These in-game workflows describe the verified native Linux client. The [experimental Windows x64 build](windows-cli.md) has no verified game session or in-manager Workshop browsing/downloads. The manager separates actions for **This session**, **Next launch**, **Workshop**, and **Diagnostics**. In **Help & guides**, choose a workflow to see its goal, steps, result check, and undo instructions. Action names use the same accent color in instructions and tooltips. Apply or discard pending Options edits before changing a selection.
 
 ## Test an installed local mod
 
@@ -12,7 +12,7 @@ Open **Options > Mods > LuaBuddy > Manage mods**. The manager separates actions 
 6. Exercise the mod's actual controls. Loading successfully does not establish that every feature works, especially features requiring server code or native startup assets.
 7. When testing is complete, choose **Disable late**. The source stays installed, and running code stays active until the Lua environment ends. A reconnect uses the saved disabled selection.
 
-For a source tree outside the native mod directories, select its root through the CLI. Supply the same profile directory that the installed runtime uses. The `path` is the root above `common/` and the selected version directory.
+For a source tree outside the native mod directories, select its root through the CLI. Run `luabuddy verify --game-dir /path/to/ProjectZomboid` and use the `profiles` path from its JSON output for `--profiles-dir`. The default is `.luabuddy/profiles` beside the game launcher; use the reported path if setup selected a different directory. Do not point `select` at the package's template directory. The `path` is the root above `common/` and the selected version directory.
 
 ```sh
 luabuddy select --profiles-dir /path/to/profiles --mod Example --path /path/to/Example
@@ -27,7 +27,7 @@ luabuddy deselect --profiles-dir /path/to/profiles --mod Example
 
 ## Pour and Shelf Aware on a multiplayer client
 
-Install the two upstream Workshop items yourself. In a package containing these templates, choose **Enable late** for each in **Manage mods**, or install with `--mod PourIntoContainer --mod PinyosShelfAware`. Both are optional. If these mods were previously selected for native startup, turn **Startup disable** on each and use the next normal game launch. Enabling a profile cannot undo options or callbacks already in memory, and a mod loaded by the server is not replaced. An ID-only profile (including CLI `select --path`) does not copy the exclusions. Existing personal profiles are never silently rewritten: if you used the old `live=startup` templates, back them up and replace only the two files with the new complete templates.
+These two templates are in the source catalog after v0.1.0-rc.3, not in that prerelease archive. Install the upstream Workshop item for each integration you want. With a package built from the updated source, choose **Enable late** for each in **Manage mods**, or install with `--mod PourIntoContainer --mod PinyosShelfAware`. Both are optional. If these mods were previously selected for native startup, choose **Next launch > Startup disable** for each and use the next normal game launch. Enabling a profile cannot undo options or callbacks already in memory, and a mod loaded by the server is not replaced. An ID-only profile (including CLI `select --path`) does not copy the exclusions. Existing personal profiles are never silently rewritten: if you used the old `live=startup` templates, back them up and replace only the two files with the new complete templates.
 
 * **PourIntoContainer:** The original quick-pour and empty entries remain visible; showing an entry does not mean a server can complete its custom action. The late profile omits the upstream options module so it does not enable **Hide Vanilla Liquid Menus** in a fresh Lua environment. On a server without those actions, use the game's **Fluid > Transfer Liquid** or **Fluid > Empty** instead.
 * **Shelf Aware!:** Open the reference window with the numeric keypad’s multiply key (the mod's default binding) or the book icon. Its manual marks, memos and read progress are available; automatic sightings, shelf locations, scanner-based loot feedback and death recovery are not. The original Settings tab's scan toggles do not enable the excluded scanner. The profile does not run its registry backup sender or server handler. It adds no local save file and cannot promise that manual entries survive reconnect. For searched-book locations, the separate optional **Loot Tracker** can search its own local records from **Map > Items**.

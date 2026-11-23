@@ -2,6 +2,8 @@
 
 The [LuaBuddy Workshop item](https://steamcommunity.com/sharedfiles/filedetails/?id=3838682402) supplies a verified native Linux package and its graphical setup guide. Players extract the included archive and open `luabuddy` without terminal commands or another download. One-time activation remains separate from subscription. Native updates require opening the newly extracted package and applying the update, and unsubscribing alone does not uninstall the native integration.
 
+The GitHub repository's **About** description is separate from its README, release notes, and Steam listing. Keep it aligned with the current product: a Rust-native in-game mod manager, client/shared Lua loader, and JVM patch engine for Project Zomboid Build 42. Check what players actually see on both public pages after changing metadata.
+
 The tracked [workshop folder](../workshop) owns the listing text, preview, and guide. `workshop.txt` is the description's source of truth. [cover-master.png](../workshop/cover-master.png) is the full-resolution generated cover, and [artwork.md](../workshop/artwork.md) records its exact prompt and tool. Generate the required 256 by 256 PNG with `magick workshop/cover-master.png -resize 256x256 -strip workshop/preview.png` when changing it. The existing item ID and [workshop-publisher.json](../workshop-publisher.json) keep updates attached to the same item. Do not create another item for routine updates.
 
 The tracked folder does not contain generated native binaries. Upload the staged Workshop folder produced below. Uploading the raw tracked folder would omit the native setup package.
@@ -16,7 +18,7 @@ target/release/luabuddy package --runtime target/release/libluabuddy_host.so --p
 target/release/luabuddy verify-package --package dist/LuaBuddy-linux-x86_64
 ```
 
-An offline build needs the locked dependencies already cached. The first graphical setup release uses tag `v0.1.0-rc.2`. Mark release candidates as prereleases. An optional GitHub release can carry the same verified native files, checksums, setup guide, and provenance as an alternative delivery source. Workshop players do not need that separate download.
+An offline build needs the locked dependencies already cached. The first graphical setup shipped in `v0.1.0-rc.2`; [v0.1.0-rc.3](https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.3) includes the Linux archive, SHA256SUMS, install guide, and build provenance. Mark candidates as prereleases. Compare the release assets and packaged `profiles/` with the source checkout before advertising new features. A merged profile or a Windows CI artifact is not a release asset. Workshop players do not need a separate GitHub download.
 
 The initial `v0.1.0-rc.1` release contained the native bytes accepted for PR #20 and a documentation-only Workshop item. Its provenance remains scoped to that artifact. A package containing the graphical executable needs its own verification and provenance.
 

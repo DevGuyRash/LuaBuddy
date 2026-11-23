@@ -1,18 +1,22 @@
 # LuaBuddy
 
-LuaBuddy is a Rust-native client/shared Lua loader, in-game mod manager, and reusable JVM patcher for Project Zomboid. The native runtime uses the game's existing Java classes and Kahlua interpreter. It has no ZombieBuddy, Python, extra interpreter, or runtime compiler dependency.
+LuaBuddy is an in-game mod manager for Project Zomboid Build 42. It can load eligible client/shared Lua into a multiplayer client, manage mods for the next normal startup, and show which mods actually loaded. Its loader and JVM patch engine are written in Rust. It runs upstream Lua using the game's own JVM and Kahlua interpreter; players do not need another loader, interpreter, or compiler.
 
-A fresh installation selects no mods. Bundled profiles are optional integrations. Profiles use supported Rust hooks and declarative fields. Obsolete `plugin` settings and Java-agent or Lua-hook migration are unsupported. Workshop subscription, download, installation, native activation, profile selection, and live loading are separate states.
+A fresh install enables **no mods**. Install the upstream mods you want separately. A Workshop subscription delivers files; it does not activate LuaBuddy or select any of its optional mod profiles.
 
-Linux x86_64 is the game-verified platform. An [experimental Windows x64 CLI package](docs/windows-cli.md) uses the normal Windows launcher; Windows and macOS game execution remain unverified. Steam Workshop delivery does not yet provide a demonstrated subscribe-only activation route for this native runtime. [Compatibility](docs/compatibility.md) records that gate without treating an installer as one-click Workshop setup.
+## Which download do I need?
 
-This Rust migration is a release candidate. The [verification report](docs/evolution/verification-report.md) records the exercised functional paths and the open performance and Workshop acceptance gates.
+| Platform | Where to get it | What has been verified |
+| --- | --- | --- |
+| Native Linux x86_64 (glibc 2.34+) | [Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3838682402) or the [v0.1.0-rc.3 GitHub prerelease](https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.3) | Native game launch and in-game flows on Build 42.22.2. [Compatibility and test scope](docs/compatibility.md). |
+| Native Windows x64 | [Experimental command-line package from GitHub Actions](docs/windows-cli.md), not the Workshop archive or rc.3 release | Installation, rollback, and DLL startup in a test directory with a stock JDK, **not** a licensed game launch. Use Steam itself for Workshop delivery. |
+| macOS or Proton | No supported game package | No verified game execution. |
 
-The [Steam Workshop item](https://steamcommunity.com/sharedfiles/filedetails/?id=3838682402) supplies the native Linux package and a [graphical setup guide](workshop/Contents/mods/LuaBuddy_SetupGuide/SETUP.md). Subscribe, extract the included archive with your desktop archive manager, and double-click `luabuddy` in the extracted folder. Setup finds the game or lets you choose its folder, then installs through the existing Rust installer. It uses an existing Zenity or KDialog desktop utility. No terminal command or separate download is needed for this flow. A one-time setup action is still required before the next normal Steam launch. The [GitHub prerelease](https://github.com/DevGuyRash/LuaBuddy/releases/tag/v0.1.0-rc.2) is an optional download source. See [publishing](docs/publishing.md) for how the Workshop package and listing are maintained.
+On Linux, close the game, extract the whole archive and double-click `luabuddy` in the extracted folder. Choose **Install / update**, then start the game normally through Steam. [Graphical setup and removal](workshop/Contents/mods/LuaBuddy_SetupGuide/SETUP.md) use an existing Zenity or KDialog utility; without one, use the command line below. To apply a native update, repeat setup from the new archive. Unsubscribing alone does not uninstall the runtime.
 
 ## Build and install
 
-Players can use [graphical setup](workshop/Contents/mods/LuaBuddy_SetupGuide/SETUP.md). The commands below are for building a checkout or using the installer from a terminal.
+These commands build a Linux source checkout. If you already extracted a Linux package, open a terminal in its folder and run `./luabuddy verify-package --package .`, then `./luabuddy install --package .`. See the [installer reference](docs/evolution/install.md) for custom locations and maintenance.
 
 Build with the pinned Rust toolchain and lockfile, then create an integrity-checked package. Do not copy proprietary game files into a package.
 
@@ -25,10 +29,10 @@ dist/LuaBuddy-linux-x86_64/luabuddy install --package dist/LuaBuddy-linux-x86_64
 
 Close the game before setup, then relaunch through Steam. Installation writes a reversible `ProjectZomboid64.site.json` override and leaves Steam's base launcher JSON intact. Setup does not stop or restart a running game. A running JVM keeps its current library until exit. See [installation, repair, rollback, and uninstall](docs/evolution/install.md).
 
-The installer copies the full declarative template catalog into an immutable generation. It copies only explicitly selected profiles into the active configuration.
+The installer keeps the package's profile templates separate from your active configuration. Reinstalling does not overwrite personal profiles. To select specific integrations from an extracted package:
 
 ```sh
-luabuddy install --package dist/LuaBuddy-linux-x86_64 --mod AllInfo --mod AutoAll
+./luabuddy install --package . --mod AllInfo --mod AutoAll
 ```
 
 Use `--game-dir` or `PZ_GAME_DIR` when Steam discovery does not identify one installation. `luabuddy discover`, `verify`, `doctor`, and `diagnostics` return JSON. File verification establishes installation integrity; the runtime report and actual game checks establish whether loading succeeded.
@@ -41,13 +45,15 @@ Related actions are grouped under **This session**, **Next launch**, **Workshop*
 
 An explicit Add or Download action requests the corresponding Steam operation. A subscribed item remains distinct from an installed item, and installed content remains distinct from a loaded profile. Closing a download view stops observation where native cancellation is unavailable; Steam can continue downloading.
 
-Use **Enable late** for an eligible client/shared profile and **Startup enable** for the game's next normal native loading path. These selections have separate persisted states. Apply or discard pending Options edits before changing either selection. **Load new profiles** restores eligible multiplayer client/shared content; repeated refresh preserves loaded module objects and callbacks. [Runtime behavior](docs/runtime.md) defines native-startup, missing-server-code, ordering, and lifecycle limits.
+For eligible multiplayer client/shared Lua, choose **This session > Enable late**, then **Load enabled**. **Load new profiles** on the LuaBuddy Options page also refreshes selections without duplicating loaded modules or callbacks. For the game's normal startup path, use **Next launch > Startup enable** and restart. The two selections are independent; apply or discard pending Options edits before changing either. [Runtime behavior](docs/runtime.md) defines native-startup, missing-server-code, ordering, and lifecycle limits.
 
 **Reload a profile** requires explicit upstream cleanup cooperation. LuaBuddy compiles and validates the replacement before calling the running generation's captured cleanup function. A refusal retains the old generation. Uncertain cleanup or failed activation quarantines it and requires reconnecting. Bundled profiles do not gain safe reload simply because they load successfully.
 
 Local mods use the game's native discovery or an explicit `path=` root. The CLI can save a generic local selection with `select --profiles-dir DIR --mod ID --path ROOT`. Add `--once` to queue it for one game process, including reconnects. LuaBuddy consumes only its temporary registration and leaves source directories and normal profiles intact. `deselect` disables a future selection, while `deselect --once` cancels an unclaimed registration. See [the full testing workflow](docs/workflows.md#test-a-mod-for-one-game-launch).
 
 ## Select optional integrations
+
+The table lists the templates in this source checkout. The published **v0.1.0-rc.3 Linux archive** contains 24 templates; **Auto Share Map Markers**, **PourIntoContainer**, and **Shelf Aware!** were added on `main` after that release. Install from a source build containing those templates to use their bundled integrations. Check an extracted package's `profiles/` directory to see what it includes. Unlisted mods can still be selected by native ID, but an ID alone does not apply a template's exclusions or other compatibility settings.
 
 Install the upstream content and choose only the integrations you want. Native dependency metadata remains authoritative. Select additional dependency profiles only when the server or native loader does not already supply them.
 
@@ -81,7 +87,7 @@ Install the upstream content and choose only the integrations you want. Native d
 | [Mod Manager Reforged (Client)](https://steamcommunity.com/sharedfiles/filedetails/?id=3737874810) | `MMReforgedC` | Mount images and run its missed boot patch registration. Enable it normally in the game's Mods menu for the main-menu manager. |
 | [NeatUI Framework](https://steamcommunity.com/sharedfiles/filedetails/?id=3508537032) | `NeatUI_Framework` | Optional dependency profile for NeatUI Inventory and Mechanics; mount the framework's UI images. |
 
-For these two integrations, [select the complete templates](docs/workflows.md#pour-and-shelf-aware-on-a-multiplayer-client), not an ID-only profile.
+For PourIntoContainer and Shelf Aware!, [select the complete templates](docs/workflows.md#pour-and-shelf-aware-on-a-multiplayer-client), not an ID-only profile.
 
 Existing profiles and settings survive adding another selection. Auto All and AllTheInfo remain independent optional integrations. The integration code lives in `profiles/hooks.rs`; generic loader and patcher code does not select a default mod set.
 
@@ -119,4 +125,4 @@ cargo xtask check --offline --game-dir /path/to/ProjectZomboid
 cargo xtask check --offline --audit --game-dir /path/to/ProjectZomboid
 ```
 
-An offline build needs the locked dependencies and advisory database already cached. [Verification](docs/verification.md) describes fetching those development inputs, evidence, exact proof scope, and separate graphical and performance gates. The [behavior ledger](docs/evolution/behavior.md) maps the old functionality to its Rust replacement. The [original evolution request](docs/evolution/request.md) remains the acceptance source.
+An offline build needs the locked dependencies and advisory database already cached. [Verification](docs/verification.md) describes fetching those development inputs, evidence, exact proof scope, and separate graphical and performance gates. The [migration verification report](docs/evolution/verification-report.md) and [behavior ledger](docs/evolution/behavior.md) record earlier artifact-specific results; the [original migration request](docs/evolution/request.md) describes goals rather than shipped features. The [rc.3 event-dispatch benchmark](docs/evolution/event-dispatch.md) covers a headless workload, not game FPS. [Publishing](docs/publishing.md) covers the release and Workshop listing.
