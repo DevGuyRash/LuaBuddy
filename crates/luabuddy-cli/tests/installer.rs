@@ -158,6 +158,17 @@ impl Fixture {
     fn install(&self) -> Value {
         self.success("install", &["--package", self.package.to_str().unwrap()])
     }
+    /// A package that differs from the first one by an extra template.
+    fn next_package(&self, name: &str) -> PathBuf {
+        fs::write(
+            self.templates.join(format!("{name}.properties")),
+            format!("id={name}\n"),
+        )
+        .unwrap();
+        let output = self.root.join(format!("package-{name}"));
+        self.package(&output);
+        output
+    }
     fn record(&self) -> Value {
         serde_json::from_slice(&fs::read(self.game.join(".luabuddy/native-install.json")).unwrap())
             .unwrap()
@@ -336,12 +347,16 @@ fn update_rollback_and_uninstall_preserve_user_edits() {
         serde_json::to_vec(&before_update).unwrap(),
     )
     .unwrap();
-    fs::write(f.templates.join("Second.properties"), "id=Second\n").unwrap();
-    let second = f.root.join("package-two");
-    f.package(&second);
+    let second = f.next_package("Second");
     f.success(
         "update",
         &["--package", second.to_str().unwrap(), "--debug"],
+    );
+    // Reinstalling or repairing the same package keeps the rollback target.
+    f.success("install", &["--package", second.to_str().unwrap()]);
+    f.success(
+        "repair",
+        &["--package", second.to_str().unwrap(), "--no-debug"],
     );
     assert_ne!(f.record()["current"]["package_digest"], first);
     f.success("rollback", &[]);
@@ -393,12 +408,13 @@ fn rollback_restores_the_previous_profile_directory_for_reports_and_future_updat
     fs::write(&a_file, a_bytes).unwrap();
     fs::write(&b_file, b_bytes).unwrap();
     let base = fs::read(f.game.join("ProjectZomboid64.json")).unwrap();
-    for (command, directory) in [("install", &a), ("update", &b)] {
+    let second = f.next_package("Second");
+    for (command, package, directory) in [("install", &f.package, &a), ("update", &second, &b)] {
         f.success(
             command,
             &[
                 "--package",
-                f.package.to_str().unwrap(),
+                package.to_str().unwrap(),
                 "--profiles-dir",
                 directory.to_str().unwrap(),
             ],
@@ -462,7 +478,7 @@ fn rollback_refuses_invalid_effective_profile_arguments_without_changing_the_ins
         "update",
         &[
             "--package",
-            f.package.to_str().unwrap(),
+            f.next_package("Second").to_str().unwrap(),
             "--profiles-dir",
             f.root.join("profiles-B").to_str().unwrap(),
         ],
@@ -651,6 +667,79 @@ fn interrupted_journal_recovers_every_applied_prefix_and_partial_stage() {
     .unwrap();
     assert_eq!(f.command("recover", &[]).status.code(), Some(2));
     assert_eq!(fs::read_to_string(&outside).unwrap(), "foreign");
+}
+
+#[test]
+fn journals_hold_no_generation_contents_and_recovery_drops_unselected_files() {
+    let f = Fixture::new();
+    f.install();
+    let record = fs::read(f.game.join(".luabuddy/native-install.json")).unwrap();
+    let site = fs::read(f.game.join("ProjectZomboid64.site.json")).unwrap();
+    let digest = |data: &[u8]| format!("{:x}", Sha256::digest(data));
+    // An update stopped after writing its generation and before selecting it:
+    // one finished file, one still staged, one that a user replaced since.
+    let generation = f.game.join(".luabuddy/native").join("a".repeat(64));
+    fs::create_dir_all(generation.join("profiles")).unwrap();
+    fs::create_dir_all(generation.join("licenses")).unwrap();
+    let written = generation.join("runtime.so");
+    let staged = generation.join("profiles/Staged.properties");
+    let replaced = generation.join("licenses/Replaced.txt");
+    fs::write(&written, "runtime").unwrap();
+    fs::write(
+        generation.join("profiles/.Staged.properties.luabuddy-stage"),
+        "par",
+    )
+    .unwrap();
+    fs::write(&replaced, "user content").unwrap();
+    let journal = |drop: Value| {
+        fs::write(
+            f.game.join(".luabuddy/native-transaction.json"),
+            serde_json::to_vec(&json!({"schema":1,"game":f.game,"profiles":f.profile_dir(),"changes":[],"drop":drop})).unwrap(),
+        )
+        .unwrap();
+    };
+    journal(json!({
+        written.to_str().unwrap(): digest(b"runtime"),
+        staged.to_str().unwrap(): digest(b"partial template"),
+        replaced.to_str().unwrap(): digest(b"shipped content"),
+    }));
+    assert_eq!(f.success("recover", &[])["recovered"], true);
+    assert!(!written.exists());
+    assert!(!generation.join("profiles").exists());
+    assert_eq!(fs::read_to_string(&replaced).unwrap(), "user content");
+    assert_eq!(
+        fs::read(f.game.join(".luabuddy/native-install.json")).unwrap(),
+        record
+    );
+    assert_eq!(
+        fs::read(f.game.join("ProjectZomboid64.site.json")).unwrap(),
+        site
+    );
+    assert_eq!(f.success("verify", &[])["ok"], true);
+
+    let outside = f.root.join("foreign-file");
+    fs::write(&outside, "foreign").unwrap();
+    journal(json!({outside.to_str().unwrap(): digest(b"foreign")}));
+    assert_eq!(f.command("recover", &[]).status.code(), Some(2));
+    assert!(outside.exists());
+}
+
+#[test]
+fn retired_generations_leave_no_directories() {
+    let f = Fixture::new();
+    f.install();
+    for name in ["Second", "Third"] {
+        f.success(
+            "update",
+            &["--package", f.next_package(name).to_str().unwrap()],
+        );
+    }
+    let native = f.game.join(".luabuddy/native");
+    assert_eq!(fs::read_dir(&native).unwrap().count(), 2);
+    f.success("rollback", &[]);
+    f.success("uninstall", &[]);
+    assert!(!native.exists());
+    assert!(f.profile_dir().is_dir());
 }
 
 #[test]
@@ -1002,18 +1091,19 @@ fn renamed_exe_is_not_a_windows_runtime_and_locked_dll_is_not_removed() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("PE32+ DLL"));
     f.install();
     let site = f.game.join("ProjectZomboid64.site.json");
-    let before = fs::read(&site).unwrap();
     let runtime = PathBuf::from(f.record()["current"]["runtime"].as_str().unwrap());
     let held = fs::OpenOptions::new()
         .read(true)
         .share_mode(1)
         .open(&runtime)
         .unwrap();
-    assert_eq!(f.command("uninstall", &[]).status.code(), Some(2));
-    assert_eq!(fs::read(&site).unwrap(), before);
+    let result = f.command("uninstall", &[]);
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Close the game, then run recover"));
+    assert!(!site.exists());
     assert!(runtime.exists());
     drop(held);
-    f.success("uninstall", &[]);
+    f.success("recover", &[]);
     assert!(!runtime.exists());
     assert!(!site.exists());
 }

@@ -898,6 +898,19 @@ struct Journal {
     game: PathBuf,
     profiles: PathBuf,
     changes: Vec<Change>,
+    /// Generation files to remove, by SHA256, once `changes` are undone: those an
+    /// interrupted operation had written, or those a completed one superseded.
+    #[serde(default)]
+    drop: BTreeMap<PathBuf, String>,
+}
+
+/// A content-addressed file that nothing uses until the launcher selects its
+/// generation, so recovery needs only its hash.
+struct GenerationFile {
+    path: PathBuf,
+    sha256: String,
+    content: Vec<u8>,
+    executable: bool,
 }
 
 fn sync_directory(path: &Path) -> Result<()> {
@@ -947,6 +960,14 @@ fn stage_path(path: &Path) -> Result<PathBuf> {
     Ok(path.with_file_name(format!(".{name}.luabuddy-stage")))
 }
 
+fn remove_if_present(path: &Path) -> Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(io_error("Remove owned file", path, e)),
+    }
+}
+
 fn write_atomic(path: &Path, data: Option<&[u8]>, executable: bool) -> Result<()> {
     let parent = path
         .parent()
@@ -954,6 +975,7 @@ fn write_atomic(path: &Path, data: Option<&[u8]>, executable: bool) -> Result<()
     plain_directory(parent)?;
     if let Some(data) = data {
         let stage = stage_path(path)?;
+        remove_if_present(&stage)?;
         let permissions = fs::metadata(path)
             .ok()
             .map(|metadata| metadata.permissions());
@@ -971,9 +993,7 @@ fn write_atomic(path: &Path, data: Option<&[u8]>, executable: bool) -> Result<()
         }
         result
     } else {
-        if path.exists() {
-            fs::remove_file(path).map_err(|e| io_error("Remove owned file", path, e))?;
-        }
+        remove_if_present(path)?;
         sync_directory(parent)
     }
 }
@@ -1044,67 +1064,153 @@ fn validate_transaction(game: &Path, journal: &Journal) -> Result<()> {
             return Err(invalid("Native transaction cannot overwrite itself"));
         }
     }
+    for path in journal.drop.keys() {
+        if !path.starts_with(root.join("native"))
+            || path.components().any(|c| matches!(c, Component::ParentDir))
+        {
+            return Err(invalid(format!(
+                "Native transaction contains an unowned path: {}",
+                path.display()
+            )));
+        }
+        reject_link_ancestors(path)?;
+    }
     Ok(())
 }
 
+fn journal_path(game: &Path) -> PathBuf {
+    game.join(INSTALL_DIR).join(JOURNAL_FILE)
+}
+
+fn read_journal(game: &Path) -> Result<Option<Journal>> {
+    let path = journal_path(game);
+    let Some(data) = optional_bytes(&path, JOURNAL_LIMIT)? else {
+        return Ok(None);
+    };
+    serde_json::from_slice::<Journal>(&data)
+        .map_err(|e| invalid(e.to_string()))
+        .and_then(|journal| validate_transaction(game, &journal).map(|()| Some(journal)))
+        .map_err(|e| {
+            invalid(format!(
+                "The interrupted operation recorded in {} cannot be undone: {e}",
+                path.display()
+            ))
+        })
+}
+
+fn write_journal(game: &Path, journal: &Journal) -> Result<()> {
+    validate_transaction(game, journal)?;
+    let encoded = serde_json::to_vec(journal).map_err(|e| invalid(format!("Encode JSON: {e}")))?;
+    if encoded.len() as u64 > JOURNAL_LIMIT {
+        return Err(invalid(
+            "Install transaction is too large for recoverable metadata",
+        ));
+    }
+    write_atomic(&journal_path(game), Some(&encoded), false)
+}
+
 fn recover(game: &Path) -> Result<bool> {
-    let journal_path = game.join(INSTALL_DIR).join(JOURNAL_FILE);
-    let stage = stage_path(&journal_path)?;
-    if !journal_path.exists() && stage.exists() {
-        let candidate: std::result::Result<Journal, Error> =
-            bytes(&stage, JOURNAL_LIMIT).and_then(|data| {
-                serde_json::from_slice(&data)
-                    .map_err(|e| invalid(format!("Read transaction journal: {e}")))
-            });
-        match candidate {
-            Ok(journal) => {
-                validate_transaction(game, &journal)?;
-                fs::rename(&stage, &journal_path)
-                    .map_err(|e| io_error("Recover journal preparation", &journal_path, e))?;
-            }
-            Err(_) => {
-                fs::remove_file(&stage)
-                    .map_err(|e| io_error("Remove incomplete journal preparation", &stage, e))?;
-                return Ok(true);
-            }
-        }
-    }
-    if !journal_path.exists() {
-        return Ok(false);
-    }
-    let journal: Journal = serde_json::from_slice(&bytes(&journal_path, JOURNAL_LIMIT)?)
-        .map_err(|e| invalid(format!("Read transaction journal: {e}")))?;
-    validate_transaction(game, &journal)?;
+    let path = journal_path(game);
+    // A staged journal never took effect, so nothing it lists was applied.
+    let staged = remove_if_present(&stage_path(&path)?)?;
+    let Some(journal) = read_journal(game)? else {
+        return Ok(staged);
+    };
     for change in journal.changes.iter().rev() {
-        let temporary = stage_path(&change.path)?;
-        if optional_bytes(&temporary, RUNTIME_LIMIT)?.is_some() {
-            fs::remove_file(&temporary)
-                .map_err(|e| io_error("Remove interrupted stage", &temporary, e))?;
-        }
+        remove_if_present(&stage_path(&change.path)?)?;
         let current = optional_bytes(&change.path, RUNTIME_LIMIT)?;
         if current == change.before {
             continue;
         }
         if current != change.after {
             return Err(invalid(format!(
-                "Interrupted install encountered user-modified file {}; preserve it and its transaction journal",
-                change.path.display()
+                "Interrupted install encountered user-modified file {}; preserve it and its transaction journal {}",
+                change.path.display(),
+                path.display()
             )));
         }
         write_atomic(&change.path, change.before.as_deref(), change.executable)?;
     }
-    fs::remove_file(&journal_path)
-        .map_err(|e| io_error("Complete transaction recovery", &journal_path, e))?;
+    drop_generation_files(game, &journal.drop)?;
+    remove_if_present(&path)?;
     sync_directory(&game.join(INSTALL_DIR))?;
     Ok(true)
 }
 
-fn transact(game: &Path, profiles: &Path, changes: Vec<Change>) -> Result<bool> {
+/// Removes unmodified generation files and the directories they leave empty.
+fn drop_generation_files(game: &Path, files: &BTreeMap<PathBuf, String>) -> Result<()> {
+    let native = game.join(INSTALL_DIR).join("native");
+    let mut roots = BTreeSet::new();
+    for (path, digest) in files {
+        remove_if_present(&stage_path(path)?)?;
+        if optional_bytes(path, RUNTIME_LIMIT)?.is_some_and(|data| sha256(&data) == *digest) {
+            remove_if_present(path)?;
+        }
+        roots.extend(
+            path.ancestors()
+                .find(|ancestor| ancestor.parent() == Some(&native)),
+        );
+    }
+    for root in roots {
+        prune_empty(root);
+    }
+    let _ = fs::remove_dir(&native);
+    Ok(())
+}
+
+fn prune_empty(directory: &Path) {
+    for entry in fs::read_dir(directory).into_iter().flatten().flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            prune_empty(&entry.path());
+        }
+    }
+    let _ = fs::remove_dir(directory);
+}
+
+/// Splits recorded files into the unmodified ones to retire and the ones a user changed.
+fn retire(files: &BTreeMap<PathBuf, String>) -> Result<(BTreeMap<PathBuf, String>, Vec<PathBuf>)> {
+    let mut retired = BTreeMap::new();
+    let mut modified = Vec::new();
+    for (path, digest) in files {
+        match optional_bytes(path, RUNTIME_LIMIT)? {
+            Some(content) if sha256(&content) == *digest => {
+                retired.insert(path.clone(), digest.clone());
+            }
+            Some(_) => modified.push(path.clone()),
+            None => (),
+        }
+    }
+    Ok((retired, modified))
+}
+
+/// Keeps a copy of content that is about to be replaced.
+fn preserve(game: &Path, name: &str, content: &[u8]) -> Result<PathBuf> {
+    let path = game.join(INSTALL_DIR).join("recovery").join(name);
+    match optional_bytes(&path, RUNTIME_LIMIT)? {
+        None => write_atomic(&path, Some(content), false)?,
+        Some(existing) if existing == content => (),
+        Some(_) => {
+            return Err(invalid(format!(
+                "Recovery filename has conflicting contents: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(path)
+}
+
+fn transact(
+    game: &Path,
+    profiles: &Path,
+    files: &[GenerationFile],
+    changes: Vec<Change>,
+    retired: BTreeMap<PathBuf, String>,
+) -> Result<bool> {
     let changes: Vec<_> = changes
         .into_iter()
         .filter(|change| change.before != change.after)
         .collect();
-    if changes.is_empty() {
+    if files.is_empty() && changes.is_empty() && retired.is_empty() {
         return Ok(false);
     }
     let journal = Journal {
@@ -1112,41 +1218,50 @@ fn transact(game: &Path, profiles: &Path, changes: Vec<Change>) -> Result<bool> 
         game: game.to_owned(),
         profiles: profiles.to_owned(),
         changes,
+        drop: files
+            .iter()
+            .filter(|file| !file.path.exists())
+            .map(|file| (file.path.clone(), file.sha256.clone()))
+            .collect(),
     };
-    validate_transaction(game, &journal)?;
-    let journal_path = game.join(INSTALL_DIR).join(JOURNAL_FILE);
-    let encoded = json_bytes(&journal)?;
-    if encoded.len() as u64 > JOURNAL_LIMIT {
-        return Err(invalid(
-            "Install transaction is too large for recoverable metadata",
-        ));
-    }
-    write_atomic(&journal_path, Some(&encoded), false)?;
-    for change in &journal.changes {
-        if optional_bytes(&change.path, RUNTIME_LIMIT)? != change.before {
-            let error = invalid(format!(
-                "Install file changed during preparation: {}",
-                change.path.display()
-            ));
-            return match recover(game) {
-                Ok(_) => Err(error),
-                Err(recovery) => Err(invalid(format!(
-                    "{error}; recovery also failed: {recovery}"
-                ))),
-            };
+    write_journal(game, &journal)?;
+    let applied = (|| {
+        for file in files {
+            write_atomic(&file.path, Some(&file.content), file.executable)?;
         }
-        if let Err(error) = write_atomic(&change.path, change.after.as_deref(), change.executable) {
-            return match recover(game) {
-                Ok(_) => Err(error),
-                Err(recovery) => Err(invalid(format!(
-                    "{error}; recovery also failed: {recovery}"
-                ))),
-            };
+        for change in &journal.changes {
+            if optional_bytes(&change.path, RUNTIME_LIMIT)? != change.before {
+                return Err(invalid(format!(
+                    "Install file changed during preparation: {}",
+                    change.path.display()
+                )));
+            }
+            write_atomic(&change.path, change.after.as_deref(), change.executable)?;
         }
+        // Replacing the journal commits: from here recovery only removes what
+        // the operation superseded.
+        write_journal(
+            game,
+            &Journal {
+                changes: Vec::new(),
+                drop: retired,
+                ..journal.clone()
+            },
+        )
+    })();
+    if let Err(error) = applied {
+        return match recover(game) {
+            Ok(_) => Err(error),
+            Err(recovery) => Err(invalid(format!(
+                "{error}; recovery also failed: {recovery}"
+            ))),
+        };
     }
-    fs::remove_file(&journal_path)
-        .map_err(|e| io_error("Commit native install transaction", &journal_path, e))?;
-    sync_directory(&game.join(INSTALL_DIR))?;
+    recover(game).map_err(|error| {
+        invalid(format!(
+            "The change took effect, but superseded files remain: {error}. Close the game, then run recover."
+        ))
+    })?;
     Ok(true)
 }
 
@@ -1372,24 +1487,8 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
             .collect::<Result<Vec<_>>>()?;
         (spelled, selected)
     };
-    let runtime_content = bytes(
-        &package.directory.join(&package.manifest.runtime),
-        RUNTIME_LIMIT,
-    )?;
-    let runtime_digest = sha256(&runtime_content);
     let generation_root = game.join(INSTALL_DIR).join("native").join(&package.digest);
     let runtime = generation_root.join(&package.manifest.runtime);
-    let runtime_before = optional_bytes(&runtime, RUNTIME_LIMIT)?;
-    if runtime_before
-        .as_ref()
-        .is_some_and(|content| sha256(content) != runtime_digest)
-        && !options.repair
-    {
-        return Err(invalid(format!(
-            "Installed runtime was modified: {}; use repair with the original verified package to preserve a recovery copy",
-            runtime.display()
-        )));
-    }
     let runtime_string = runtime
         .to_str()
         .ok_or_else(|| invalid("Native runtime path must be UTF-8"))?;
@@ -1447,66 +1546,71 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
     args.push(agent_argument.clone());
     config["vmArgs"] = json!(args);
     let site_bytes = json_bytes(&config)?;
-    let mut generation_files = BTreeMap::from([(runtime.clone(), runtime_digest.clone())]);
-    let mut template_changes = Vec::new();
+    let same = prior
+        .as_ref()
+        .is_some_and(|record| record.current.package_digest == package.digest);
+    let mut generation_files = BTreeMap::new();
+    let mut missing = Vec::new();
+    let mut modified = Vec::new();
     for (name, file) in &package.manifest.files {
-        if name.starts_with("profiles/")
-            || name == "LICENSE"
-            || name == "THIRD_PARTY.md"
-            || name.starts_with("licenses/")
+        let native = *name == package.manifest.runtime;
+        if !native
+            && !name.starts_with("profiles/")
+            && name != "LICENSE"
+            && name != "THIRD_PARTY.md"
+            && !name.starts_with("licenses/")
         {
-            let path = generation_root.join(portable_path(name)?);
-            let content = bytes(&package.directory.join(name), METADATA_LIMIT)?;
-            let before = optional_bytes(&path, METADATA_LIMIT)?;
-            if let Some(changed) = before.as_ref().filter(|data| sha256(data) != file.sha256) {
-                if !options.repair {
-                    return Err(invalid(format!(
-                        "Bundled template was modified: {}; use repair with the original package to preserve a recovery copy",
-                        path.display()
-                    )));
-                }
-                let retained = game
-                    .join(INSTALL_DIR)
-                    .join("recovery/templates")
-                    .join(sha256(changed));
-                let retained_before = optional_bytes(&retained, METADATA_LIMIT)?;
-                if retained_before.as_ref().is_some_and(|data| data != changed) {
-                    return Err(invalid(
-                        "Template recovery filename has conflicting contents",
-                    ));
-                }
-                template_changes.push(Change {
-                    path: retained,
-                    before: retained_before,
-                    after: Some(changed.clone()),
-                    executable: false,
-                });
-            }
-            generation_files.insert(path.clone(), file.sha256.clone());
-            template_changes.push(Change {
-                path,
-                before,
-                after: Some(content),
-                executable: false,
-            });
+            continue;
         }
+        let path = generation_root.join(portable_path(name)?);
+        generation_files.insert(path.clone(), file.sha256.clone());
+        if let Some(before) = optional_bytes(&path, RUNTIME_LIMIT)? {
+            let digest = sha256(&before);
+            if digest == file.sha256 {
+                continue;
+            }
+            if same && !options.repair {
+                return Err(invalid(format!(
+                    "Installed generation file was modified: {}; use repair with the installed package to preserve a recovery copy",
+                    path.display()
+                )));
+            }
+            modified.push((
+                if native {
+                    format!("runtime-{digest}")
+                } else {
+                    format!("templates/{digest}")
+                },
+                before,
+            ));
+        }
+        let content = bytes(&package.directory.join(name), RUNTIME_LIMIT)?;
+        if sha256(&content) != file.sha256 {
+            return Err(invalid(format!(
+                "Package changed during installation: {name}"
+            )));
+        }
+        missing.push(GenerationFile {
+            path,
+            sha256: file.sha256.clone(),
+            content,
+            executable: file.executable,
+        });
     }
     plain_directory(&templates)?;
     let generation = InstalledGeneration {
         package_digest: package.digest,
         package_version: package.manifest.version,
         runtime: runtime.clone(),
-        runtime_sha256: runtime_digest,
+        runtime_sha256: package.manifest.files[&package.manifest.runtime]
+            .sha256
+            .clone(),
         agent_argument,
         config_argument,
         templates_argument,
         files: generation_files,
         site_bytes: site_bytes.clone(),
     };
-    let same = prior.as_ref().is_some_and(|record| {
-        record.current.package_digest == generation.package_digest
-            && record.current.site_bytes == generation.site_bytes
-    });
     let record = InstallRecord {
         schema: SCHEMA,
         game: game.to_owned(),
@@ -1525,35 +1629,6 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
         jvm,
     };
     let mut changes = Vec::new();
-    if options.repair
-        && let Some(content) = runtime_before
-            .as_ref()
-            .filter(|content| sha256(content) != record.current.runtime_sha256)
-    {
-        let retained = game
-            .join(INSTALL_DIR)
-            .join("recovery")
-            .join(format!("runtime-{}", sha256(content)));
-        let retained_before = optional_bytes(&retained, RUNTIME_LIMIT)?;
-        if retained_before.as_ref().is_some_and(|data| data != content) {
-            return Err(invalid(
-                "Runtime recovery filename has conflicting contents",
-            ));
-        }
-        changes.push(Change {
-            before: retained_before,
-            path: retained,
-            after: Some(content.clone()),
-            executable: true,
-        });
-    }
-    changes.push(Change {
-        path: runtime,
-        before: runtime_before,
-        after: Some(runtime_content),
-        executable: true,
-    });
-    changes.extend(template_changes);
     for (path, content) in profile_files {
         changes.push(Change {
             path,
@@ -1575,8 +1650,7 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
         after: Some(site_bytes),
         executable: false,
     });
-    let mut retained_modified = Vec::new();
-    if let Some(retired) = prior
+    let (retired, retained_modified) = prior
         .as_ref()
         .and_then(|r| r.previous.as_ref())
         .filter(|g| {
@@ -1586,26 +1660,13 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
                     .as_ref()
                     .is_none_or(|previous| previous.runtime != g.runtime)
         })
-    {
-        for (path, digest) in &retired.files {
-            if let Some(content) = optional_bytes(path, RUNTIME_LIMIT)? {
-                if sha256(&content) != *digest {
-                    retained_modified.push(path.clone());
-                    continue;
-                }
-                changes.insert(
-                    0,
-                    Change {
-                        path: path.clone(),
-                        before: Some(content),
-                        after: None,
-                        executable: path == &retired.runtime,
-                    },
-                );
-            }
-        }
+        .map(|g| retire(&g.files))
+        .transpose()?
+        .unwrap_or_default();
+    for (name, content) in modified {
+        preserve(game, &name, &content)?;
     }
-    let changed = transact(game, &profiles, changes)?;
+    let changed = transact(game, &profiles, &missing, changes, retired)?;
     Ok(
         json!({"operation": if options.repair { "repair" } else { "install" }, "changed":changed, "recoveredInterruptedOperation":recovered, "profiles":profiles, "modifiedRetiredFilesPreserved":retained_modified, "runtime":record.current.runtime, "runtimeVerified":false, "nextStep":"Fully restart Project Zomboid through its normal launcher. Package integrity is verified; in-game operation requires its own runtime evidence."}),
     )
@@ -1776,7 +1837,7 @@ pub fn rollback(game: &Path) -> Result<Value> {
             executable: false,
         },
     ];
-    let changed = transact(game, &record.profiles, changes)?;
+    let changed = transact(game, &record.profiles, &[], changes, BTreeMap::new())?;
     Ok(
         json!({"operation":"rollback", "changed":changed, "packageVersion":record.current.package_version, "profilesPreserved":record.profiles, "restartRequired":true}),
     )
@@ -1818,27 +1879,11 @@ pub fn uninstall(game: &Path) -> Result<Value> {
         after: restored,
         executable: false,
     }];
-    let mut retained = Vec::new();
-    let mut seen = BTreeSet::new();
-    for generation in std::iter::once(&record.current).chain(record.previous.iter()) {
-        for (path, digest) in &generation.files {
-            if !seen.insert(path) {
-                continue;
-            }
-            if let Some(content) = optional_bytes(path, RUNTIME_LIMIT)? {
-                if sha256(&content) == *digest {
-                    changes.push(Change {
-                        path: path.clone(),
-                        before: Some(content),
-                        after: None,
-                        executable: path == &generation.runtime,
-                    });
-                } else {
-                    retained.push(path.clone());
-                }
-            }
-        }
-    }
+    let owned = std::iter::once(&record.current)
+        .chain(record.previous.iter())
+        .flat_map(|generation| generation.files.clone())
+        .collect();
+    let (retired, retained) = retire(&owned)?;
     let record_path = game.join(INSTALL_DIR).join(RECORD_FILE);
     changes.push(Change {
         before: optional_bytes(&record_path, METADATA_LIMIT)?,
@@ -1846,7 +1891,7 @@ pub fn uninstall(game: &Path) -> Result<Value> {
         after: None,
         executable: false,
     });
-    let changed = transact(game, &record.profiles, changes)?;
+    let changed = transact(game, &record.profiles, &[], changes, retired)?;
     Ok(
         json!({"operation":"uninstall", "changed":changed, "profilesPreserved":record.profiles, "modifiedFilesPreserved":retained, "restartRequired":true}),
     )
