@@ -17,7 +17,7 @@ The driver builds the complete application before running tests. It checks works
 
 The driver snapshots the selected CLI and runtime bytes once after the application build. The default inputs are the completed debug artifacts. Commands and native JVMs use those immutable copies, even if another build later replaces the original files. The temporary copies and package are removed after inspection. Check transcripts and `report.json` remain under the printed evidence directory outside Git. The report records the exact artifact SHA256 values and native host identity. Supply `--log-dir` to choose a different evidence destination. A failed command, missing proof marker, proof `FAIL`, JNI warning, output limit, or deadline produces a failed aggregate result.
 
-Portable CI runs on Linux, Windows, and macOS. The reversible installer integration suite also runs on Windows x64 (real JDK, inert game-layout fixtures in paths containing spaces and Unicode). Linux graphical helper tests stay Linux-only. A separate Windows x64 MSVC job builds the release EXE/DLL, packages them, then runs `proofs/windows-install/verify.ps1` against the extracted package. Its child JVM header check and startup controls use that exact installed DLL and a stock x64 JDK 25. It exercises the missing and incompatible game-class rejection paths, not successful licensed gameplay. The final package is retained as a CI artifact, not published to Workshop. Reproduce the job on Windows with `./proofs/windows-install/verify.ps1 -Package ./dist/LuaBuddy-windows-x86_64 -Jdk $env:JAVA_HOME_25_X64` after the [Windows build steps](windows-cli.md). Portable success on another operating system is not a native game-runtime pass.
+Portable CI runs on Linux, Windows, and macOS for pull requests and for `main`; a newer commit cancels a pull request's earlier run. A separate job audits dependencies. The reversible installer integration suite also runs on Windows x64 (real JDK, inert game-layout fixtures in paths containing spaces and Unicode). Linux graphical helper tests stay Linux-only. A separate Windows x64 MSVC job builds the release EXE/DLL, packages them, then runs `proofs/windows-install/verify.ps1` against the extracted package. Its child JVM header check and startup controls use that exact installed DLL and a stock x64 JDK 25. It exercises the missing and incompatible game-class rejection paths, not successful licensed gameplay. The final package is retained as a CI artifact, not published to Workshop. Reproduce the job on Windows with `./proofs/windows-install/verify.ps1 -Package ./dist/LuaBuddy-windows-x86_64 -Jdk $env:JAVA_HOME_25_X64` after the [Windows build steps](windows-cli.md). Portable success on another operating system is not a native game-runtime pass.
 
 ## Run the native proofs
 
@@ -66,11 +66,11 @@ The driver applies deadlines and checks proof output in addition to process exit
 Install a reviewed `cargo-audit` development tool and keep a usable RustSec advisory database. Request the audit explicitly.
 
 ```sh
-cargo xtask check --portable --audit
-cargo xtask check --portable --offline --audit
+cargo xtask audit
+cargo xtask audit --offline
 ```
 
-The audit covers the workspace, extension, and proof lockfiles. Offline mode supplies `--no-fetch --no-yanked`; a missing or stale advisory database fails rather than becoming a security pass. Registry yanked-crate lookup is explicitly not run offline. Omitting `--audit` records the advisory check as not run.
+The audit covers the workspace, extension, and proof lockfiles. Offline mode supplies `--no-fetch --no-yanked`; a missing or stale advisory database fails rather than becoming a security pass. Registry yanked-crate lookup is explicitly not run offline. `cargo xtask audit` runs only this audit. `cargo xtask check` includes it when given `--audit` and otherwise records it as not run.
 
 To verify release artifacts, build them first and supply both paths. Add the package directory when that same release has been packaged.
 

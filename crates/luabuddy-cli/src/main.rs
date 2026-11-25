@@ -1,15 +1,16 @@
 use luabuddy::{
     InstallOptions, diagnostics, doctor, find_game, install, make_package, recover_install,
-    rollback, steam_libraries, uninstall, verify_install, verify_package,
+    rollback, uninstall, verify_install, verify_package,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 mod setup;
 
-const HELP: &str = "LuaBuddy native installer\n\nCommands:\n  setup [--package DIR] [--game-dir DIR]         Open graphical native setup on Linux.\n  discover                                      Find the installed game and Steam libraries.\n  package --runtime FILE --profiles-dir DIR --out DIR\n                                                Create a native package and integrity manifest.\n  verify-package --package DIR                  Check all package files and native architecture.\n  install --package DIR [--mod ID]               Install without selecting any default mods.\n  update --package DIR                          Activate a verified package and retain rollback.\n  repair --package DIR                          Repair owned runtime files, preserving edits.\n  verify | doctor | status                      Inspect the installed files without changing them.\n  rollback                                      Restore the previous owned native generation.\n  recover                                       Undo an interrupted native installation.\n  uninstall                                     Remove owned integration and preserve profiles.\n  profiles --profiles-dir DIR                   Validate declarative mod profiles.\n  select --profiles-dir DIR --mod ID [--path ROOT] [--once]\n                                                Select eligible local/discovered Lua in place.\n  deselect --profiles-dir DIR --mod ID [--once]\n                                                Disable a future selection or cancel a queued launch.\n  diagnostics [--cache-dir DIR]                 Read the last in-game diagnostic report.\n\nGame commands accept --game-dir DIR or PZ_GAME_DIR.\nInstallation accepts --profiles-dir DIR, --debug, --no-debug, --early-ui, --no-early-ui.\n--once queues selection for the next game process, including reconnects, then expires.\nIt preserves mod source files and never hot-unloads running code.\nExplicit CLI command results are JSON; setup opens native desktop dialogs.\nWith no arguments, a Linux desktop session opens setup.\nGraphical setup requires Zenity or KDialog from the desktop.\nNo command downloads code or subscribes to Workshop items.\nLinux is game-verified; Windows x64 CLI setup is experimental (normal EXE launcher only).\nPackage integrity does not establish in-game runtime acceptance.\n";
+const HELP: &str = "LuaBuddy native installer\n\nCommands:\n  setup [--package DIR] [--game-dir DIR]         Open graphical native setup on Linux.\n  discover                                      List game installations and searched Steam libraries.\n  package --runtime FILE --profiles-dir DIR --out DIR\n                                                Create a native package and integrity manifest.\n  verify-package [--package DIR]                Check all package files and native architecture.\n  install [--package DIR] [--mod ID]             Install without selecting any default mods.\n  update [--package DIR]                        Activate a verified package and retain rollback.\n  repair [--package DIR]                        Repair the installed package, preserving edits.\n  verify | doctor | status                      Inspect the installed files without changing them.\n  rollback                                      Restore the previous owned native generation.\n  recover                                       Undo an interrupted native installation.\n  uninstall                                     Remove owned integration and preserve profiles.\n  profiles [--profiles-dir DIR]                 Validate declarative mod profiles.\n  select [--profiles-dir DIR] --mod ID [--path ROOT] [--once]\n                                                Select eligible local/discovered Lua in place,\n                                                from the installed template when there is one.\n  deselect [--profiles-dir DIR] --mod ID [--once]\n                                                Disable a future selection or cancel a queued launch.\n  diagnostics [--cache-dir DIR]                 Read the last in-game diagnostic report.\n\nGame commands accept --game-dir DIR or PZ_GAME_DIR.\n--package defaults to the package this executable is in, and --profiles-dir to the installed profile directory.\nInstallation accepts --profiles-dir DIR, --debug, --no-debug, --early-ui, --no-early-ui.\n--once queues selection for the next game process, including reconnects, then expires.\nIt preserves mod source files and never hot-unloads running code.\nExplicit CLI command results are JSON; setup opens native desktop dialogs.\nWith no arguments, a Linux desktop session opens setup.\nGraphical setup requires Zenity or KDialog from the desktop.\nNo command downloads code or subscribes to Workshop items.\nLinux is game-verified; Windows x64 CLI setup is experimental (normal EXE launcher only).\nPackage integrity does not establish in-game runtime acceptance.\n";
 
 struct Arguments {
     command: String,
@@ -101,6 +102,30 @@ impl Arguments {
     }
 }
 
+/// The extracted package this executable belongs to.
+fn own_package(command: &str) -> Result<PathBuf, String> {
+    env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(PathBuf::from))
+        .filter(|directory| directory.join("manifest.json").is_file())
+        .ok_or_else(|| {
+            format!("{command} requires --package; this executable is not in an extracted package")
+        })
+}
+
+fn template(directory: &Path, id: &luabuddy_core::ModId) -> Result<Option<String>, String> {
+    if !directory.is_dir() {
+        return Ok(None);
+    }
+    luabuddy_core::read_profiles(directory)
+        .map_err(|error| error.to_string())?
+        .iter()
+        .find(|profile| profile.id == *id)
+        .map(|profile| fs::read_to_string(&profile.file))
+        .transpose()
+        .map_err(|error| format!("Read the template for {id}: {error}"))
+}
+
 fn execute(args: &Arguments) -> Result<Value, String> {
     let game = || find_game(args.path("--game-dir").as_deref()).map_err(|e| e.to_string());
     let cache = || {
@@ -111,11 +136,27 @@ fn execute(args: &Arguments) -> Result<Value, String> {
             })
             .ok_or_else(|| "Specify --cache-dir".to_owned())
     };
+    let installed = || luabuddy::installed_directories(&game()?).map_err(|error| error.to_string());
+    let profiles = || match args.path("--profiles-dir") {
+        Some(directory) => Ok(directory),
+        None => installed().map(|found| found.profiles).map_err(|error| {
+            format!(
+                "{} needs --profiles-dir or an installed game. {error}",
+                args.command
+            )
+        }),
+    };
+    let package = || match args.path("--package") {
+        Some(directory) => Ok(directory),
+        None => own_package(&args.command),
+    };
     match args.command.as_str() {
         "discover" => {
             args.allow(&["--game-dir"], &[], false)?;
+            let game = game();
+            let found = luabuddy::discover();
             Ok(
-                json!({"game":game()?, "steamLibraries":steam_libraries().map_err(|e| e.to_string())?}),
+                json!({"ok":game.is_ok(), "game":game.as_ref().ok(), "error":game.as_ref().err().and_then(|error| error.lines().next()), "candidates":found.candidates, "steamLibraries":found.libraries, "warnings":found.warnings}),
             )
         }
         "package" => {
@@ -132,8 +173,7 @@ fn execute(args: &Arguments) -> Result<Value, String> {
         }
         "verify-package" => {
             args.allow(&["--package"], &[], false)?;
-            let package =
-                verify_package(&args.required_path("--package")?).map_err(|e| e.to_string())?;
+            let package = verify_package(&package()?).map_err(|e| e.to_string())?;
             Ok(
                 json!({"ok":true, "package":package.directory, "manifestSha256":package.digest, "runtimeVerified":false}),
             )
@@ -147,7 +187,7 @@ fn execute(args: &Arguments) -> Result<Value, String> {
             install(
                 &game()?,
                 &InstallOptions {
-                    package: args.required_path("--package")?,
+                    package: package()?,
                     profiles: args.path("--profiles-dir"),
                     mods: args.mods.clone(),
                     debug: args.bool_choice("--debug", "--no-debug"),
@@ -178,9 +218,9 @@ fn execute(args: &Arguments) -> Result<Value, String> {
         "select" | "deselect" => {
             args.allow(
                 if args.command == "select" {
-                    &["--profiles-dir", "--path"]
+                    &["--game-dir", "--profiles-dir", "--path"]
                 } else {
-                    &["--profiles-dir"]
+                    &["--game-dir", "--profiles-dir"]
                 },
                 &["--once"],
                 true,
@@ -189,7 +229,7 @@ fn execute(args: &Arguments) -> Result<Value, String> {
                 return Err(format!("{} requires exactly one --mod ID", args.command));
             }
             let id = luabuddy_core::ModId::new(&args.mods[0]).map_err(|e| e.to_string())?;
-            let directory = args.required_path("--profiles-dir")?;
+            let directory = profiles()?;
             let once = args.switches.contains("--once");
             let lifetime = if once {
                 luabuddy_core::selection::Lifetime::Once
@@ -197,15 +237,26 @@ fn execute(args: &Arguments) -> Result<Value, String> {
                 luabuddy_core::selection::Lifetime::Persistent
             };
             if args.command == "select" {
+                // An explicit profile directory works without an installation,
+                // but then there are no templates to start from.
+                let (template, note) = match installed() {
+                    Ok(found) => (template(&found.templates, &id)?, None),
+                    Err(error) if args.path("--game-dir").is_some() => return Err(error),
+                    Err(error) => (
+                        None,
+                        Some(format!("No installed templates were used. {error}")),
+                    ),
+                };
                 let profile = luabuddy_core::selection::select(
                     &directory,
                     &id,
                     args.path("--path").as_deref(),
                     lifetime,
+                    template.as_deref(),
                 )
                 .map_err(|e| e.to_string())?;
                 Ok(
-                    json!({"ok":true,"profile":profile,"lifetime":if once {"next-game-process"} else {"persistent"},"loaded":false,"sourcePreserved":true}),
+                    json!({"ok":true,"profile":profile,"note":note,"lifetime":if once {"next-game-process"} else {"persistent"},"loaded":false,"sourcePreserved":true}),
                 )
             } else {
                 let changed = luabuddy_core::selection::deselect(&directory, &id, lifetime)
@@ -216,12 +267,16 @@ fn execute(args: &Arguments) -> Result<Value, String> {
             }
         }
         "profiles" => {
-            args.allow(&["--profiles-dir"], &[], false)?;
-            let directory = args.required_path("--profiles-dir")?;
+            args.allow(&["--game-dir", "--profiles-dir"], &[], false)?;
+            let directory = profiles()?;
             let profiles = luabuddy_core::read_profiles(&directory).map_err(|e| e.to_string())?;
             let queued =
                 luabuddy_core::selection::pending(&directory).map_err(|e| e.to_string())?;
-            Ok(json!({"ok":true, "profiles":profiles,"queuedForNextLaunch":queued}))
+            let skipped =
+                luabuddy_core::selection::skipped(&directory).map_err(|e| e.to_string())?;
+            Ok(
+                json!({"ok":true, "profiles":profiles,"queuedForNextLaunch":queued,"skippedAtNextLaunch":skipped}),
+            )
         }
         "diagnostics" => {
             args.allow(&["--cache-dir"], &[], false)?;
@@ -229,6 +284,7 @@ fn execute(args: &Arguments) -> Result<Value, String> {
         }
         "extension-install" | "extension-enable" => {
             let mut allowed = vec![
+                "--game-dir",
                 "--profiles-dir",
                 "--sha256",
                 "--manifest-sha256",
@@ -255,7 +311,7 @@ fn execute(args: &Arguments) -> Result<Value, String> {
                     .map_err(|error| error.to_string())?,
                 trust_native_code: args.switches.contains("--trust-native-code"),
             };
-            let profiles = args.required_path("--profiles-dir")?;
+            let profiles = profiles()?;
             if args.command == "extension-install" {
                 luabuddy::extensions::install(
                     &profiles,
@@ -271,14 +327,14 @@ fn execute(args: &Arguments) -> Result<Value, String> {
         "extension-disable" | "extensions" => {
             args.allow(
                 if args.command == "extension-disable" {
-                    &["--profiles-dir", "--extension-id"]
+                    &["--game-dir", "--profiles-dir", "--extension-id"]
                 } else {
-                    &["--profiles-dir"]
+                    &["--game-dir", "--profiles-dir"]
                 },
                 &[],
                 false,
             )?;
-            let profiles = args.required_path("--profiles-dir")?;
+            let profiles = profiles()?;
             if args.command == "extension-disable" {
                 let id = args
                     .values
@@ -336,7 +392,7 @@ fn main() {
     }
     if matches!(args.command.as_str(), "help" | "--help" | "-h") {
         print!(
-            "{HELP}\nNative extension commands require --profiles-dir DIR:\n  extension-install --artifact FILE --manifest FILE --sha256 SHA --manifest-sha256 MANIFEST_SHA --provenance SOURCE --allow PRIVILEGES --trust-native-code\n  extension-enable --extension-id ID --sha256 SHA --manifest-sha256 MANIFEST_SHA --provenance SOURCE --allow PRIVILEGES --trust-native-code\n  extension-disable --extension-id ID\n  extensions\nInstall stores native execution disabled. Enable and disable take effect in the next JVM process. Native extensions have full process privileges.\n"
+            "{HELP}\nNative extension commands accept --profiles-dir DIR:\n  extension-install --artifact FILE --manifest FILE --sha256 SHA --manifest-sha256 MANIFEST_SHA --provenance SOURCE --allow PRIVILEGES --trust-native-code\n  extension-enable --extension-id ID --sha256 SHA --manifest-sha256 MANIFEST_SHA --provenance SOURCE --allow PRIVILEGES --trust-native-code\n  extension-disable --extension-id ID\n  extensions\nInstall stores native execution disabled. Enable and disable take effect in the next JVM process. Native extensions have full process privileges.\n"
         );
         return;
     }

@@ -1,4 +1,4 @@
-use luabuddy_core::{ModId, Profile, read_profiles};
+use luabuddy_core::{ModId, Profile, read_profiles, selection::case_variant};
 pub mod extensions;
 #[cfg(windows)]
 mod windows;
@@ -8,13 +8,12 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(windows)]
-use windows::InstallLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA: u32 = 1;
 const METADATA_LIMIT: u64 = 4 * 1024 * 1024;
@@ -22,6 +21,7 @@ const RUNTIME_LIMIT: u64 = 256 * 1024 * 1024;
 const JOURNAL_LIMIT: u64 = 512 * 1024 * 1024;
 const INSTALL_DIR: &str = ".luabuddy";
 const RECORD_FILE: &str = "native-install.json";
+const LOCK_FILE: &str = "install.lock";
 const JOURNAL_FILE: &str = "native-transaction.json";
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -124,14 +124,25 @@ fn portable_path(value: &str) -> Result<PathBuf> {
     }
     Ok(path.to_owned())
 }
-fn absolute(path: &Path) -> Result<PathBuf> {
-    if path.is_absolute() {
-        Ok(path.to_owned())
-    } else {
-        env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .map_err(|e| io_error("Read working directory", path, e))
+/// Resolves links in the part of a user's path that already exists. Whatever
+/// LuaBuddy then creates below it is still checked for links.
+fn resolve(path: &Path) -> Result<PathBuf> {
+    let path = std::path::absolute(path).map_err(|e| io_error("Resolve", path, e))?;
+    for ancestor in path.ancestors() {
+        match fs::canonicalize(ancestor) {
+            Ok(real) => {
+                #[cfg(windows)]
+                let real = windows::launcher_path(real).unwrap_or_else(|| ancestor.to_owned());
+                return Ok(match path.strip_prefix(ancestor) {
+                    Ok(rest) if !rest.as_os_str().is_empty() => real.join(rest),
+                    _ => real,
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(io_error("Resolve", ancestor, e)),
+        }
     }
+    Ok(path)
 }
 fn plain_directory(path: &Path) -> Result<()> {
     reject_link_ancestors(path)?;
@@ -415,7 +426,7 @@ pub fn make_package(runtime: &Path, templates: &Path, output: &Path) -> Result<P
         ));
     }
     let profiles = read_profiles(templates)?;
-    let output = absolute(output)?;
+    let output = resolve(output)?;
     let parent = output
         .parent()
         .ok_or_else(|| invalid("Package output needs a parent directory"))?;
@@ -560,7 +571,27 @@ fn vdf_strings(text: &str) -> Vec<String> {
     result
 }
 
-pub fn steam_libraries() -> Result<Vec<PathBuf>> {
+/// Where Steam discovery looked and every game installation it found there.
+pub struct Discovery {
+    pub libraries: Vec<PathBuf>,
+    pub candidates: Vec<PathBuf>,
+    pub warnings: Vec<String>,
+}
+
+pub fn discover() -> Discovery {
+    let (libraries, warnings) = libraries_from(steam_roots());
+    let candidates: BTreeSet<_> = libraries
+        .iter()
+        .filter_map(|p| game_directory(&p.join("steamapps/common/ProjectZomboid")))
+        .collect();
+    Discovery {
+        libraries,
+        candidates: candidates.into_iter().collect(),
+        warnings,
+    }
+}
+
+fn steam_roots() -> BTreeSet<PathBuf> {
     let mut roots = BTreeSet::new();
     #[cfg(not(windows))]
     if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
@@ -580,26 +611,33 @@ pub fn steam_libraries() -> Result<Vec<PathBuf>> {
             }
         }
     }
-    libraries_from(roots)
+    roots
 }
 
-fn libraries_from(roots: BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
+fn libraries_from(roots: BTreeSet<PathBuf>) -> (Vec<PathBuf>, Vec<String>) {
     let mut libraries = roots.clone();
+    let mut warnings = Vec::new();
     for root in roots {
-        if let Some(data) =
-            optional_bytes(&root.join("steamapps/libraryfolders.vdf"), METADATA_LIMIT)?
-        {
-            let text = String::from_utf8(data)
-                .map_err(|_| invalid("Steam libraryfolders.vdf is not UTF-8"))?;
-            let tokens = vdf_strings(&text);
-            for pair in tokens.windows(2) {
-                if pair[0] == "path" {
-                    libraries.insert(PathBuf::from(&pair[1]));
-                }
-            }
+        let path = root.join("steamapps/libraryfolders.vdf");
+        let text = match fs::canonicalize(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => Err(io_error("Read", &path, e)),
+            Ok(real) => bytes(&real, METADATA_LIMIT).and_then(|data| {
+                String::from_utf8(data)
+                    .map_err(|_| invalid(format!("Not UTF-8: {}", path.display())))
+            }),
+        };
+        match text {
+            Ok(text) => libraries.extend(
+                vdf_strings(&text)
+                    .windows(2)
+                    .filter(|pair| pair[0] == "path")
+                    .map(|pair| PathBuf::from(&pair[1])),
+            ),
+            Err(error) => warnings.push(format!("Skipped a Steam library list. {error}")),
         }
     }
-    Ok(libraries.into_iter().collect())
+    (libraries.into_iter().collect(), warnings)
 }
 
 pub fn find_game(explicit: Option<&Path>) -> Result<PathBuf> {
@@ -614,20 +652,27 @@ pub fn find_game(explicit: Option<&Path>) -> Result<PathBuf> {
             ))
         });
     }
-    let found: BTreeSet<_> = steam_libraries()?
-        .into_iter()
-        .filter_map(|p| game_directory(&p.join("steamapps/common/ProjectZomboid")))
-        .collect();
-    if found.len() != 1 {
-        return Err(invalid(format!(
-            "Specify --game-dir or PZ_GAME_DIR; Steam discovery found {} installations",
-            found.len()
-        )));
+    let found = discover();
+    if let [game] = found.candidates.as_slice() {
+        return Ok(game.clone());
     }
-    found
-        .into_iter()
-        .next()
-        .ok_or_else(|| invalid("No game installation found"))
+    let list = |label: &str, paths: &[PathBuf]| -> String {
+        paths
+            .iter()
+            .map(|path| format!("\n{label} {}", path.display()))
+            .collect()
+    };
+    Err(invalid(format!(
+        "Specify --game-dir or PZ_GAME_DIR; Steam discovery found {} installations{}{}{}",
+        found.candidates.len(),
+        list("Found", &found.candidates),
+        list("Searched", &found.libraries),
+        found
+            .warnings
+            .iter()
+            .map(|warning| format!("\n{warning}"))
+            .collect::<String>()
+    )))
 }
 
 pub fn probe_jvm(game: &Path) -> Result<JvmIdentity> {
@@ -752,60 +797,169 @@ fn launcher_paths(game: &Path) -> Result<(PathBuf, PathBuf)> {
     Ok((base, site))
 }
 
-fn vendor_digest(data: &[u8]) -> Result<String> {
-    let value: Value = serde_json::from_slice(data).map_err(|e| {
-        invalid(format!(
-            "Invalid vendor launcher JSON: {e}. You can still uninstall LuaBuddy."
-        ))
-    })?;
-    Ok(sha256(&json_bytes(&value)?))
-}
-
-fn launcher_config(data: &[u8]) -> Result<Value> {
-    let value: Value =
-        serde_json::from_slice(data).map_err(|e| invalid(format!("Invalid launcher JSON: {e}")))?;
-    let args = value
-        .get("vmArgs")
-        .and_then(Value::as_array)
-        .ok_or_else(|| invalid("Launcher vmArgs must be an array of strings"))?;
-    if !value.is_object() || args.iter().any(|arg| !arg.is_string()) {
-        return Err(invalid("Launcher vmArgs must be an array of strings"));
+fn launcher_config(data: &[u8], path: &Path) -> Result<Value> {
+    let value: Value = serde_json::from_slice(data)
+        .map_err(|e| invalid(format!("Invalid launcher JSON in {}: {e}", path.display())))?;
+    let valid = value.is_object()
+        && value
+            .get("vmArgs")
+            .and_then(Value::as_array)
+            .is_some_and(|args| args.iter().all(Value::is_string));
+    if !valid {
+        return Err(invalid(format!(
+            "Launcher vmArgs must be an array of strings in {}",
+            path.display()
+        )));
     }
     Ok(value)
 }
 
-fn owned_property(argument: &str) -> bool {
-    [
-        "luabuddy.config",
-        "luabuddy.templates",
-        "luabuddy.debug",
-        "luabuddy.earlyUI",
-    ]
-    .iter()
-    .any(|name| argument == format!("-D{name}") || argument.starts_with(&format!("-D{name}=")))
+fn vm_args(config: &Value) -> Vec<String> {
+    config["vmArgs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
 }
 
-fn without_integration(data: &[u8], record: &InstallRecord) -> Result<Value> {
-    let mut config = launcher_config(data)?;
-    let generations: Vec<_> = std::iter::once(&record.current)
-        .chain(record.previous.iter())
-        .collect();
-    let args = config["vmArgs"]
-        .as_array()
-        .ok_or_else(|| invalid("Invalid launcher arguments"))?
+fn property(argument: &str, name: &str) -> bool {
+    argument
+        .strip_prefix("-D")
+        .and_then(|rest| rest.strip_prefix(name))
+        .is_some_and(|value| value.is_empty() || value.starts_with('='))
+}
+
+fn owned_agent(game: &Path, argument: &str) -> bool {
+    argument
+        .strip_prefix("-agentpath:")
+        .is_some_and(|path| Path::new(path).starts_with(game.join(INSTALL_DIR).join("native")))
+}
+
+fn owned_argument(game: &Path, argument: &str) -> bool {
+    owned_agent(game, argument)
+        || [
+            "luabuddy.config",
+            "luabuddy.templates",
+            "luabuddy.debug",
+            "luabuddy.earlyUI",
+        ]
         .iter()
-        .filter(|value| {
-            value.as_str().is_none_or(|arg| {
-                !owned_property(arg)
-                    && !generations
-                        .iter()
-                        .any(|generation| arg == generation.agent_argument)
-            })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    config["vmArgs"] = json!(args);
-    Ok(config)
+        .any(|name| property(argument, name))
+}
+
+/// Splits launcher settings into everything else and LuaBuddy's own arguments.
+fn split_integration(game: &Path, mut config: Value) -> (Value, Vec<String>) {
+    let (owned, kept): (Vec<_>, Vec<_>) = vm_args(&config)
+        .into_iter()
+        .partition(|argument| owned_argument(game, argument));
+    config["vmArgs"] = json!(kept);
+    (config, owned)
+}
+
+/// The base launcher settings the override was built from, when known. A
+/// digest from an older record identifies them among the candidates at hand.
+fn recorded_base(
+    record: &InstallRecord,
+    clean: &Value,
+    base: Option<&Value>,
+) -> Result<Option<Value>> {
+    if let Some(data) = &record.base_bytes {
+        return serde_json::from_slice(data)
+            .map(Some)
+            .map_err(|e| invalid(format!("Invalid recorded base launcher: {e}")));
+    }
+    for candidate in base.into_iter().chain([clean]) {
+        if record.windows_base_digest.as_ref() == Some(&sha256(&json_bytes(candidate)?)) {
+            return Ok(Some(candidate.clone()));
+        }
+    }
+    Ok(None)
+}
+
+/// The settings to build on, without LuaBuddy's arguments, and whether later
+/// changes to Steam's base can be told apart from user edits. An override that
+/// LuaBuddy created follows Steam's base; one that predates it is the user's.
+fn launcher_source(
+    game: &Path,
+    site: &Path,
+    data: &[u8],
+    record: &InstallRecord,
+    base: Option<&Value>,
+) -> Result<(Value, bool)> {
+    let config = launcher_config(data, site).map_err(|error| {
+        invalid(format!(
+            "{error}. Run repair to keep a copy and restore the recorded settings."
+        ))
+    })?;
+    let (clean, _) = split_integration(game, config);
+    if record.original_site.is_some() {
+        return Ok((clean, true));
+    }
+    match (recorded_base(record, &clean, base)?, base) {
+        (Some(was), Some(now)) => Ok((rebase(clean, &was, now), true)),
+        (_, now) => {
+            let unedited = now == Some(&clean);
+            Ok((clean, unedited))
+        }
+    }
+}
+
+/// Carries the user's edits, the difference between `mine` and the base it was
+/// built from, over to Steam's current base.
+fn rebase(mut mine: Value, was: &Value, now: &Value) -> Value {
+    let keys: BTreeSet<_> = [was, now]
+        .into_iter()
+        .filter_map(Value::as_object)
+        .flat_map(|fields| fields.keys().cloned())
+        .collect();
+    for key in keys {
+        let (edit, old, new) = (mine.get(&key), was.get(&key), now.get(&key));
+        let merged = if edit == old {
+            new.cloned()
+        } else if old != new
+            && let (Some(Value::Array(edit)), Some(Value::Array(old)), Some(Value::Array(new))) =
+                (edit, old, new)
+        {
+            let kept = new
+                .iter()
+                .filter(|item| edit.contains(item) || !old.contains(item));
+            let added = edit
+                .iter()
+                .filter(|item| !old.contains(item) && !new.contains(item));
+            Some(kept.chain(added).cloned().collect())
+        } else {
+            edit.cloned()
+        };
+        match merged {
+            Some(value) => mine[key.as_str()] = value,
+            None => {
+                if let Some(fields) = mine.as_object_mut() {
+                    fields.remove(&key);
+                }
+            }
+        }
+    }
+    mine
+}
+
+/// The override to work from. Repair and uninstall set unreadable contents
+/// aside and use the recorded ones.
+fn recorded_if_broken(
+    game: &Path,
+    site: &Path,
+    data: Option<Vec<u8>>,
+    record: &InstallRecord,
+) -> Result<(Option<Vec<u8>>, Option<PathBuf>)> {
+    match data {
+        Some(broken) if launcher_config(&broken, site).is_err() => {
+            let name = format!("launcher-{}.json", sha256(&broken));
+            let copy = preserve(game, &name, &broken)?;
+            Ok((Some(record.current.site_bytes.clone()), Some(copy)))
+        }
+        data => Ok((data, None)),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -829,8 +983,11 @@ pub struct InstallRecord {
     pub game: PathBuf,
     pub profiles: PathBuf,
     pub original_site: Option<Vec<u8>>,
-    // Windows .site.json is a full replacement for Steam's base file. Detect
-    // a game update rather than silently pinning an old VM/classpath layout.
+    // The site file replaces Steam's base file entirely. The base it was built
+    // from tells a Steam update apart from a user's edit. Records written before
+    // it was kept have only a Windows digest, or nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_bytes: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub windows_base_digest: Option<String>,
     pub current: InstalledGeneration,
@@ -854,6 +1011,19 @@ struct Journal {
     game: PathBuf,
     profiles: PathBuf,
     changes: Vec<Change>,
+    /// Generation files to remove, by SHA256, once `changes` are undone: those an
+    /// interrupted operation had written, or those a completed one superseded.
+    #[serde(default)]
+    drop: BTreeMap<PathBuf, String>,
+}
+
+/// A content-addressed file that nothing uses until the launcher selects its
+/// generation, so recovery needs only its hash.
+struct GenerationFile {
+    path: PathBuf,
+    sha256: String,
+    content: Vec<u8>,
+    executable: bool,
 }
 
 fn sync_directory(path: &Path) -> Result<()> {
@@ -903,6 +1073,14 @@ fn stage_path(path: &Path) -> Result<PathBuf> {
     Ok(path.with_file_name(format!(".{name}.luabuddy-stage")))
 }
 
+fn remove_if_present(path: &Path) -> Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(io_error("Remove owned file", path, e)),
+    }
+}
+
 fn write_atomic(path: &Path, data: Option<&[u8]>, executable: bool) -> Result<()> {
     let parent = path
         .parent()
@@ -910,6 +1088,7 @@ fn write_atomic(path: &Path, data: Option<&[u8]>, executable: bool) -> Result<()
     plain_directory(parent)?;
     if let Some(data) = data {
         let stage = stage_path(path)?;
+        remove_if_present(&stage)?;
         let permissions = fs::metadata(path)
             .ok()
             .map(|metadata| metadata.permissions());
@@ -927,90 +1106,40 @@ fn write_atomic(path: &Path, data: Option<&[u8]>, executable: bool) -> Result<()
         }
         result
     } else {
-        if path.exists() {
-            fs::remove_file(path).map_err(|e| io_error("Remove owned file", path, e))?;
-        }
+        remove_if_present(path)?;
         sync_directory(parent)
     }
 }
 
-#[cfg(not(windows))]
-struct InstallLock {
-    path: PathBuf,
-    identity: String,
-}
+// The kernel owns the lock, so an exit releases it and a leftover file is harmless.
+struct InstallLock(#[expect(dead_code, reason = "held until drop")] File);
 
-#[cfg(not(windows))]
 impl InstallLock {
     fn acquire(game: &Path) -> Result<Self> {
         let root = game.join(INSTALL_DIR);
         plain_directory(&root)?;
-        let path = root.join("native-install.lock");
-        let identity = process_identity(std::process::id())?;
-        if let Some(data) = optional_bytes(&path, 4096)? {
-            let prior = String::from_utf8(data).map_err(|_| {
-                invalid("Invalid native installer lock; preserve it for inspection")
-            })?;
-            let pid: u32 = prior
-                .split_once(':')
-                .and_then(|(pid, _)| pid.parse().ok())
-                .ok_or_else(|| invalid("Invalid native installer lock identity"))?;
-            match process_identity(pid) {
-                Ok(current) if current == prior => {
-                    return Err(invalid(format!(
-                        "Another native installer is running with process ID {pid}"
-                    )));
-                }
-                Ok(_) => fs::remove_file(&path)
-                    .map_err(|e| io_error("Remove stale native installer lock", &path, e))?,
-                Err(_) if !Path::new(&format!("/proc/{pid}")).exists() => fs::remove_file(&path)
-                    .map_err(|e| io_error("Remove stale native installer lock", &path, e))?,
-                Err(error) => return Err(error),
-            }
+        let path = root.join(LOCK_FILE);
+        if fs::symlink_metadata(&path).is_ok_and(|kind| link_like(&kind) || !kind.is_file()) {
+            return Err(invalid(format!(
+                "Expected a regular installer lock file: {}",
+                path.display()
+            )));
         }
-        write_new(&path, identity.as_bytes(), false)?;
-        Ok(Self { path, identity })
-    }
-    fn release(self) -> Result<()> {
-        if optional_bytes(&self.path, 4096)?.as_deref() != Some(self.identity.as_bytes()) {
-            return Err(invalid("Native installer lock ownership changed"));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| io_error("Open installer lock", &path, e))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self(file)),
+            Err(TryLockError::WouldBlock) => Err(invalid(format!(
+                "Another LuaBuddy installer is running and holds {}",
+                path.display()
+            ))),
+            Err(TryLockError::Error(e)) => Err(io_error("Lock", &path, e)),
         }
-        fs::remove_file(&self.path)
-            .map_err(|e| io_error("Release native installer lock", &self.path, e))
-    }
-}
-
-#[cfg(not(windows))]
-impl Drop for InstallLock {
-    fn drop(&mut self) {
-        if fs::read(&self.path).ok().as_deref() == Some(self.identity.as_bytes()) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn process_identity(pid: u32) -> Result<String> {
-    #[cfg(target_os = "linux")]
-    {
-        let path = PathBuf::from(format!("/proc/{pid}/stat"));
-        let text = fs::read_to_string(&path)
-            .map_err(|e| io_error("Read installer process identity", &path, e))?;
-        let (_, fields) = text
-            .rsplit_once(')')
-            .ok_or_else(|| invalid("Malformed process identity"))?;
-        let start = fields
-            .split_whitespace()
-            .nth(19)
-            .ok_or_else(|| invalid("Process identity lacks start time"))?;
-        Ok(format!("{pid}:{start}"))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        Err(invalid(
-            "Native installation is unverified on this platform",
-        ))
     }
 }
 
@@ -1048,67 +1177,178 @@ fn validate_transaction(game: &Path, journal: &Journal) -> Result<()> {
             return Err(invalid("Native transaction cannot overwrite itself"));
         }
     }
+    for path in journal.drop.keys() {
+        if !path.starts_with(root.join("native"))
+            || path.components().any(|c| matches!(c, Component::ParentDir))
+        {
+            return Err(invalid(format!(
+                "Native transaction contains an unowned path: {}",
+                path.display()
+            )));
+        }
+        reject_link_ancestors(path)?;
+    }
     Ok(())
 }
 
+fn journal_path(game: &Path) -> PathBuf {
+    game.join(INSTALL_DIR).join(JOURNAL_FILE)
+}
+
+fn read_journal(game: &Path) -> Result<Option<Journal>> {
+    let path = journal_path(game);
+    let Some(data) = optional_bytes(&path, JOURNAL_LIMIT)? else {
+        return Ok(None);
+    };
+    serde_json::from_slice::<Journal>(&data)
+        .map_err(|e| invalid(e.to_string()))
+        .and_then(|journal| validate_transaction(game, &journal).map(|()| Some(journal)))
+        .map_err(|e| {
+            invalid(format!(
+                "The interrupted operation recorded in {} cannot be undone: {e}. Uninstall sets that file aside.",
+                path.display()
+            ))
+        })
+}
+
+/// What an interrupted operation left to do, if one is recorded.
+fn interrupted(game: &Path) -> Option<String> {
+    match read_journal(game) {
+        Ok(None) => None,
+        Ok(Some(_)) => Some(format!(
+            "An interrupted operation is recorded in {}; run recover to undo it",
+            journal_path(game).display()
+        )),
+        Err(error) => Some(error.to_string()),
+    }
+}
+
+fn write_journal(game: &Path, journal: &Journal) -> Result<()> {
+    validate_transaction(game, journal)?;
+    let encoded = serde_json::to_vec(journal).map_err(|e| invalid(format!("Encode JSON: {e}")))?;
+    if encoded.len() as u64 > JOURNAL_LIMIT {
+        return Err(invalid(
+            "Install transaction is too large for recoverable metadata",
+        ));
+    }
+    write_atomic(&journal_path(game), Some(&encoded), false)
+}
+
+fn set_journal_aside(game: &Path) -> Result<PathBuf> {
+    let recovery = game.join(INSTALL_DIR).join("recovery");
+    plain_directory(&recovery)?;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let target = recovery.join(format!("transaction-{unique}.json"));
+    let path = journal_path(game);
+    fs::rename(&path, &target).map_err(|e| io_error("Set aside", &path, e))?;
+    Ok(target)
+}
+
 fn recover(game: &Path) -> Result<bool> {
-    let journal_path = game.join(INSTALL_DIR).join(JOURNAL_FILE);
-    let stage = stage_path(&journal_path)?;
-    if !journal_path.exists() && stage.exists() {
-        let candidate: std::result::Result<Journal, Error> =
-            bytes(&stage, JOURNAL_LIMIT).and_then(|data| {
-                serde_json::from_slice(&data)
-                    .map_err(|e| invalid(format!("Read transaction journal: {e}")))
-            });
-        match candidate {
-            Ok(journal) => {
-                validate_transaction(game, &journal)?;
-                fs::rename(&stage, &journal_path)
-                    .map_err(|e| io_error("Recover journal preparation", &journal_path, e))?;
-            }
-            Err(_) => {
-                fs::remove_file(&stage)
-                    .map_err(|e| io_error("Remove incomplete journal preparation", &stage, e))?;
-                return Ok(true);
-            }
-        }
-    }
-    if !journal_path.exists() {
-        return Ok(false);
-    }
-    let journal: Journal = serde_json::from_slice(&bytes(&journal_path, JOURNAL_LIMIT)?)
-        .map_err(|e| invalid(format!("Read transaction journal: {e}")))?;
-    validate_transaction(game, &journal)?;
+    let path = journal_path(game);
+    // A staged journal never took effect, so nothing it lists was applied.
+    let staged = remove_if_present(&stage_path(&path)?)?;
+    let Some(journal) = read_journal(game)? else {
+        return Ok(staged);
+    };
     for change in journal.changes.iter().rev() {
-        let temporary = stage_path(&change.path)?;
-        if optional_bytes(&temporary, RUNTIME_LIMIT)?.is_some() {
-            fs::remove_file(&temporary)
-                .map_err(|e| io_error("Remove interrupted stage", &temporary, e))?;
-        }
+        remove_if_present(&stage_path(&change.path)?)?;
         let current = optional_bytes(&change.path, RUNTIME_LIMIT)?;
         if current == change.before {
             continue;
         }
         if current != change.after {
             return Err(invalid(format!(
-                "Interrupted install encountered user-modified file {}; preserve it and its transaction journal",
-                change.path.display()
+                "Interrupted install encountered user-modified file {}; preserve it and its transaction journal {}",
+                change.path.display(),
+                path.display()
             )));
         }
         write_atomic(&change.path, change.before.as_deref(), change.executable)?;
     }
-    fs::remove_file(&journal_path)
-        .map_err(|e| io_error("Complete transaction recovery", &journal_path, e))?;
+    drop_generation_files(game, &journal.drop)?;
+    remove_if_present(&path)?;
     sync_directory(&game.join(INSTALL_DIR))?;
     Ok(true)
 }
 
-fn transact(game: &Path, profiles: &Path, changes: Vec<Change>) -> Result<bool> {
+/// Removes unmodified generation files and the directories they leave empty.
+fn drop_generation_files(game: &Path, files: &BTreeMap<PathBuf, String>) -> Result<()> {
+    let native = game.join(INSTALL_DIR).join("native");
+    let mut roots = BTreeSet::new();
+    for (path, digest) in files {
+        remove_if_present(&stage_path(path)?)?;
+        if optional_bytes(path, RUNTIME_LIMIT)?.is_some_and(|data| sha256(&data) == *digest) {
+            remove_if_present(path)?;
+        }
+        roots.extend(
+            path.ancestors()
+                .find(|ancestor| ancestor.parent() == Some(&native)),
+        );
+    }
+    for root in roots {
+        prune_empty(root);
+    }
+    let _ = fs::remove_dir(&native);
+    Ok(())
+}
+
+fn prune_empty(directory: &Path) {
+    for entry in fs::read_dir(directory).into_iter().flatten().flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            prune_empty(&entry.path());
+        }
+    }
+    let _ = fs::remove_dir(directory);
+}
+
+/// Splits recorded files into the unmodified ones to retire and the ones a user changed.
+fn retire(files: &BTreeMap<PathBuf, String>) -> Result<(BTreeMap<PathBuf, String>, Vec<PathBuf>)> {
+    let mut retired = BTreeMap::new();
+    let mut modified = Vec::new();
+    for (path, digest) in files {
+        match optional_bytes(path, RUNTIME_LIMIT)? {
+            Some(content) if sha256(&content) == *digest => {
+                retired.insert(path.clone(), digest.clone());
+            }
+            Some(_) => modified.push(path.clone()),
+            None => (),
+        }
+    }
+    Ok((retired, modified))
+}
+
+/// Keeps a copy of content that is about to be replaced.
+fn preserve(game: &Path, name: &str, content: &[u8]) -> Result<PathBuf> {
+    let path = game.join(INSTALL_DIR).join("recovery").join(name);
+    match optional_bytes(&path, RUNTIME_LIMIT)? {
+        None => write_atomic(&path, Some(content), false)?,
+        Some(existing) if existing == content => (),
+        Some(_) => {
+            return Err(invalid(format!(
+                "Recovery filename has conflicting contents: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(path)
+}
+
+fn transact(
+    game: &Path,
+    profiles: &Path,
+    files: &[GenerationFile],
+    changes: Vec<Change>,
+    retired: BTreeMap<PathBuf, String>,
+) -> Result<bool> {
     let changes: Vec<_> = changes
         .into_iter()
         .filter(|change| change.before != change.after)
         .collect();
-    if changes.is_empty() {
+    if files.is_empty() && changes.is_empty() && retired.is_empty() {
         return Ok(false);
     }
     let journal = Journal {
@@ -1116,41 +1356,50 @@ fn transact(game: &Path, profiles: &Path, changes: Vec<Change>) -> Result<bool> 
         game: game.to_owned(),
         profiles: profiles.to_owned(),
         changes,
+        drop: files
+            .iter()
+            .filter(|file| !file.path.exists())
+            .map(|file| (file.path.clone(), file.sha256.clone()))
+            .collect(),
     };
-    validate_transaction(game, &journal)?;
-    let journal_path = game.join(INSTALL_DIR).join(JOURNAL_FILE);
-    let encoded = json_bytes(&journal)?;
-    if encoded.len() as u64 > JOURNAL_LIMIT {
-        return Err(invalid(
-            "Install transaction is too large for recoverable metadata",
-        ));
-    }
-    write_atomic(&journal_path, Some(&encoded), false)?;
-    for change in &journal.changes {
-        if optional_bytes(&change.path, RUNTIME_LIMIT)? != change.before {
-            let error = invalid(format!(
-                "Install file changed during preparation: {}",
-                change.path.display()
-            ));
-            return match recover(game) {
-                Ok(_) => Err(error),
-                Err(recovery) => Err(invalid(format!(
-                    "{error}; recovery also failed: {recovery}"
-                ))),
-            };
+    write_journal(game, &journal)?;
+    let applied = (|| {
+        for file in files {
+            write_atomic(&file.path, Some(&file.content), file.executable)?;
         }
-        if let Err(error) = write_atomic(&change.path, change.after.as_deref(), change.executable) {
-            return match recover(game) {
-                Ok(_) => Err(error),
-                Err(recovery) => Err(invalid(format!(
-                    "{error}; recovery also failed: {recovery}"
-                ))),
-            };
+        for change in &journal.changes {
+            if optional_bytes(&change.path, RUNTIME_LIMIT)? != change.before {
+                return Err(invalid(format!(
+                    "Install file changed during preparation: {}",
+                    change.path.display()
+                )));
+            }
+            write_atomic(&change.path, change.after.as_deref(), change.executable)?;
         }
+        // Replacing the journal commits: from here recovery only removes what
+        // the operation superseded.
+        write_journal(
+            game,
+            &Journal {
+                changes: Vec::new(),
+                drop: retired,
+                ..journal.clone()
+            },
+        )
+    })();
+    if let Err(error) = applied {
+        return match recover(game) {
+            Ok(_) => Err(error),
+            Err(recovery) => Err(invalid(format!(
+                "{error}; recovery also failed: {recovery}"
+            ))),
+        };
     }
-    fs::remove_file(&journal_path)
-        .map_err(|e| io_error("Commit native install transaction", &journal_path, e))?;
-    sync_directory(&game.join(INSTALL_DIR))?;
+    recover(game).map_err(|error| {
+        invalid(format!(
+            "The change took effect, but superseded files remain: {error}. Close the game, then run recover."
+        ))
+    })?;
     Ok(true)
 }
 
@@ -1159,8 +1408,12 @@ fn read_record(game: &Path) -> Result<Option<InstallRecord>> {
     let Some(data) = optional_bytes(&path, METADATA_LIMIT)? else {
         return Ok(None);
     };
-    let record: InstallRecord = serde_json::from_slice(&data)
-        .map_err(|e| invalid(format!("Invalid native installation record: {e}")))?;
+    let record: InstallRecord = serde_json::from_slice(&data).map_err(|e| {
+        invalid(format!(
+            "Invalid native installation record {}: {e}",
+            path.display()
+        ))
+    })?;
     if record.schema != SCHEMA || record.game != game || !record.profiles.is_absolute() {
         return Err(invalid(
             "Native installation record does not match this game",
@@ -1206,33 +1459,36 @@ fn read_profiles_if_exists(directory: &Path) -> Result<Vec<Profile>> {
     }
 }
 
+/// A word the user can paste back into their shell.
+fn shell_word(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_alphanumeric() || "_./:\\-".contains(c) && (c != '\\' || cfg!(windows)))
+    {
+        value.to_owned()
+    } else if cfg!(windows) {
+        format!("\"{value}\"")
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+struct SelectedProfiles {
+    files: Vec<(PathBuf, Vec<u8>)>,
+    outcomes: Vec<Value>,
+}
+
 fn selected_profile_files(
     ids: &[String],
     directory: &Path,
     package: &Package,
-) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+) -> Result<SelectedProfiles> {
     let existing = read_profiles_if_exists(directory)?;
-    let mut file_names = BTreeMap::new();
-    if directory.exists() {
-        for entry in
-            fs::read_dir(directory).map_err(|e| io_error("Read profile directory", directory, e))?
-        {
-            let entry =
-                entry.map_err(|e| io_error("Read profile directory entry", directory, e))?;
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| invalid("Profile filenames must be UTF-8"))?;
-            file_names
-                .entry(name.to_lowercase())
-                .or_insert_with(Vec::new)
-                .push((name, entry.path()));
-        }
-    }
     let templates = read_profiles_if_exists(&package.directory.join("profiles"))?;
-    let templates: BTreeMap<_, _> = templates.into_iter().map(|p| (p.id.clone(), p)).collect();
     let mut selected = BTreeMap::new();
-    let mut result = Vec::new();
+    let mut files = Vec::new();
+    let mut outcomes = Vec::new();
     for id in ids {
         if id.chars().any(char::is_control) {
             return Err(invalid("Mod IDs must not contain control characters"));
@@ -1247,32 +1503,48 @@ fn selected_profile_files(
             }
             continue;
         }
-        let target = directory.join(&name);
-        if let Some(matches) = file_names.get(&name.to_lowercase()) {
-            if matches.len() != 1 || matches[0].0 != name {
-                return Err(invalid(format!("Profile filename collision for {name}")));
-            }
-            if !existing
-                .iter()
-                .any(|profile| profile.file == target && profile.id == id)
-            {
-                return Err(invalid(format!(
-                    "Existing profile {name} belongs to another mod"
-                )));
-            }
-        }
-        if existing
-            .iter()
-            .any(|profile| profile.id == id && profile.file != target)
-        {
+        if let Some(variant) = case_variant(&existing, &id) {
             return Err(invalid(format!(
-                "Mod ID {id} already exists under another profile filename"
+                "Mod IDs are case-sensitive; {id} is not selected, but {} exists in {}",
+                variant.id,
+                variant.file.display()
             )));
         }
-        if target.exists() {
+        let target = directory.join(&name);
+        if let Some(profile) = existing.iter().find(|profile| profile.id == id) {
+            if profile.file != target {
+                return Err(invalid(format!(
+                    "Mod ID {id} already exists under another profile filename: {}",
+                    profile.file.display()
+                )));
+            }
+            outcomes.push(if profile.enabled {
+                json!({"id":id, "outcome":"alreadyEnabled", "profile":target})
+            } else {
+                json!({"id":id, "outcome":"existsDisabled", "profile":target, "enableCommand":format!(
+                    "luabuddy select --profiles-dir {} --mod {}",
+                    shell_word(&directory.to_string_lossy()),
+                    shell_word(id.as_str())
+                )})
+            });
             continue;
         }
-        let content = if let Some(template) = templates.get(&id) {
+        if directory.exists() {
+            for entry in fs::read_dir(directory)
+                .map_err(|e| io_error("Read profile directory", directory, e))?
+            {
+                let entry =
+                    entry.map_err(|e| io_error("Read profile directory entry", directory, e))?;
+                if entry.file_name().to_string_lossy().to_lowercase() == name.to_lowercase() {
+                    return Err(invalid(format!(
+                        "Profile filename for {id} is taken by another mod: {}",
+                        entry.path().display()
+                    )));
+                }
+            }
+        }
+        let template = templates.iter().find(|profile| profile.id == id);
+        let content = if let Some(template) = template {
             bytes(&template.file, METADATA_LIMIT)?
         } else {
             format!(
@@ -1289,9 +1561,12 @@ fn selected_profile_files(
             &target,
             std::str::from_utf8(&content).map_err(|_| invalid("Profile is not UTF-8"))?,
         )?;
-        result.push((target, content));
+        outcomes.push(
+            json!({"id":id, "outcome":"created", "profile":target, "fromTemplate":template.is_some(), "templateWithDifferentCase":case_variant(&templates, &id).map(|profile| &profile.id)}),
+        );
+        files.push((target, content));
     }
-    Ok(result)
+    Ok(SelectedProfiles { files, outcomes })
 }
 
 pub use luabuddy_core::profile::profile_filename;
@@ -1318,36 +1593,50 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
             "Package architecture does not match the actual bundled JVM process",
         ));
     }
-    let lock = InstallLock::acquire(game)?;
+    let _lock = InstallLock::acquire(game)?;
     let recovered = recover(game)?;
     let prior = read_record(game)?;
-    let original_site = optional_bytes(&site, METADATA_LIMIT)?;
-    let base_bytes = bytes(&base, METADATA_LIMIT)?;
-    let windows_base_digest = if cfg!(windows) {
-        Some(vendor_digest(&base_bytes)?)
-    } else {
-        None
-    };
-    if let Some(saved) = prior.as_ref().and_then(|r| r.windows_base_digest.as_ref())
-        && Some(saved) != windows_base_digest.as_ref()
+    if options.repair
+        && let Some(record) = &prior
+        && record.current.package_digest != package.digest
     {
-        return Err(invalid(BASE_CHANGED));
+        return Err(invalid(format!(
+            "Repair needs the installed package {}, but the supplied package is {}. Use update to change packages.",
+            record.current.package_digest, package.digest
+        )));
     }
-    let selected_launcher = original_site.clone().unwrap_or(base_bytes);
-    let mut config = launcher_config(&selected_launcher)?;
-    let old_args: Vec<String> = config["vmArgs"]
-        .as_array()
-        .ok_or_else(|| invalid("Invalid launcher arguments"))?
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect();
+    let current_site = optional_bytes(&site, METADATA_LIMIT)?;
+    let base_bytes = bytes(&base, METADATA_LIMIT)?;
+    let base_config = launcher_config(&base_bytes, &base)?;
+    let (launcher, broken_launcher) = match &prior {
+        Some(record) if options.repair => {
+            recorded_if_broken(game, &site, current_site.clone(), record)?
+        }
+        _ => (current_site.clone(), None),
+    };
+    let (mut config, follows_base) = match (&launcher, &prior) {
+        (None, _) => (split_integration(game, base_config).0, true),
+        (Some(data), Some(record)) => {
+            launcher_source(game, &site, data, record, Some(&base_config))?
+        }
+        (Some(data), None) => (
+            split_integration(game, launcher_config(data, &site)?).0,
+            true,
+        ),
+    };
+    let old_args = match launcher
+        .as_ref()
+        .or(prior.as_ref().map(|r| &r.current.site_bytes))
+    {
+        Some(data) => split_integration(game, launcher_config(data, &site)?).1,
+        None => Vec::new(),
+    };
     let old_profile = old_args
         .iter()
         .rev()
         .find_map(|arg| arg.strip_prefix("-Dluabuddy.config="))
         .map(PathBuf::from);
-    let profiles = absolute(
+    let profiles = resolve(
         &options
             .profiles
             .clone()
@@ -1360,7 +1649,10 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
             "Profile directory contains a forbidden control character",
         ));
     }
-    let profile_files = selected_profile_files(&options.mods, &profiles, &package)?;
+    let SelectedProfiles {
+        files: profile_files,
+        outcomes,
+    } = selected_profile_files(&options.mods, &profiles, &package)?;
     plain_directory(&profiles)?;
     #[cfg(windows)]
     let (profiles, profile_files) = {
@@ -1376,24 +1668,8 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
             .collect::<Result<Vec<_>>>()?;
         (spelled, selected)
     };
-    let runtime_content = bytes(
-        &package.directory.join(&package.manifest.runtime),
-        RUNTIME_LIMIT,
-    )?;
-    let runtime_digest = sha256(&runtime_content);
     let generation_root = game.join(INSTALL_DIR).join("native").join(&package.digest);
     let runtime = generation_root.join(&package.manifest.runtime);
-    let runtime_before = optional_bytes(&runtime, RUNTIME_LIMIT)?;
-    if runtime_before
-        .as_ref()
-        .is_some_and(|content| sha256(content) != runtime_digest)
-        && !options.repair
-    {
-        return Err(invalid(format!(
-            "Installed runtime was modified: {}; use repair with the original verified package to preserve a recovery copy",
-            runtime.display()
-        )));
-    }
     let runtime_string = runtime
         .to_str()
         .ok_or_else(|| invalid("Native runtime path must be UTF-8"))?;
@@ -1416,101 +1692,86 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
             .to_str()
             .ok_or_else(|| invalid("Template path must be UTF-8"))?
     );
-    let mut args = Vec::new();
-    for arg in old_args {
-        let prior_agent = prior.as_ref().is_some_and(|r| {
-            arg == r.current.agent_argument
-                || r.previous.as_ref().is_some_and(|p| arg == p.agent_argument)
-        });
-        if prior_agent
-            || arg.starts_with("-Dluabuddy.config=")
-            || arg.starts_with("-Dluabuddy.templates=")
-        {
-            continue;
+    let mut args = vm_args(&config);
+    for (name, choice) in [
+        ("luabuddy.debug", options.debug),
+        ("luabuddy.earlyUI", options.early_ui),
+    ] {
+        match choice {
+            Some(true) => args.push(format!("-D{name}=true")),
+            Some(false) => (),
+            None => args.extend(old_args.iter().filter(|arg| property(arg, name)).cloned()),
         }
-        if options.debug.is_some()
-            && (arg == "-Dluabuddy.debug" || arg.starts_with("-Dluabuddy.debug="))
-        {
-            continue;
-        }
-        if options.early_ui.is_some()
-            && (arg == "-Dluabuddy.earlyUI" || arg.starts_with("-Dluabuddy.earlyUI="))
-        {
-            continue;
-        }
-        args.push(arg);
-    }
-    if options.debug == Some(true) {
-        args.push("-Dluabuddy.debug=true".into());
-    }
-    if options.early_ui == Some(true) {
-        args.push("-Dluabuddy.earlyUI=true".into());
     }
     args.push(config_argument.clone());
     args.push(templates_argument.clone());
     args.push(agent_argument.clone());
     config["vmArgs"] = json!(args);
     let site_bytes = json_bytes(&config)?;
-    let mut generation_files = BTreeMap::from([(runtime.clone(), runtime_digest.clone())]);
-    let mut template_changes = Vec::new();
+    let same = prior
+        .as_ref()
+        .is_some_and(|record| record.current.package_digest == package.digest);
+    let mut generation_files = BTreeMap::new();
+    let mut missing = Vec::new();
+    let mut modified = Vec::new();
     for (name, file) in &package.manifest.files {
-        if name.starts_with("profiles/")
-            || name == "LICENSE"
-            || name == "THIRD_PARTY.md"
-            || name.starts_with("licenses/")
+        let native = *name == package.manifest.runtime;
+        if !native
+            && !name.starts_with("profiles/")
+            && name != "LICENSE"
+            && name != "THIRD_PARTY.md"
+            && !name.starts_with("licenses/")
         {
-            let path = generation_root.join(portable_path(name)?);
-            let content = bytes(&package.directory.join(name), METADATA_LIMIT)?;
-            let before = optional_bytes(&path, METADATA_LIMIT)?;
-            if let Some(changed) = before.as_ref().filter(|data| sha256(data) != file.sha256) {
-                if !options.repair {
-                    return Err(invalid(format!(
-                        "Bundled template was modified: {}; use repair with the original package to preserve a recovery copy",
-                        path.display()
-                    )));
-                }
-                let retained = game
-                    .join(INSTALL_DIR)
-                    .join("recovery/templates")
-                    .join(sha256(changed));
-                let retained_before = optional_bytes(&retained, METADATA_LIMIT)?;
-                if retained_before.as_ref().is_some_and(|data| data != changed) {
-                    return Err(invalid(
-                        "Template recovery filename has conflicting contents",
-                    ));
-                }
-                template_changes.push(Change {
-                    path: retained,
-                    before: retained_before,
-                    after: Some(changed.clone()),
-                    executable: false,
-                });
-            }
-            generation_files.insert(path.clone(), file.sha256.clone());
-            template_changes.push(Change {
-                path,
-                before,
-                after: Some(content),
-                executable: false,
-            });
+            continue;
         }
+        let path = generation_root.join(portable_path(name)?);
+        generation_files.insert(path.clone(), file.sha256.clone());
+        if let Some(before) = optional_bytes(&path, RUNTIME_LIMIT)? {
+            let digest = sha256(&before);
+            if digest == file.sha256 {
+                continue;
+            }
+            if same && !options.repair {
+                return Err(invalid(format!(
+                    "Installed generation file was modified: {}; use repair with the installed package to preserve a recovery copy",
+                    path.display()
+                )));
+            }
+            modified.push((
+                if native {
+                    format!("runtime-{digest}")
+                } else {
+                    format!("templates/{digest}")
+                },
+                before,
+            ));
+        }
+        let content = bytes(&package.directory.join(name), RUNTIME_LIMIT)?;
+        if sha256(&content) != file.sha256 {
+            return Err(invalid(format!(
+                "Package changed during installation: {name}"
+            )));
+        }
+        missing.push(GenerationFile {
+            path,
+            sha256: file.sha256.clone(),
+            content,
+            executable: file.executable,
+        });
     }
-    plain_directory(&templates)?;
     let generation = InstalledGeneration {
         package_digest: package.digest,
         package_version: package.manifest.version,
         runtime: runtime.clone(),
-        runtime_sha256: runtime_digest,
+        runtime_sha256: package.manifest.files[&package.manifest.runtime]
+            .sha256
+            .clone(),
         agent_argument,
         config_argument,
         templates_argument,
         files: generation_files,
         site_bytes: site_bytes.clone(),
     };
-    let same = prior.as_ref().is_some_and(|record| {
-        record.current.package_digest == generation.package_digest
-            && record.current.site_bytes == generation.site_bytes
-    });
     let record = InstallRecord {
         schema: SCHEMA,
         game: game.to_owned(),
@@ -1518,8 +1779,9 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
         original_site: prior
             .as_ref()
             .map(|r| r.original_site.clone())
-            .unwrap_or(original_site.clone()),
-        windows_base_digest,
+            .unwrap_or(current_site.clone()),
+        base_bytes: follows_base.then_some(base_bytes),
+        windows_base_digest: None,
         current: generation,
         previous: if same {
             prior.as_ref().and_then(|r| r.previous.clone())
@@ -1529,35 +1791,6 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
         jvm,
     };
     let mut changes = Vec::new();
-    if options.repair
-        && let Some(content) = runtime_before
-            .as_ref()
-            .filter(|content| sha256(content) != record.current.runtime_sha256)
-    {
-        let retained = game
-            .join(INSTALL_DIR)
-            .join("recovery")
-            .join(format!("runtime-{}", sha256(content)));
-        let retained_before = optional_bytes(&retained, RUNTIME_LIMIT)?;
-        if retained_before.as_ref().is_some_and(|data| data != content) {
-            return Err(invalid(
-                "Runtime recovery filename has conflicting contents",
-            ));
-        }
-        changes.push(Change {
-            before: retained_before,
-            path: retained,
-            after: Some(content.clone()),
-            executable: true,
-        });
-    }
-    changes.push(Change {
-        path: runtime,
-        before: runtime_before,
-        after: Some(runtime_content),
-        executable: true,
-    });
-    changes.extend(template_changes);
     for (path, content) in profile_files {
         changes.push(Change {
             path,
@@ -1575,12 +1808,11 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
     });
     changes.push(Change {
         path: site,
-        before: original_site,
+        before: current_site,
         after: Some(site_bytes),
         executable: false,
     });
-    let mut retained_modified = Vec::new();
-    if let Some(retired) = prior
+    let (retired, retained_modified) = prior
         .as_ref()
         .and_then(|r| r.previous.as_ref())
         .filter(|g| {
@@ -1590,30 +1822,37 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
                     .as_ref()
                     .is_none_or(|previous| previous.runtime != g.runtime)
         })
-    {
-        for (path, digest) in &retired.files {
-            if let Some(content) = optional_bytes(path, RUNTIME_LIMIT)? {
-                if sha256(&content) != *digest {
-                    retained_modified.push(path.clone());
-                    continue;
-                }
-                changes.insert(
-                    0,
-                    Change {
-                        path: path.clone(),
-                        before: Some(content),
-                        after: None,
-                        executable: path == &retired.runtime,
-                    },
-                );
-            }
-        }
+        .map(|g| retire(&g.files))
+        .transpose()?
+        .unwrap_or_default();
+    for (name, content) in modified {
+        preserve(game, &name, &content)?;
     }
-    let changed = transact(game, &profiles, changes)?;
-    lock.release()?;
+    let changed = transact(game, &profiles, &missing, changes, retired)?;
+    // A package without templates still has a template directory to read.
+    plain_directory(&templates)?;
     Ok(
-        json!({"operation": if options.repair { "repair" } else { "install" }, "changed":changed, "recoveredInterruptedOperation":recovered, "profiles":profiles, "modifiedRetiredFilesPreserved":retained_modified, "runtime":record.current.runtime, "runtimeVerified":false, "nextStep":"Fully restart Project Zomboid through its normal launcher. Package integrity is verified; in-game operation requires its own runtime evidence."}),
+        json!({"operation": if options.repair { "repair" } else { "install" }, "changed":changed, "recoveredInterruptedOperation":recovered, "profiles":profiles, "mods":outcomes, "modifiedRetiredFilesPreserved":retained_modified, "invalidLauncherPreserved":broken_launcher, "runtime":record.current.runtime, "runtimeVerified":false, "nextStep":"Fully restart Project Zomboid through its normal launcher. Package integrity is verified; in-game operation requires its own runtime evidence."}),
     )
+}
+
+/// The directories an installation uses.
+pub struct InstalledDirectories {
+    pub profiles: PathBuf,
+    pub templates: PathBuf,
+}
+
+pub fn installed_directories(game: &Path) -> Result<InstalledDirectories> {
+    let record = read_record(game)?.ok_or_else(|| {
+        invalid(format!(
+            "LuaBuddy native runtime is not installed in {}",
+            game.display()
+        ))
+    })?;
+    Ok(InstalledDirectories {
+        templates: record.current.runtime.with_file_name("profiles"),
+        profiles: record.profiles,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -1624,16 +1863,13 @@ pub struct InstallationStatus {
     pub problems: Vec<String>,
 }
 
-const BASE_CHANGED: &str = "Steam's base launcher JSON changed. Close the game and uninstall LuaBuddy. If a personal site override remains, compare it with the new base before reinstalling.";
+const BASE_CHANGED: &str = "Steam's base launcher JSON changed since the launcher override was built from it. Close the game, then run update or repair to rebuild the override.";
 
-fn installation_problems(game: &Path, record: &InstallRecord) -> Result<Vec<String>> {
+/// What is wrong with an installation, and what a user changed around it.
+fn inspect(game: &Path, record: &InstallRecord) -> Result<(Vec<String>, Vec<String>)> {
     let (base, site) = launcher_paths(game)?;
     let mut problems = Vec::new();
-    if let Some(saved) = &record.windows_base_digest
-        && *saved != vendor_digest(&bytes(&base, METADATA_LIMIT)?)?
-    {
-        problems.push(BASE_CHANGED.into());
-    }
+    let mut notes = Vec::new();
     for (path, digest) in &record.current.files {
         match optional_bytes(path, RUNTIME_LIMIT)? {
             Some(data) if sha256(&data) == *digest => (),
@@ -1647,8 +1883,68 @@ fn installation_problems(game: &Path, record: &InstallRecord) -> Result<Vec<Stri
             )),
         }
     }
-    if optional_bytes(&site, METADATA_LIMIT)?.as_ref() != Some(&record.current.site_bytes) {
-        problems.push("Launcher override differs from the last installed generation; user edits are preserved".into());
+    let base_bytes = bytes(&base, METADATA_LIMIT)?;
+    let base_config = serde_json::from_slice::<Value>(&base_bytes).ok();
+    let base_changed = match (
+        &record.base_bytes,
+        &record.windows_base_digest,
+        &base_config,
+    ) {
+        (Some(saved), _, _) => serde_json::from_slice(saved).ok() != base_config,
+        (None, Some(saved), Some(now)) => *saved != sha256(&json_bytes(now)?),
+        (None, Some(_), None) => true,
+        (None, None, _) => false,
+    };
+    if base_changed && record.original_site.is_none() {
+        problems.push(BASE_CHANGED.into());
+    } else if base_changed {
+        notes.push(format!(
+            "Steam's base launcher JSON changed since the last install. {} is your own override, so compare it with {}.",
+            site.display(),
+            base.display()
+        ));
+    }
+    match optional_bytes(&site, METADATA_LIMIT)?.map(|data| launcher_config(&data, &site)) {
+        None => problems.push(format!(
+            "Launcher override is missing; run repair: {}",
+            site.display()
+        )),
+        Some(Err(error)) => problems.push(format!(
+            "{error}. Run repair to keep a copy and restore the recorded settings."
+        )),
+        Some(Ok(config)) => {
+            let generation = &record.current;
+            let args = vm_args(&config);
+            let last = |name: &str| args.iter().rev().find(|arg| property(arg, name));
+            if !args
+                .iter()
+                .filter(|arg| owned_agent(game, arg))
+                .eq([&generation.agent_argument])
+                || last("luabuddy.config") != Some(&generation.config_argument)
+                || last("luabuddy.templates") != Some(&generation.templates_argument)
+            {
+                problems.push(format!(
+                    "The launcher override does not select the installed generation; run repair: {}",
+                    site.display()
+                ));
+            }
+            if launcher_config(&generation.site_bytes, &site)? != config {
+                notes.push(format!(
+                    "The launcher override was edited since the last install. Unrelated edits are kept: {}",
+                    site.display()
+                ));
+            }
+            if record.base_bytes.is_none()
+                && record.windows_base_digest.is_none()
+                && record.original_site.is_none()
+                && base_config.as_ref() != Some(&split_integration(game, config).0)
+            {
+                notes.push(format!(
+                    "The launcher override differs from Steam's base launcher, and this older installation did not record which settings are yours. If you did not edit it, close the game, remove {} and run repair.",
+                    site.display()
+                ));
+            }
+        }
     }
     if !record.profiles.is_dir() {
         problems.push(format!(
@@ -1657,19 +1953,17 @@ fn installation_problems(game: &Path, record: &InstallRecord) -> Result<Vec<Stri
         ));
     }
     read_profiles_if_exists(&record.profiles)?;
-    if game.join(INSTALL_DIR).join(JOURNAL_FILE).exists() {
-        problems.push("An interrupted operation awaits recover, install, or uninstall".into());
-    }
-    Ok(problems)
+    problems.extend(interrupted(game));
+    Ok((problems, notes))
 }
 
 pub fn installation_status(game: &Path) -> Result<Option<InstallationStatus>> {
     launcher_paths(game)?;
     let Some(record) = read_record(game)? else {
-        return Ok(None);
+        return interrupted(game).map_or(Ok(None), |problem| Err(invalid(problem)));
     };
-    let problems = match installation_problems(game, &record) {
-        Ok(problems) => problems,
+    let problems = match inspect(game, &record) {
+        Ok((problems, _)) => problems,
         Err(error) => vec![format!(
             "Installation checks could not be completed: {error}"
         )],
@@ -1684,34 +1978,35 @@ pub fn installation_status(game: &Path) -> Result<Option<InstallationStatus>> {
 
 pub fn verify_install(game: &Path) -> Result<Value> {
     launcher_paths(game)?;
-    let record =
-        read_record(game)?.ok_or_else(|| invalid("LuaBuddy native runtime is not installed"))?;
-    let problems = installation_problems(game, &record)?;
+    let record = match (read_record(game), interrupted(game)) {
+        (Ok(Some(record)), _) => record,
+        (Ok(None), Some(problem)) => {
+            return Ok(json!({"ok":false, "game":game, "profiles":null, "problems":[problem]}));
+        }
+        (Err(error), Some(problem)) => return Err(invalid(format!("{problem}. {error}"))),
+        (Ok(None), None) => return Err(invalid("LuaBuddy native runtime is not installed")),
+        (Err(error), None) => return Err(error),
+    };
+    let (problems, notes) = inspect(game, &record)?;
     let ok = problems.is_empty();
     Ok(
-        json!({"ok":ok, "game":game, "profiles":record.profiles, "packageVersion":record.current.package_version, "packageDigest":record.current.package_digest, "runtime":record.current.runtime, "runtimeVerified":false, "problems":problems, "jvm":record.jvm}),
+        json!({"ok":ok, "game":game, "profiles":record.profiles, "packageVersion":record.current.package_version, "packageDigest":record.current.package_digest, "runtime":record.current.runtime, "runtimeVerified":false, "problems":problems, "notes":notes, "jvm":record.jvm}),
     )
 }
 
 pub fn recover_install(game: &Path) -> Result<Value> {
     launcher_paths(game)?;
-    let lock = InstallLock::acquire(game)?;
+    let _lock = InstallLock::acquire(game)?;
     let recovered = recover(game)?;
-    lock.release()?;
     Ok(json!({"operation":"recover", "recovered":recovered}))
 }
 
 pub fn rollback(game: &Path) -> Result<Value> {
     let (base, site) = launcher_paths(game)?;
-    let lock = InstallLock::acquire(game)?;
+    let _lock = InstallLock::acquire(game)?;
     recover(game)?;
     let mut record =
         read_record(game)?.ok_or_else(|| invalid("LuaBuddy native runtime is not installed"))?;
-    if let Some(saved) = &record.windows_base_digest
-        && *saved != vendor_digest(&bytes(&base, METADATA_LIMIT)?)?
-    {
-        return Err(invalid(BASE_CHANGED));
-    }
     let mut previous = record
         .previous
         .take()
@@ -1725,35 +2020,21 @@ pub fn rollback(game: &Path) -> Result<Value> {
         }
     }
     let current_site = optional_bytes(&site, METADATA_LIMIT)?;
-    if current_site.as_ref() != Some(&record.current.site_bytes) {
-        return Err(invalid(
-            "Launcher override has user changes; rollback refused without overwriting them",
-        ));
-    }
-    let mut config = without_integration(&record.current.site_bytes, &record)?;
-    let prior_config = launcher_config(&previous.site_bytes)?;
-    let owned_args = prior_config["vmArgs"]
-        .as_array()
-        .ok_or_else(|| invalid("Invalid previous launcher arguments"))?
-        .iter()
-        .filter(|value| {
-            value
-                .as_str()
-                .is_some_and(|arg| owned_property(arg) || arg == previous.agent_argument)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    config["vmArgs"]
-        .as_array_mut()
-        .ok_or_else(|| invalid("Invalid launcher arguments"))?
-        .extend(owned_args);
-    let profile_argument = config["vmArgs"]
-        .as_array()
-        .ok_or_else(|| invalid("Invalid launcher arguments"))?
+    let base_bytes = bytes(&base, METADATA_LIMIT)?;
+    let base_config = launcher_config(&base_bytes, &base)?;
+    let (mut config, follows_base) = match &current_site {
+        Some(data) => launcher_source(game, &site, data, &record, Some(&base_config))?,
+        None => (split_integration(game, base_config).0, true),
+    };
+    record.base_bytes = follows_base.then_some(base_bytes);
+    record.windows_base_digest = None;
+    let mut args = vm_args(&config);
+    args.extend(split_integration(game, launcher_config(&previous.site_bytes, &site)?).1);
+    config["vmArgs"] = json!(args);
+    let profile_argument = args
         .iter()
         .rev()
-        .filter_map(Value::as_str)
-        .find(|arg| *arg == "-Dluabuddy.config" || arg.starts_with("-Dluabuddy.config="))
+        .find(|arg| property(arg, "luabuddy.config"))
         .ok_or_else(|| invalid("Previous generation has no profile directory argument"))?;
     let profiles = profile_argument
         .strip_prefix("-Dluabuddy.config=")
@@ -1782,8 +2063,7 @@ pub fn rollback(game: &Path) -> Result<Value> {
             executable: false,
         },
     ];
-    let changed = transact(game, &record.profiles, changes)?;
-    lock.release()?;
+    let changed = transact(game, &record.profiles, &[], changes, BTreeMap::new())?;
     Ok(
         json!({"operation":"rollback", "changed":changed, "packageVersion":record.current.package_version, "profilesPreserved":record.profiles, "restartRequired":true}),
     )
@@ -1791,62 +2071,61 @@ pub fn rollback(game: &Path) -> Result<Value> {
 
 pub fn uninstall(game: &Path) -> Result<Value> {
     let (base, site) = supported_launcher_files(game)?;
-    let lock = InstallLock::acquire(game)?;
+    let _lock = InstallLock::acquire(game)?;
+    // Removal needs only the installation record, so an unusable journal must
+    // not prevent it.
+    let journal = match read_journal(game) {
+        Ok(_) => None,
+        Err(_) => Some(set_journal_aside(game)?),
+    };
     let recovered = recover(game)?;
     let Some(record) = read_record(game)? else {
-        lock.release()?;
         return Ok(
-            json!({"operation":"uninstall", "changed":false, "recoveredInterruptedOperation":recovered}),
+            json!({"operation":"uninstall", "changed":false, "recoveredInterruptedOperation":recovered, "invalidJournalPreserved":journal}),
         );
     };
     let current_site = optional_bytes(&site, METADATA_LIMIT)?;
-    let restored = if let Some(content) = &current_site {
-        let clean = without_integration(content, &record)?;
-        // Windows has the original semantic base digest. Removal of its
-        // complete site override must not depend on Steam retaining the old
-        // JSON schema, or on the replacement base file even existing.
-        let matches_baseline = if let Some(original) = &record.original_site {
-            clean == launcher_config(original)?
-        } else if let Some(saved) = &record.windows_base_digest {
-            *saved == sha256(&json_bytes(&clean)?)
-        } else {
-            clean == launcher_config(&bytes(&base, METADATA_LIMIT)?)?
-        };
-        if matches_baseline {
-            record.original_site.clone()
-        } else {
-            Some(json_bytes(&clean)?)
+    // The override must be removable whatever Steam's base file became.
+    let base_config = bytes(&base, METADATA_LIMIT)
+        .and_then(|data| launcher_config(&data, &base))
+        .ok();
+    let (launcher, broken_launcher) =
+        recorded_if_broken(game, &site, current_site.clone(), &record)?;
+    let restored = match launcher {
+        None => None,
+        Some(data) => {
+            let (source, _) = launcher_source(game, &site, &data, &record, base_config.as_ref())?;
+            match &record.original_site {
+                Some(original) if source == launcher_config(original, &site)? => {
+                    Some(original.clone())
+                }
+                _ if base_config.as_ref() == Some(&source)
+                    || base_config.is_none()
+                        && recorded_base(&record, &source, None)?.as_ref() == Some(&source) =>
+                {
+                    None
+                }
+                _ => Some(json_bytes(&source)?),
+            }
         }
-    } else {
-        None
     };
+    let notes = restored.as_ref().map(|_| {
+        format!(
+            "{} stays because it holds your own settings. It replaces Steam's base launcher entirely, so compare them if the game does not start.",
+            site.display()
+        )
+    });
     let mut changes = vec![Change {
         path: site,
         before: current_site,
         after: restored,
         executable: false,
     }];
-    let mut retained = Vec::new();
-    let mut seen = BTreeSet::new();
-    for generation in std::iter::once(&record.current).chain(record.previous.iter()) {
-        for (path, digest) in &generation.files {
-            if !seen.insert(path) {
-                continue;
-            }
-            if let Some(content) = optional_bytes(path, RUNTIME_LIMIT)? {
-                if sha256(&content) == *digest {
-                    changes.push(Change {
-                        path: path.clone(),
-                        before: Some(content),
-                        after: None,
-                        executable: path == &generation.runtime,
-                    });
-                } else {
-                    retained.push(path.clone());
-                }
-            }
-        }
-    }
+    let owned = std::iter::once(&record.current)
+        .chain(record.previous.iter())
+        .flat_map(|generation| generation.files.clone())
+        .collect();
+    let (retired, retained) = retire(&owned)?;
     let record_path = game.join(INSTALL_DIR).join(RECORD_FILE);
     changes.push(Change {
         before: optional_bytes(&record_path, METADATA_LIMIT)?,
@@ -1854,10 +2133,9 @@ pub fn uninstall(game: &Path) -> Result<Value> {
         after: None,
         executable: false,
     });
-    let changed = transact(game, &record.profiles, changes)?;
-    lock.release()?;
+    let changed = transact(game, &record.profiles, &[], changes, retired)?;
     Ok(
-        json!({"operation":"uninstall", "changed":changed, "profilesPreserved":record.profiles, "modifiedFilesPreserved":retained, "restartRequired":true}),
+        json!({"operation":"uninstall", "changed":changed, "profilesPreserved":record.profiles, "modifiedFilesPreserved":retained, "invalidLauncherPreserved":broken_launcher, "invalidJournalPreserved":journal, "notes":Vec::from_iter(notes), "restartRequired":true}),
     )
 }
 
@@ -2073,7 +2351,8 @@ mod steam_discovery_tests {
             format!(r#""libraryfolders" {{ "1" {{ "path" "{escaped}" }} }}"#),
         )
         .unwrap();
-        let found = libraries_from(BTreeSet::from([primary])).unwrap();
+        let (found, warnings) = libraries_from(BTreeSet::from([primary]));
+        assert!(warnings.is_empty());
         assert!(found.contains(&secondary));
         assert!(game_directory(&game).is_some());
         #[cfg(windows)]

@@ -12,22 +12,22 @@ Open **Options > Mods > LuaBuddy > Manage mods**. These in-game workflows descri
 6. Exercise the mod's actual controls. Loading successfully does not establish that every feature works, especially features requiring server code or native startup assets.
 7. When testing is complete, choose **Disable late**. The source stays installed, and running code stays active until the Lua environment ends. A reconnect uses the saved disabled selection.
 
-For a source tree outside the native mod directories, select its root through the CLI. Run `luabuddy verify --game-dir /path/to/ProjectZomboid` and use the `profiles` path from its JSON output for `--profiles-dir`. The default is `.luabuddy/profiles` beside the game launcher; use the reported path if setup selected a different directory. Do not point `select` at the package's template directory. The `path` is the root above `common/` and the selected version directory.
+For a source tree outside the native mod directories, select its root through the CLI. `--profiles-dir` defaults to the directory recorded by the installation, which `luabuddy verify` reports as `profiles`. Add `--game-dir /path/to/ProjectZomboid` if discovery does not identify one installation. A directory you name must already exist. Do not point `select` at the package's template directory. A new selection starts from the installed template for that mod ID when there is one. The `path` is the root above `common/` and the selected version directory.
 
 ```sh
-luabuddy select --profiles-dir /path/to/profiles --mod Example --path /path/to/Example
-luabuddy profiles --profiles-dir /path/to/profiles
+luabuddy select --mod Example --path /path/to/Example
+luabuddy profiles
 ```
 
 Use **Load enabled** in a ready multiplayer client to request loading. To disable that future selection through the CLI, run the following command.
 
 ```sh
-luabuddy deselect --profiles-dir /path/to/profiles --mod Example
+luabuddy deselect --mod Example
 ```
 
 ## Pour and Shelf Aware on a multiplayer client
 
-These two templates are in the source catalog after v0.1.0-rc.3, not in that prerelease archive. Install the upstream Workshop item for each integration you want. With a package built from the updated source, choose **Enable late** for each in **Manage mods**, or install with `--mod PourIntoContainer --mod PinyosShelfAware`. Both are optional. If these mods were previously selected for native startup, choose **Next launch > Startup disable** for each and use the next normal game launch. Enabling a profile cannot undo options or callbacks already in memory, and a mod loaded by the server is not replaced. An ID-only profile (including CLI `select --path`) does not copy the exclusions. Existing personal profiles are never silently rewritten: if you used the old `live=startup` templates, back them up and replace only the two files with the new complete templates.
+These two templates are in the source catalog after v0.1.0-rc.3, not in that prerelease archive. Install the upstream Workshop item for each integration you want. With a package built from the updated source, choose **Enable late** for each in **Manage mods**, or install with `--mod PourIntoContainer --mod PinyosShelfAware`. Both are optional. If these mods were previously selected for native startup, choose **Next launch > Startup disable** for each and use the next normal game launch. Enabling a profile cannot undo options or callbacks already in memory, and a mod loaded by the server is not replaced. The CLI's `select` also starts from the installed template, but an ID-only profile made by hand or by an earlier release does not copy the exclusions. Existing personal profiles are never silently rewritten: if you used the old `live=startup` templates, back them up and replace only the two files with the new complete templates.
 
 * **PourIntoContainer:** The original quick-pour and empty entries remain visible; showing an entry does not mean a server can complete its custom action. The late profile omits the upstream options module so it does not enable **Hide Vanilla Liquid Menus** in a fresh Lua environment. On a server without those actions, use the game's **Fluid > Transfer Liquid** or **Fluid > Empty** instead.
 * **Shelf Aware!:** Open the reference window with the numeric keypad’s multiply key (the mod's default binding) or the book icon. Its manual marks, memos and read progress are available; automatic sightings, shelf locations, scanner-based loot feedback and death recovery are not. The original Settings tab's scan toggles do not enable the excluded scanner. The profile does not run its registry backup sender or server handler. It adds no local save file and cannot promise that manual entries survive reconnect. For searched-book locations, the separate optional **Loot Tracker** can search its own local records from **Map > Items**.
@@ -37,8 +37,8 @@ These two templates are in the source catalog after v0.1.0-rc.3, not in that pre
 Queue an eligible mod for the next game process. This does not change normal profiles or copy the mod's source.
 
 ```sh
-luabuddy select --profiles-dir /path/to/profiles --mod Example --path /path/to/Example --once
-luabuddy profiles --profiles-dir /path/to/profiles
+luabuddy select --mod Example --path /path/to/Example --once
+luabuddy profiles
 ```
 
 1. Confirm the CLI lists the mod under `queuedForNextLaunch`.
@@ -50,14 +50,14 @@ luabuddy profiles --profiles-dir /path/to/profiles
 
 LuaBuddy consumes queued registrations when it first initializes in that game process, including the main menu. It keeps their parsed profiles in memory across reconnects. Exiting from the menu or crashing also consumes that launch. Registrations queued after initialization belong to a later process. LuaBuddy removes its registration files before source execution, so cleanup needs no exit monitor. It leaves the original source and persistent selections intact.
 
-An existing persistent profile with the same ID is a conflict. LuaBuddy refuses the one-launch registration rather than replacing that profile. A mod already selected by the native game remains governed by that separate selection. Disable its native startup selection if you want the mod absent from later launches.
+An existing persistent profile with the same ID is a conflict. LuaBuddy refuses the one-launch registration rather than replacing that profile. If the persistent profile is added after queuing, the launch skips that registration and leaves it queued; `luabuddy profiles` lists it under `skippedAtNextLaunch`. A mod already selected by the native game remains governed by that separate selection. Disable its native startup selection if you want the mod absent from later launches.
 
 If you queue a registration while the game is already running, its manager details show that it belongs to the next LuaBuddy launch. Ordinary late-selection edits refuse to convert the queued registration into a persistent profile. Cancel the queue first if you want to change its lifetime.
 
 To cancel a queued registration before the next process claims it, run the following command. It cannot unload code from an existing process.
 
 ```sh
-luabuddy deselect --profiles-dir /path/to/profiles --mod Example --once
+luabuddy deselect --mod Example --once
 ```
 
 ## Download and select a Workshop mod

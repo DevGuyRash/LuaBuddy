@@ -13,13 +13,14 @@ mod workshop;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 const ARTIFACT_LIMIT: u64 = 256 * 1024 * 1024;
-const HELP: &str = "LuaBuddy verification and distribution\n\n  cargo xtask check [--offline] [--portable] [--game-dir DIR] [--package DIR] [--runtime FILE] [--cli FILE] [--audit] [--log-dir DIR]\n  cargo xtask workshop --package DIR --out DIR\n\nBuilds the application before tests, checks formatting and Clippy, runs contract tests, verifies compiled extensions and a native package. Native checks use the selected game's bundled JVM and disposable fixtures. --runtime and --cli select immutable snapshots of deciding artifacts, such as release binaries; omitted values use the completed debug build. An existing --package must contain those exact runtime and CLI bytes. --portable explicitly omits proprietary-game checks. --audit requires cargo-audit and a usable advisory database. --offline prevents dependency and advisory database fetches. No check subscribes to or downloads Workshop items, controls a running game, or launches a graphical client.\n\nworkshop stages the tracked Workshop guide and an already verified Linux x86_64 package. Its tar.gz preserves executable permissions for graphical extraction and setup. It requires GNU tar and does not upload content or activate a runtime.\n";
+const HELP: &str = "LuaBuddy verification and distribution\n\n  cargo xtask check [--offline] [--portable] [--game-dir DIR] [--package DIR] [--runtime FILE] [--cli FILE] [--audit] [--log-dir DIR]\n  cargo xtask audit [--offline] [--log-dir DIR]\n  cargo xtask workshop --package DIR --out DIR\n\nBuilds the application before tests, checks formatting and Clippy, runs contract tests, verifies compiled extensions and a native package. Native checks use the selected game's bundled JVM and disposable fixtures. --runtime and --cli select immutable snapshots of deciding artifacts, such as release binaries; omitted values use the completed debug build. An existing --package must contain those exact runtime and CLI bytes. --portable explicitly omits proprietary-game checks. --audit requires cargo-audit and a usable advisory database; audit checks only the dependency advisories. --offline prevents dependency and advisory database fetches. No check subscribes to or downloads Workshop items, controls a running game, or launches a graphical client.\n\nworkshop stages the tracked Workshop guide and an already verified Linux x86_64 package. Its tar.gz preserves executable permissions for graphical extraction and setup. It requires GNU tar and does not upload content or activate a runtime.\n";
 
 #[derive(Default)]
 struct Options {
     offline: bool,
     portable: bool,
     audit: bool,
+    audit_only: bool,
     game: Option<PathBuf>,
     package: Option<PathBuf>,
     runtime: Option<PathBuf>,
@@ -30,16 +31,24 @@ struct Options {
 impl Options {
     fn parse() -> Result<Option<Self>> {
         let mut args = env::args_os().skip(1);
+        let mut options = Self::default();
         match args.next().as_deref() {
             None => return Ok(None),
             Some(s) if s == "help" || s == "--help" || s == "-h" => return Ok(None),
             Some(s) if s == "check" => (),
-            _ => return Err("Expected check or --help".into()),
+            Some(s) if s == "audit" => options.audit_only = true,
+            _ => return Err("Expected check, audit or --help".into()),
         }
-        let mut options = Self::default();
         while let Some(arg) = args.next() {
             match arg.to_str() {
                 Some("--offline") => options.offline = true,
+                Some("--log-dir") => {
+                    options.logs = Some(args.next().ok_or("--log-dir requires a directory")?.into())
+                }
+                Some("--help" | "-h") => return Ok(None),
+                _ if options.audit_only => {
+                    return Err(format!("audit does not accept {arg:?}").into());
+                }
                 Some("--portable") => options.portable = true,
                 Some("--audit") => options.audit = true,
                 Some("--game-dir") => {
@@ -56,10 +65,6 @@ impl Options {
                 Some("--cli") => {
                     options.cli = Some(args.next().ok_or("--cli requires a file")?.into())
                 }
-                Some("--log-dir") => {
-                    options.logs = Some(args.next().ok_or("--log-dir requires a directory")?.into())
-                }
-                Some("--help" | "-h") => return Ok(None),
                 _ => return Err(format!("Unknown argument {arg:?}").into()),
             }
         }
@@ -890,6 +895,48 @@ fn native_checks(checks: &mut Checks, options: &Options, artifacts: &Artifacts) 
     Ok(())
 }
 
+fn audit(checks: &mut Checks, offline: bool) {
+    let manifests = [
+        "Cargo.lock",
+        "examples/extensions/math-guard/Cargo.lock",
+        "examples/extensions/string-observer/Cargo.lock",
+        "proofs/metadata/Cargo.lock",
+        "proofs/runtime/Cargo.lock",
+        "proofs/steam/Cargo.lock",
+        "proofs/patcher/Cargo.lock",
+        "proofs/bridge-loader/Cargo.lock",
+        "proofs/activation/Cargo.lock",
+        "proofs/extensions/Cargo.lock",
+        "proofs/extensions/marker/Cargo.lock",
+        "proofs/performance/Cargo.lock",
+    ];
+    for (index, manifest) in manifests.iter().enumerate() {
+        let mut audit = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+        audit
+            .current_dir(&checks.root)
+            .args(["audit", "--file", manifest]);
+        if offline || index > 0 {
+            audit.arg("--no-fetch");
+        }
+        if offline {
+            audit.arg("--no-yanked");
+        }
+        checks.command(
+            &format!("Dependency audit {manifest}"),
+            audit,
+            Duration::from_secs(180),
+            &[],
+        );
+    }
+    if offline {
+        checks.note(
+            "Registry yanked-crate lookup",
+            "NOT RUN",
+            "Offline advisory audit uses --no-yanked to prevent registry access",
+        );
+    }
+}
+
 fn run(options: Options) -> Result<bool> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -918,8 +965,12 @@ fn run(options: Options) -> Result<bool> {
         logs,
         records: Vec::new(),
         failed: false,
-        provenance: json!({"platform":{"os":env::consts::OS,"architecture":env::consts::ARCH},"scope":{"portable":options.portable,"graphical":false,"accountMutations":false,"matchedPerformance":false}}),
+        provenance: json!({"platform":{"os":env::consts::OS,"architecture":env::consts::ARCH},"scope":{"auditOnly":options.audit_only,"portable":options.portable,"graphical":false,"accountMutations":false,"matchedPerformance":false}}),
     };
+    if options.audit_only {
+        audit(&mut checks, options.offline);
+        return checks.finish();
+    }
     let before = inputs(&checks.root, &checks.logs)?;
     let build = checks.cargo(
         &[
@@ -1130,45 +1181,7 @@ fn run(options: Options) -> Result<bool> {
         );
     }
     if options.audit {
-        let manifests = [
-            "Cargo.lock",
-            "examples/extensions/math-guard/Cargo.lock",
-            "examples/extensions/string-observer/Cargo.lock",
-            "proofs/metadata/Cargo.lock",
-            "proofs/runtime/Cargo.lock",
-            "proofs/steam/Cargo.lock",
-            "proofs/patcher/Cargo.lock",
-            "proofs/bridge-loader/Cargo.lock",
-            "proofs/activation/Cargo.lock",
-            "proofs/extensions/Cargo.lock",
-            "proofs/extensions/marker/Cargo.lock",
-            "proofs/performance/Cargo.lock",
-        ];
-        for (index, manifest) in manifests.iter().enumerate() {
-            let mut audit = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-            audit
-                .current_dir(&checks.root)
-                .args(["audit", "--file", manifest]);
-            if options.offline || index > 0 {
-                audit.arg("--no-fetch");
-            }
-            if options.offline {
-                audit.arg("--no-yanked");
-            }
-            checks.command(
-                &format!("Dependency audit {manifest}"),
-                audit,
-                Duration::from_secs(180),
-                &[],
-            );
-        }
-        if options.offline {
-            checks.note(
-                "Registry yanked-crate lookup",
-                "NOT RUN",
-                "Offline advisory audit uses --no-yanked to prevent registry access",
-            );
-        }
+        audit(&mut checks, options.offline);
     } else {
         checks.note(
             "Dependency advisory audit",

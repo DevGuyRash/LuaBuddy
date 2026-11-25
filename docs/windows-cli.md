@@ -32,9 +32,9 @@ This is an experimental package for **native Windows x64**, not the Linux Worksh
 
 Windows JDK 25 uses the active Windows code page for some paths. If necessary the installer uses an existing, verified short spelling for the same folder. On a volume without equivalent short names, use a representable Steam library/profile path (ASCII always works). LuaBuddy never changes system locale or 8.3 filename settings.
 
-**Updates and removal:** close the game. From the newly extracted package use `.\luabuddy.exe update --package .`. Roll back with `.\luabuddy.exe rollback`, or uninstall with `.\luabuddy.exe uninstall` (add the same `--game-dir` when needed). Personal profiles and separately subscribed Workshop content stay in place. If a launcher or DLL is still locked, exit the game/other setup, run `.\luabuddy.exe recover`, then retry. No command kills a running game.
+**Updates and removal:** close the game. From the newly extracted package use `.\luabuddy.exe update --package .`. Roll back with `.\luabuddy.exe rollback`, or uninstall with `.\luabuddy.exe uninstall` (add the same `--game-dir` when needed). Personal profiles and separately subscribed Workshop content stay in place. If a DLL is still locked after the change took effect, exit the game and run `.\luabuddy.exe recover` to remove it. Only one setup can run at a time; close another one and retry. No command kills a running game.
 
-The Windows site override is a complete launcher configuration. If Steam changes its base JSON, run `verify`; on a base-change warning, uninstall LuaBuddy first. Compare any retained personal override with the updated base, then reinstall. A clean uninstall removes an unedited LuaBuddy-created override, exposing the new Steam defaults.
+The site override is a complete launcher configuration. If Steam changes its base JSON, `verify` reports it; run `update` or `repair` to rebuild the override from the new base while keeping settings you changed. A personal override that existed before LuaBuddy is not rebuilt, so compare it with the updated base. A clean uninstall removes an unedited LuaBuddy-created override, exposing the new Steam defaults.
 
 **Developers:** From a checkout with the pinned Rust toolchain on Windows x64 MSVC:
 

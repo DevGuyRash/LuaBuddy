@@ -1,5 +1,4 @@
 use crate::{CoreError, ModId, Profile, read_profiles};
-use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions, TryLockError};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -19,8 +18,10 @@ fn error(path: &Path, message: impl ToString) -> CoreError {
     CoreError::new("selection", message.to_string()).at(path)
 }
 
-fn safe_directory(path: &Path, create: bool) -> Result<PathBuf, CoreError> {
-    for ancestor in path.ancestors() {
+/// Canonicalizes a directory after checking the `owned` trailing components
+/// this module creates. The player may reach the rest of the path through links.
+fn safe_directory(path: &Path, owned: usize, create: bool) -> Result<PathBuf, CoreError> {
+    for ancestor in path.ancestors().take(owned) {
         if fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
             return Err(error(
                 ancestor,
@@ -165,72 +166,114 @@ fn pending_directory(directory: &Path) -> PathBuf {
     directory.join(STORE).join("pending")
 }
 
+/// Registrations a claim can use. Entries it would leave behind are in [`skipped`].
 pub fn pending(directory: &Path) -> Result<Vec<Profile>, CoreError> {
-    let directory = pending_directory(directory);
-    match fs::symlink_metadata(&directory) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(error(&directory, e)),
-        Ok(_) => read_queue(&safe_directory(&directory, false)?),
-    }
+    Ok(read_queue(directory)?.0)
 }
 
-fn read_queue(directory: &Path) -> Result<Vec<Profile>, CoreError> {
+/// Queued `.properties` entries that a claim leaves in place, and why.
+pub fn skipped(directory: &Path) -> Result<Vec<CoreError>, CoreError> {
+    let (profiles, mut skipped) = read_queue(directory)?;
+    skipped.extend(split_conflicts(directory, profiles)?.1);
+    Ok(skipped)
+}
+
+fn read_queue(directory: &Path) -> Result<(Vec<Profile>, Vec<CoreError>), CoreError> {
+    let directory = pending_directory(directory);
+    match fs::symlink_metadata(&directory) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(e) => return Err(error(&directory, e)),
+        Ok(_) => (),
+    }
+    let directory = safe_directory(&directory, 2, false)?;
+    let mut files = fs::read_dir(&directory)
+        .map_err(|e| error(&directory, e))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| error(&directory, e))?;
+    files.retain(|path| path.extension().is_some_and(|ext| ext == "properties"));
+    files.sort();
     let mut profiles = Vec::new();
-    let mut ids = BTreeSet::new();
-    for entry in fs::read_dir(directory).map_err(|e| error(directory, e))? {
-        let path = entry.map_err(|e| error(directory, e))?.path();
-        let profile = Profile::parse(&path, &read(&path)?)?;
-        if path.file_name().and_then(|name| name.to_str())
-            != Some(&crate::profile::profile_filename(profile.id.as_str()))
-            || !profile.enabled
-            || profile
-                .path
-                .as_ref()
-                .is_some_and(|path| !path.is_absolute())
-        {
-            return Err(error(
-                &path,
-                "Invalid one-launch registration; filenames must match IDs, profiles must be enabled, and explicit paths must be absolute",
-            ));
-        }
-        if !ids.insert(profile.id.clone()) {
-            return Err(error(&path, "Duplicate one-launch mod ID"));
-        }
-        profiles.push(profile);
-        if profiles.len() > 256 {
-            return Err(error(
-                directory,
-                "One launch accepts at most 256 registrations",
-            ));
+    let mut skipped = Vec::new();
+    for path in files {
+        match read_registration(&path) {
+            Ok(_) if profiles.len() == 256 => {
+                skipped.push(error(&path, "One launch accepts at most 256 registrations"))
+            }
+            Ok(profile) => profiles.push(profile),
+            Err(error) => skipped.push(error),
         }
     }
     profiles.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(profiles)
+    Ok((profiles, skipped))
+}
+
+fn read_registration(path: &Path) -> Result<Profile, CoreError> {
+    let profile = Profile::parse(path, &read(path)?)?;
+    if path.file_name().and_then(|name| name.to_str())
+        != Some(&crate::profile::profile_filename(profile.id.as_str()))
+        || !profile.enabled
+        || profile
+            .path
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+    {
+        return Err(error(
+            path,
+            "Invalid one-launch registration; filenames must match IDs, profiles must be enabled, and explicit paths must be absolute",
+        ));
+    }
+    Ok(profile)
+}
+
+fn split_conflicts(
+    directory: &Path,
+    queued: Vec<Profile>,
+) -> Result<(Vec<Profile>, Vec<CoreError>), CoreError> {
+    let persistent = read_profiles(directory)?;
+    let (conflicts, usable) = queued
+        .into_iter()
+        .partition::<Vec<_>, _>(|profile| persistent.iter().any(|other| other.id == profile.id));
+    Ok((usable, conflicts.iter().map(conflict).collect()))
+}
+
+fn conflict(profile: &Profile) -> CoreError {
+    error(
+        &profile.file,
+        format!(
+            "One-launch selection {} conflicts with a persistent profile; normal selections were preserved",
+            profile.id
+        ),
+    )
 }
 
 pub fn merge(mut persistent: Vec<Profile>, once: &[Profile]) -> Result<Vec<Profile>, CoreError> {
     for profile in once {
         if persistent.iter().any(|existing| existing.id == profile.id) {
-            return Err(error(
-                &profile.file,
-                format!(
-                    "One-launch selection {} conflicts with a persistent profile; normal selections were preserved",
-                    profile.id
-                ),
-            ));
+            return Err(conflict(profile));
         }
         persistent.push(profile.clone());
     }
     Ok(persistent)
 }
 
+/// A profile whose ID differs from `id` only by letter case, which is easy to mistype.
+pub fn case_variant<'a>(profiles: &'a [Profile], id: &ModId) -> Option<&'a Profile> {
+    let lower = id.as_str().to_lowercase();
+    profiles
+        .iter()
+        .find(|profile| profile.id != *id && profile.id.as_str().to_lowercase() == lower)
+}
+
+/// Selects a mod, starting a new profile from `template` text when one exists.
 pub fn select(
     directory: &Path,
     id: &ModId,
     source: Option<&Path>,
     lifetime: Lifetime,
+    template: Option<&str>,
 ) -> Result<Profile, CoreError> {
-    let directory = safe_directory(directory, true)?;
+    let directory = safe_directory(directory, 0, false)?;
     let persistent = read_profiles(&directory)?;
     let queued = pending(&directory)?;
     let source = source
@@ -240,6 +283,15 @@ pub fn select(
         && !path.is_dir()
     {
         return Err(error(path, "A mod path must be a directory"));
+    }
+    if let Some(variant) = case_variant(&persistent, id) {
+        return Err(error(
+            &variant.file,
+            format!(
+                "Mod IDs are case-sensitive; {id} is not selected, but {} exists",
+                variant.id
+            ),
+        ));
     }
     let existing = persistent.iter().find(|profile| &profile.id == id);
     if lifetime == Lifetime::Once && existing.is_some()
@@ -253,10 +305,9 @@ pub fn select(
         ));
     }
     if lifetime == Lifetime::Once {
-        let destination = safe_directory(&pending_directory(&directory), true)?;
+        let destination = safe_directory(&pending_directory(&directory), 2, true)?;
         let path = destination.join(crate::profile::profile_filename(id.as_str()));
-        let text = new_profile(id, source.as_deref())?;
-        let profile = Profile::parse(&path, &text)?;
+        let (text, profile) = new_profile(&path, id, source.as_deref(), template)?;
         if let Some(existing) = queued.iter().find(|profile| &profile.id == id) {
             if existing == &profile {
                 return Ok(profile);
@@ -287,21 +338,36 @@ pub fn select(
         return set_enabled(existing, true);
     }
     let path = directory.join(crate::profile::profile_filename(id.as_str()));
-    let text = new_profile(id, source.as_deref())?;
-    let profile = Profile::parse(&path, &text)?;
+    let (text, profile) = new_profile(&path, id, source.as_deref(), template)?;
     publish(&path, &text, None)?;
     Ok(profile)
 }
 
-fn new_profile(id: &ModId, source: Option<&Path>) -> Result<String, CoreError> {
-    let mut text = format!("id={}\n", escape(id.as_str()));
+fn new_profile(
+    path: &Path,
+    id: &ModId,
+    source: Option<&Path>,
+    template: Option<&str>,
+) -> Result<(String, Profile), CoreError> {
+    // The blank line ends a template whose last line continues.
+    let mut text = match template {
+        Some(template) => format!("{template}\n\nenabled=true\n"),
+        None => format!("id={}\n", escape(id.as_str())),
+    };
     if let Some(source) = source {
         let value = source
             .to_str()
             .ok_or_else(|| error(source, "Mod path must be UTF-8"))?;
         text.push_str(&format!("path={}\n", escape(value)));
     }
-    Ok(text)
+    let profile = Profile::parse(path, &text)?;
+    if profile.id != *id || !profile.enabled {
+        return Err(error(
+            path,
+            "The template would change this selection unexpectedly",
+        ));
+    }
+    Ok((text, profile))
 }
 
 fn set_enabled(profile: &Profile, enabled: bool) -> Result<Profile, CoreError> {
@@ -329,7 +395,7 @@ fn set_enabled(profile: &Profile, enabled: bool) -> Result<Profile, CoreError> {
 }
 
 pub fn deselect(directory: &Path, id: &ModId, lifetime: Lifetime) -> Result<bool, CoreError> {
-    let directory = safe_directory(directory, true)?;
+    let directory = safe_directory(directory, 0, false)?;
     let profiles = match lifetime {
         Lifetime::Persistent => read_profiles(&directory)?,
         Lifetime::Once => pending(&directory)?,
@@ -357,13 +423,13 @@ pub fn deselect(directory: &Path, id: &ModId, lifetime: Lifetime) -> Result<bool
 }
 
 pub fn claim(directory: &Path) -> Result<Vec<Profile>, CoreError> {
-    let directory = safe_directory(directory, false)?;
+    let directory = safe_directory(directory, 0, false)?;
     let pending = pending_directory(&directory);
     if !pending.try_exists().map_err(|e| error(&pending, e))? {
         return Ok(Vec::new());
     }
     let store = directory.join(STORE);
-    safe_directory(&store, false)?;
+    safe_directory(&store, 1, false)?;
     let lock_path = store.join("claim.lock");
     match fs::symlink_metadata(&lock_path) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => (),
@@ -388,29 +454,14 @@ pub fn claim(directory: &Path) -> Result<Vec<Profile>, CoreError> {
         Err(TryLockError::WouldBlock) => return Ok(Vec::new()),
         Err(TryLockError::Error(e)) => return Err(error(&lock_path, e)),
     }
-    match fs::symlink_metadata(&pending) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => (),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(error(&pending, e)),
-        Ok(_) => {
-            return Err(error(
-                &pending,
-                "Expected an owned one-launch registration directory",
-            ));
-        }
-    }
-    let claimed = unique(&store, "claimed");
-    match fs::rename(&pending, &claimed) {
-        Ok(()) => (),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(error(&pending, e)),
-    }
-    safe_directory(&claimed, false)?;
-    let profiles = read_queue(&claimed)?;
-    for profile in &profiles {
-        fs::remove_file(&profile.file).map_err(|e| error(&profile.file, e))?;
-    }
-    fs::remove_dir(&claimed).map_err(|e| error(&claimed, e))?;
-    merge(read_profiles(&directory)?, &profiles)?;
-    Ok(profiles)
+    // Everything is validated before anything is consumed. Removing a file is
+    // what claims it, so a registration cancelled meanwhile is not claimed.
+    let (profiles, _) = split_conflicts(&directory, read_queue(&directory)?.0)?;
+    let claimed = profiles
+        .into_iter()
+        .filter(|profile| fs::remove_file(&profile.file).is_ok())
+        .collect();
+    // Only an empty queue goes away; entries left behind keep theirs.
+    let _ = fs::remove_dir(&pending);
+    Ok(claimed)
 }

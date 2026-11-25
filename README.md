@@ -16,7 +16,7 @@ On Linux, close the game, extract the whole archive and double-click `luabuddy` 
 
 ## Build and install
 
-These commands build a Linux source checkout. If you already extracted a Linux package, open a terminal in its folder and run `./luabuddy verify-package --package .`, then `./luabuddy install --package .`. See the [installer reference](docs/evolution/install.md) for custom locations and maintenance.
+These commands build a Linux source checkout. If you already extracted a Linux package, open a terminal in its folder and run `./luabuddy verify-package`, then `./luabuddy install`. See the [installer reference](docs/evolution/install.md) for custom locations and maintenance.
 
 Build with the pinned Rust toolchain and lockfile, then create an integrity-checked package. Do not copy proprietary game files into a package.
 
@@ -32,10 +32,10 @@ Close the game before setup, then relaunch through Steam. Installation writes a 
 The installer keeps the package's profile templates separate from your active configuration. Reinstalling does not overwrite personal profiles. To select specific integrations from an extracted package:
 
 ```sh
-./luabuddy install --package . --mod AllInfo --mod AutoAll
+./luabuddy install --mod AllInfo --mod AutoAll
 ```
 
-Use `--game-dir` or `PZ_GAME_DIR` when Steam discovery does not identify one installation. `luabuddy discover`, `verify`, `doctor`, and `diagnostics` return JSON. File verification establishes installation integrity; the runtime report and actual game checks establish whether loading succeeded.
+Use `--game-dir` or `PZ_GAME_DIR` when Steam discovery does not identify one installation; `luabuddy discover` lists the candidates. `luabuddy discover`, `verify`, `doctor`, and `diagnostics` return JSON. File verification establishes installation integrity; the runtime report and actual game checks establish whether loading succeeded.
 
 ## Manage mods in the game
 
@@ -49,11 +49,11 @@ For eligible multiplayer client/shared Lua, choose **This session > Enable late*
 
 **Reload a profile** requires explicit upstream cleanup cooperation. LuaBuddy compiles and validates the replacement before calling the running generation's captured cleanup function. A refusal retains the old generation. Uncertain cleanup or failed activation quarantines it and requires reconnecting. Bundled profiles do not gain safe reload simply because they load successfully.
 
-Local mods use the game's native discovery or an explicit `path=` root. The CLI can save a generic local selection with `select --profiles-dir DIR --mod ID --path ROOT`. Add `--once` to queue it for one game process, including reconnects. LuaBuddy consumes only its temporary registration and leaves source directories and normal profiles intact. `deselect` disables a future selection, while `deselect --once` cancels an unclaimed registration. See [the full testing workflow](docs/workflows.md#test-a-mod-for-one-game-launch).
+Local mods use the game's native discovery or an explicit `path=` root. The CLI can save a generic local selection with `select --mod ID --path ROOT`. Add `--once` to queue it for one game process, including reconnects. LuaBuddy consumes only its temporary registration and leaves source directories and normal profiles intact. `deselect` disables a future selection, while `deselect --once` cancels an unclaimed registration. See [the full testing workflow](docs/workflows.md#test-a-mod-for-one-game-launch).
 
 ## Select optional integrations
 
-The table lists the templates in this source checkout. The published **v0.1.0-rc.3 Linux archive** contains 24 templates; **Auto Share Map Markers**, **PourIntoContainer**, and **Shelf Aware!** were added on `main` after that release. Install from a source build containing those templates to use their bundled integrations. Check an extracted package's `profiles/` directory to see what it includes. Unlisted mods can still be selected by native ID, but an ID alone does not apply a template's exclusions or other compatibility settings.
+The table lists the templates in this source checkout. The published **v0.1.0-rc.3 Linux archive** contains 24 templates; **Auto Share Map Markers**, **PourIntoContainer**, and **Shelf Aware!** were added on `main` after that release. Install from a source build containing those templates to use their bundled integrations. Check an extracted package's `profiles/` directory to see what it includes. Unlisted mods can still be selected by native ID, but a profile without a template has no exclusions or other compatibility settings.
 
 Install the upstream content and choose only the integrations you want. Native dependency metadata remains authoritative. Select additional dependency profiles only when the server or native loader does not already supply them.
 
@@ -99,7 +99,7 @@ Upstream gameplay limitations remain upstream. File mounting does not register m
 
 ## Configure a profile
 
-Use the exact native `id=` from the mod's `mod.info`. An arbitrary mod starts with a declarative ID-only profile.
+Use the exact native `id=` from the mod's `mod.info`. A mod without a bundled template starts with a declarative ID-only profile.
 
 ```properties
 id=Example
