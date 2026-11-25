@@ -1753,7 +1753,6 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
             executable: file.executable,
         });
     }
-    plain_directory(&templates)?;
     let generation = InstalledGeneration {
         package_digest: package.digest,
         package_version: package.manifest.version,
@@ -1824,6 +1823,8 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
         preserve(game, &name, &content)?;
     }
     let changed = transact(game, &profiles, &missing, changes, retired)?;
+    // A package without templates still has a template directory to read.
+    plain_directory(&templates)?;
     Ok(
         json!({"operation": if options.repair { "repair" } else { "install" }, "changed":changed, "recoveredInterruptedOperation":recovered, "profiles":profiles, "mods":outcomes, "modifiedRetiredFilesPreserved":retained_modified, "invalidLauncherPreserved":broken_launcher, "runtime":record.current.runtime, "runtimeVerified":false, "nextStep":"Fully restart Project Zomboid through its normal launcher. Package integrity is verified; in-game operation requires its own runtime evidence."}),
     )
