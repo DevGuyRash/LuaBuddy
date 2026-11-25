@@ -221,7 +221,11 @@ fn execute(args: &Arguments) -> Result<Value, String> {
             let profiles = luabuddy_core::read_profiles(&directory).map_err(|e| e.to_string())?;
             let queued =
                 luabuddy_core::selection::pending(&directory).map_err(|e| e.to_string())?;
-            Ok(json!({"ok":true, "profiles":profiles,"queuedForNextLaunch":queued}))
+            let skipped =
+                luabuddy_core::selection::skipped(&directory).map_err(|e| e.to_string())?;
+            Ok(
+                json!({"ok":true, "profiles":profiles,"queuedForNextLaunch":queued,"skippedAtNextLaunch":skipped}),
+            )
         }
         "diagnostics" => {
             args.allow(&["--cache-dir"], &[], false)?;
