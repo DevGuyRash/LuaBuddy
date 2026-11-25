@@ -616,7 +616,9 @@ fn status_text(status: &Result<Option<InstallationStatus>>, package: &Package) -
             "Installed version {}. Install / update selects the supplied verified package.",
             status.package_version
         ),
-        Err(_) => "Installation metadata could not be inspected.\nUse Maintenance > Verify installed files for the full error, or Recover interrupted setup. You can also choose another game folder.".into(),
+        Err(error) => format!(
+            "The installation needs attention.\n{error}\nUse Maintenance > Recover interrupted setup or Remove LuaBuddy. You can also choose another game folder."
+        ),
     }
 }
 
@@ -630,6 +632,8 @@ fn maintenance(
         if status.previous_version.is_some() {
             items.push(&ROLLBACK);
         }
+    }
+    if !matches!(status, Ok(None)) {
         items.push(&REMOVE);
     }
     dialogs.menu(
@@ -664,22 +668,23 @@ fn perform(action: Action, package: &Package, game: &Path) -> Result<Value> {
 
 fn show_result(dialogs: &Dialogs, action: Action, value: &Value) -> Result<()> {
     if action == Action::Verify {
-        let problems = value
-            .get("problems")
-            .and_then(Value::as_array)
-            .ok_or("Verification returned no problem list.")?;
-        let text = if problems.is_empty() {
+        let lines = |key: &str| {
+            let list = value.get(key).and_then(Value::as_array).into_iter();
+            list.flatten().filter_map(Value::as_str).collect::<Vec<_>>()
+        };
+        let problems = lines("problems");
+        let mut text = if problems.is_empty() {
             "Installed files and launcher settings passed verification.\n\nThis checks installation integrity. In-game diagnostics shows whether selected mods loaded.".to_owned()
         } else {
             format!(
                 "Verification found problems:\n\n{}\n\nUse Repair with the appropriate verified package when restoring owned files.",
-                problems
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                problems.join("\n")
             )
         };
+        for note in lines("notes") {
+            text.push_str("\n\n");
+            text.push_str(note);
+        }
         return dialogs.message(!problems.is_empty(), "LuaBuddy verification", &text);
     }
     if action == Action::Recover {

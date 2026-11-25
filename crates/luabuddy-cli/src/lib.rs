@@ -13,6 +13,7 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA: u32 = 1;
 const METADATA_LIMIT: u64 = 4 * 1024 * 1024;
@@ -1198,10 +1199,22 @@ fn read_journal(game: &Path) -> Result<Option<Journal>> {
         .and_then(|journal| validate_transaction(game, &journal).map(|()| Some(journal)))
         .map_err(|e| {
             invalid(format!(
-                "The interrupted operation recorded in {} cannot be undone: {e}",
+                "The interrupted operation recorded in {} cannot be undone: {e}. Uninstall sets that file aside.",
                 path.display()
             ))
         })
+}
+
+/// What an interrupted operation left to do, if one is recorded.
+fn interrupted(game: &Path) -> Option<String> {
+    match read_journal(game) {
+        Ok(None) => None,
+        Ok(Some(_)) => Some(format!(
+            "An interrupted operation is recorded in {}; run recover to undo it",
+            journal_path(game).display()
+        )),
+        Err(error) => Some(error.to_string()),
+    }
 }
 
 fn write_journal(game: &Path, journal: &Journal) -> Result<()> {
@@ -1213,6 +1226,19 @@ fn write_journal(game: &Path, journal: &Journal) -> Result<()> {
         ));
     }
     write_atomic(&journal_path(game), Some(&encoded), false)
+}
+
+fn set_journal_aside(game: &Path) -> Result<PathBuf> {
+    let recovery = game.join(INSTALL_DIR).join("recovery");
+    plain_directory(&recovery)?;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let target = recovery.join(format!("transaction-{unique}.json"));
+    let path = journal_path(game);
+    fs::rename(&path, &target).map_err(|e| io_error("Set aside", &path, e))?;
+    Ok(target)
 }
 
 fn recover(game: &Path) -> Result<bool> {
@@ -1876,16 +1902,14 @@ fn inspect(game: &Path, record: &InstallRecord) -> Result<(Vec<String>, Vec<Stri
         ));
     }
     read_profiles_if_exists(&record.profiles)?;
-    if game.join(INSTALL_DIR).join(JOURNAL_FILE).exists() {
-        problems.push("An interrupted operation awaits recover, install, or uninstall".into());
-    }
+    problems.extend(interrupted(game));
     Ok((problems, notes))
 }
 
 pub fn installation_status(game: &Path) -> Result<Option<InstallationStatus>> {
     launcher_paths(game)?;
     let Some(record) = read_record(game)? else {
-        return Ok(None);
+        return interrupted(game).map_or(Ok(None), |problem| Err(invalid(problem)));
     };
     let problems = match inspect(game, &record) {
         Ok((problems, _)) => problems,
@@ -1903,8 +1927,15 @@ pub fn installation_status(game: &Path) -> Result<Option<InstallationStatus>> {
 
 pub fn verify_install(game: &Path) -> Result<Value> {
     launcher_paths(game)?;
-    let record =
-        read_record(game)?.ok_or_else(|| invalid("LuaBuddy native runtime is not installed"))?;
+    let record = match (read_record(game), interrupted(game)) {
+        (Ok(Some(record)), _) => record,
+        (Ok(None), Some(problem)) => {
+            return Ok(json!({"ok":false, "game":game, "profiles":null, "problems":[problem]}));
+        }
+        (Err(error), Some(problem)) => return Err(invalid(format!("{problem}. {error}"))),
+        (Ok(None), None) => return Err(invalid("LuaBuddy native runtime is not installed")),
+        (Err(error), None) => return Err(error),
+    };
     let (problems, notes) = inspect(game, &record)?;
     let ok = problems.is_empty();
     Ok(
@@ -1990,10 +2021,16 @@ pub fn rollback(game: &Path) -> Result<Value> {
 pub fn uninstall(game: &Path) -> Result<Value> {
     let (base, site) = supported_launcher_files(game)?;
     let _lock = InstallLock::acquire(game)?;
+    // Removal needs only the installation record, so an unusable journal must
+    // not prevent it.
+    let journal = match read_journal(game) {
+        Ok(_) => None,
+        Err(_) => Some(set_journal_aside(game)?),
+    };
     let recovered = recover(game)?;
     let Some(record) = read_record(game)? else {
         return Ok(
-            json!({"operation":"uninstall", "changed":false, "recoveredInterruptedOperation":recovered}),
+            json!({"operation":"uninstall", "changed":false, "recoveredInterruptedOperation":recovered, "invalidJournalPreserved":journal}),
         );
     };
     let current_site = optional_bytes(&site, METADATA_LIMIT)?;
@@ -2047,7 +2084,7 @@ pub fn uninstall(game: &Path) -> Result<Value> {
     });
     let changed = transact(game, &record.profiles, &[], changes, retired)?;
     Ok(
-        json!({"operation":"uninstall", "changed":changed, "profilesPreserved":record.profiles, "modifiedFilesPreserved":retained, "invalidLauncherPreserved":broken_launcher, "notes":Vec::from_iter(notes), "restartRequired":true}),
+        json!({"operation":"uninstall", "changed":changed, "profilesPreserved":record.profiles, "modifiedFilesPreserved":retained, "invalidLauncherPreserved":broken_launcher, "invalidJournalPreserved":journal, "notes":Vec::from_iter(notes), "restartRequired":true}),
     )
 }
 
