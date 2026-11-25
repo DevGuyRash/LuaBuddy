@@ -2,7 +2,12 @@ name: Rust verification
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   portable:
@@ -12,8 +17,15 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
+      - uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: portable-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
       - name: Read pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Fetch locked workspace dependencies
@@ -23,22 +35,34 @@ jobs:
 
   dependency-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.1
+      - id: advisory-checker
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-0.22.2-${{ runner.os }}
       - name: Install pinned advisory checker
+        if: steps.advisory-checker.outputs.cache-hit != 'true'
         run: cargo install cargo-audit --version 0.22.2 --locked
-      - name: Check portable behavior and dependency advisories
-        run: cargo xtask check --portable --audit
+      - name: Check dependency advisories
+        run: cargo xtask audit
 
   windows-release-package:
     name: Windows x64 MSVC release package and JVM startup
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: windows-2025
     timeout-minutes: 30
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v7.0.1
+      - uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: windows-release-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
       - name: Build x64 EXE and DLL
         run: cargo build --release --locked -p luabuddy -p luabuddy-host
       - name: Create verified Windows package
