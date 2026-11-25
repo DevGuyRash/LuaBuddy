@@ -1,5 +1,5 @@
 use crate::{
-    Result, absolute, bytes, invalid, io_error, optional_bytes, plain_directory, sha256,
+    Result, bytes, invalid, io_error, optional_bytes, plain_directory, resolve, sha256,
     write_atomic, write_new,
 };
 use luabuddy_patcher::extension::{
@@ -64,7 +64,7 @@ pub fn parse_privileges(value: &str) -> Result<BTreeSet<Privilege>> {
 }
 
 fn store(profiles: &Path) -> Result<PathBuf> {
-    Ok(absolute(profiles)?.join("extensions"))
+    Ok(resolve(profiles)?.join("extensions"))
 }
 
 fn identity(id: &str) -> Result<()> {

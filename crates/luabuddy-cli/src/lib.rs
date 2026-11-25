@@ -123,14 +123,25 @@ fn portable_path(value: &str) -> Result<PathBuf> {
     }
     Ok(path.to_owned())
 }
-fn absolute(path: &Path) -> Result<PathBuf> {
-    if path.is_absolute() {
-        Ok(path.to_owned())
-    } else {
-        env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .map_err(|e| io_error("Read working directory", path, e))
+/// Resolves links in the part of a user's path that already exists. Whatever
+/// LuaBuddy then creates below it is still checked for links.
+fn resolve(path: &Path) -> Result<PathBuf> {
+    let path = std::path::absolute(path).map_err(|e| io_error("Resolve", path, e))?;
+    for ancestor in path.ancestors() {
+        match fs::canonicalize(ancestor) {
+            Ok(real) => {
+                #[cfg(windows)]
+                let real = windows::launcher_path(real).unwrap_or_else(|| ancestor.to_owned());
+                return Ok(match path.strip_prefix(ancestor) {
+                    Ok(rest) if !rest.as_os_str().is_empty() => real.join(rest),
+                    _ => real,
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(io_error("Resolve", ancestor, e)),
+        }
     }
+    Ok(path)
 }
 fn plain_directory(path: &Path) -> Result<()> {
     reject_link_ancestors(path)?;
@@ -414,7 +425,7 @@ pub fn make_package(runtime: &Path, templates: &Path, output: &Path) -> Result<P
         ));
     }
     let profiles = read_profiles(templates)?;
-    let output = absolute(output)?;
+    let output = resolve(output)?;
     let parent = output
         .parent()
         .ok_or_else(|| invalid("Package output needs a parent directory"))?;
@@ -1298,7 +1309,7 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
         .rev()
         .find_map(|arg| arg.strip_prefix("-Dluabuddy.config="))
         .map(PathBuf::from);
-    let profiles = absolute(
+    let profiles = resolve(
         &options
             .profiles
             .clone()
