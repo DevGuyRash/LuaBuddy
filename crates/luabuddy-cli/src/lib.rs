@@ -570,7 +570,27 @@ fn vdf_strings(text: &str) -> Vec<String> {
     result
 }
 
-pub fn steam_libraries() -> Result<Vec<PathBuf>> {
+/// Where Steam discovery looked and every game installation it found there.
+pub struct Discovery {
+    pub libraries: Vec<PathBuf>,
+    pub candidates: Vec<PathBuf>,
+    pub warnings: Vec<String>,
+}
+
+pub fn discover() -> Discovery {
+    let (libraries, warnings) = libraries_from(steam_roots());
+    let candidates: BTreeSet<_> = libraries
+        .iter()
+        .filter_map(|p| game_directory(&p.join("steamapps/common/ProjectZomboid")))
+        .collect();
+    Discovery {
+        libraries,
+        candidates: candidates.into_iter().collect(),
+        warnings,
+    }
+}
+
+fn steam_roots() -> BTreeSet<PathBuf> {
     let mut roots = BTreeSet::new();
     #[cfg(not(windows))]
     if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
@@ -590,26 +610,33 @@ pub fn steam_libraries() -> Result<Vec<PathBuf>> {
             }
         }
     }
-    libraries_from(roots)
+    roots
 }
 
-fn libraries_from(roots: BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
+fn libraries_from(roots: BTreeSet<PathBuf>) -> (Vec<PathBuf>, Vec<String>) {
     let mut libraries = roots.clone();
+    let mut warnings = Vec::new();
     for root in roots {
-        if let Some(data) =
-            optional_bytes(&root.join("steamapps/libraryfolders.vdf"), METADATA_LIMIT)?
-        {
-            let text = String::from_utf8(data)
-                .map_err(|_| invalid("Steam libraryfolders.vdf is not UTF-8"))?;
-            let tokens = vdf_strings(&text);
-            for pair in tokens.windows(2) {
-                if pair[0] == "path" {
-                    libraries.insert(PathBuf::from(&pair[1]));
-                }
-            }
+        let path = root.join("steamapps/libraryfolders.vdf");
+        let text = match fs::canonicalize(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => Err(io_error("Read", &path, e)),
+            Ok(real) => bytes(&real, METADATA_LIMIT).and_then(|data| {
+                String::from_utf8(data)
+                    .map_err(|_| invalid(format!("Not UTF-8: {}", path.display())))
+            }),
+        };
+        match text {
+            Ok(text) => libraries.extend(
+                vdf_strings(&text)
+                    .windows(2)
+                    .filter(|pair| pair[0] == "path")
+                    .map(|pair| PathBuf::from(&pair[1])),
+            ),
+            Err(error) => warnings.push(format!("Skipped a Steam library list. {error}")),
         }
     }
-    Ok(libraries.into_iter().collect())
+    (libraries.into_iter().collect(), warnings)
 }
 
 pub fn find_game(explicit: Option<&Path>) -> Result<PathBuf> {
@@ -624,20 +651,27 @@ pub fn find_game(explicit: Option<&Path>) -> Result<PathBuf> {
             ))
         });
     }
-    let found: BTreeSet<_> = steam_libraries()?
-        .into_iter()
-        .filter_map(|p| game_directory(&p.join("steamapps/common/ProjectZomboid")))
-        .collect();
-    if found.len() != 1 {
-        return Err(invalid(format!(
-            "Specify --game-dir or PZ_GAME_DIR; Steam discovery found {} installations",
-            found.len()
-        )));
+    let found = discover();
+    if let [game] = found.candidates.as_slice() {
+        return Ok(game.clone());
     }
-    found
-        .into_iter()
-        .next()
-        .ok_or_else(|| invalid("No game installation found"))
+    let list = |label: &str, paths: &[PathBuf]| -> String {
+        paths
+            .iter()
+            .map(|path| format!("\n{label} {}", path.display()))
+            .collect()
+    };
+    Err(invalid(format!(
+        "Specify --game-dir or PZ_GAME_DIR; Steam discovery found {} installations{}{}{}",
+        found.candidates.len(),
+        list("Found", &found.candidates),
+        list("Searched", &found.libraries),
+        found
+            .warnings
+            .iter()
+            .map(|warning| format!("\n{warning}"))
+            .collect::<String>()
+    )))
 }
 
 pub fn probe_jvm(game: &Path) -> Result<JvmIdentity> {
@@ -2030,7 +2064,8 @@ mod steam_discovery_tests {
             format!(r#""libraryfolders" {{ "1" {{ "path" "{escaped}" }} }}"#),
         )
         .unwrap();
-        let found = libraries_from(BTreeSet::from([primary])).unwrap();
+        let (found, warnings) = libraries_from(BTreeSet::from([primary]));
+        assert!(warnings.is_empty());
         assert!(found.contains(&secondary));
         assert!(game_directory(&game).is_some());
         #[cfg(windows)]
