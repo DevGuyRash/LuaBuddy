@@ -963,7 +963,7 @@ fn journals_hold_no_generation_contents_and_recovery_drops_unselected_files() {
 #[test]
 fn an_interrupted_first_install_is_reported_and_recoverable() {
     let f = Fixture::new();
-    let journal = f.game.join(".luabuddy/native-transaction.json");
+    let journal = f.game.join(".luabuddy").join("native-transaction.json");
     fs::create_dir_all(f.profile_dir()).unwrap();
     let selected = f.profile_dir().join("Example.properties");
     fs::write(&selected, "id=Example\n").unwrap();
@@ -991,7 +991,7 @@ fn an_interrupted_first_install_is_reported_and_recoverable() {
 fn an_unusable_journal_is_named_and_does_not_prevent_removal() {
     let f = Fixture::new();
     f.install();
-    let journal = f.game.join(".luabuddy/native-transaction.json");
+    let journal = f.game.join(".luabuddy").join("native-transaction.json");
     fs::write(&journal, b"garbage").unwrap();
     let args = ["--package", f.package.to_str().unwrap()];
     for (command, args) in [("recover", &[][..]), ("rollback", &[]), ("install", &args)] {
