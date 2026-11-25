@@ -373,7 +373,13 @@ fn update_rollback_and_uninstall_preserve_user_edits() {
         serde_json::to_vec(&site).unwrap(),
     )
     .unwrap();
-    assert_eq!(f.command("rollback", &[]).status.code(), Some(2));
+    let verified = f.success("verify", &[]);
+    assert_eq!(verified["problems"], json!([]));
+    assert_eq!(verified["notes"].as_array().unwrap().len(), 1);
+    let second_digest = f.record()["previous"]["package_digest"].clone();
+    f.success("rollback", &[]);
+    assert_eq!(f.record()["current"]["package_digest"], second_digest);
+    assert_eq!(f.success("verify", &[])["notes"], json!([]));
     f.success("uninstall", &[]);
     let site = f.site();
     assert_eq!(site["custom"]["userEdited"], true);
@@ -988,45 +994,211 @@ fn existing_launcher_override_is_restored_byte_for_byte() {
     );
 }
 
-#[cfg(windows)]
+const FRESH_BASE: &[u8] =
+    br#"{"mainClass":"updated","vmArgs":["-Xmx2g","-Dunrelated=preserve me","-javaagent:other.jar","-Dsteam=new"],"classpath":["updated.jar"],"custom":{"value":7}}"#;
+
+fn unowned_args(site: &Value) -> Vec<&str> {
+    site["vmArgs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .filter(|arg| !arg.starts_with("-agentpath:") && !arg.starts_with("-Dluabuddy."))
+        .collect()
+}
+
 #[test]
-fn windows_refuses_stale_full_launcher_override_and_uninstalls_to_updated_base() {
-    for edited in [false, true] {
+fn a_steam_update_to_the_base_launcher_reaches_the_override() {
+    for command in ["update", "repair", "rollback", "uninstall"] {
         let f = Fixture::new();
         f.install();
-        let site = f.game.join("ProjectZomboid64.site.json");
-        if edited {
-            let mut custom = f.site();
-            custom["personal"] = json!("never overwrite me");
-            fs::write(&site, serde_json::to_vec(&custom).unwrap()).unwrap();
-        }
-        let old = fs::read(&site).unwrap();
-        let base = f.game.join("ProjectZomboid64.json");
-        let fresh = br#"{"vmArgs":["-Xmx3g"],"classpath":["updated.jar"]}"#;
-        fs::write(&base, fresh).unwrap();
+        let second = f.next_package("Second");
+        f.success("update", &["--package", second.to_str().unwrap()]);
+        fs::write(f.game.join("ProjectZomboid64.json"), FRESH_BASE).unwrap();
         let inspect = f.command("verify", &[]);
         assert_eq!(inspect.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&inspect.stdout).contains("base launcher JSON changed"));
-        for (command, args) in [
-            ("install", vec!["--package", f.package.to_str().unwrap()]),
-            ("repair", vec!["--package", f.package.to_str().unwrap()]),
-            ("rollback", vec![]),
-        ] {
-            let result = f.command(command, &args);
-            assert_eq!(result.status.code(), Some(2));
-            assert!(String::from_utf8_lossy(&result.stderr).contains("base launcher JSON changed"));
+        if matches!(command, "update" | "repair") {
+            f.success(command, &["--package", second.to_str().unwrap()]);
+        } else {
+            f.success(command, &[]);
         }
-        assert_eq!(fs::read(&site).unwrap(), old);
+        assert_eq!(
+            fs::read(f.game.join("ProjectZomboid64.json")).unwrap(),
+            FRESH_BASE
+        );
+        if command != "uninstall" {
+            let site = f.site();
+            assert_eq!(site["mainClass"], "updated");
+            assert_eq!(site["classpath"], json!(["updated.jar"]));
+            assert_eq!(
+                unowned_args(&site),
+                [
+                    "-Xmx2g",
+                    "-Dunrelated=preserve me",
+                    "-javaagent:other.jar",
+                    "-Dsteam=new"
+                ]
+            );
+            assert_eq!(f.success("verify", &[])["problems"], json!([]));
+            f.success("uninstall", &[]);
+        }
+        assert!(!f.game.join("ProjectZomboid64.site.json").exists());
+    }
+}
+
+#[test]
+fn a_steam_update_keeps_the_settings_a_user_changed_in_the_override() {
+    for uninstall_first in [false, true] {
+        let f = Fixture::new();
+        f.install();
+        let mut site = f.site();
+        site["personal"] = json!("never overwrite me");
+        for arg in site["vmArgs"].as_array_mut().unwrap() {
+            if arg == "-Xmx512m" {
+                *arg = json!("-Xmx9g");
+            }
+        }
+        fs::write(
+            f.game.join("ProjectZomboid64.site.json"),
+            serde_json::to_vec(&site).unwrap(),
+        )
+        .unwrap();
+        fs::write(f.game.join("ProjectZomboid64.json"), FRESH_BASE).unwrap();
+        if !uninstall_first {
+            f.install();
+            assert_eq!(f.success("verify", &[])["problems"], json!([]));
+        }
         f.success("uninstall", &[]);
-        assert_eq!(fs::read(&base).unwrap(), fresh);
-        if edited {
-            assert_eq!(f.site()["personal"], "never overwrite me");
+        let site = f.site();
+        assert_eq!(site["personal"], "never overwrite me");
+        assert_eq!(site["mainClass"], "updated");
+        assert_eq!(site["classpath"], json!(["updated.jar"]));
+        let args = unowned_args(&site);
+        assert!(args.contains(&"-Xmx9g") && args.contains(&"-Dsteam=new"));
+        // The user's heap follows any the base sets, and the JVM uses the last one.
+        assert!(
+            args.iter()
+                .rposition(|arg| *arg == "-Xmx9g")
+                .is_some_and(|mine| args[mine..].iter().all(|arg| *arg != "-Xmx2g"))
+        );
+    }
+}
+
+#[test]
+fn records_without_a_base_keep_working() {
+    for base_changed in [false, true] {
+        let f = Fixture::new();
+        f.install();
+        let mut record = f.record();
+        record.as_object_mut().unwrap().remove("base_bytes");
+        fs::write(
+            f.game.join(".luabuddy/native-install.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        if base_changed {
+            fs::write(f.game.join("ProjectZomboid64.json"), FRESH_BASE).unwrap();
+        }
+        let verified = f.success("verify", &[]);
+        assert_eq!(
+            verified["notes"].as_array().unwrap().len(),
+            usize::from(base_changed)
+        );
+        // Without the old base, a difference cannot be told from a user edit.
+        f.install();
+        assert_eq!(f.site()["mainClass"], "missing/InstallerFixture");
+        if base_changed {
+            fs::remove_file(f.game.join("ProjectZomboid64.site.json")).unwrap();
+            f.success("repair", &["--package", f.package.to_str().unwrap()]);
+            assert_eq!(f.site()["mainClass"], "updated");
+        }
+        assert_eq!(f.success("verify", &[])["notes"], json!([]));
+        f.success("uninstall", &[]);
+        assert!(!f.game.join("ProjectZomboid64.site.json").exists());
+    }
+}
+
+#[test]
+fn windows_records_with_a_base_digest_follow_a_steam_update() {
+    let f = Fixture::new();
+    f.install();
+    let base = f.game.join("ProjectZomboid64.json");
+    let original: Value = serde_json::from_slice(&fs::read(&base).unwrap()).unwrap();
+    let mut digested = serde_json::to_vec_pretty(&original).unwrap();
+    digested.push(b'\n');
+    let mut record = f.record();
+    let fields = record.as_object_mut().unwrap();
+    fields.remove("base_bytes");
+    fields.insert(
+        "windows_base_digest".into(),
+        json!(format!("{:x}", Sha256::digest(&digested))),
+    );
+    fs::write(
+        f.game.join(".luabuddy/native-install.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(f.success("verify", &[])["ok"], true);
+    fs::write(&base, FRESH_BASE).unwrap();
+    assert_eq!(f.command("verify", &[]).status.code(), Some(1));
+    f.install();
+    assert_eq!(f.site()["mainClass"], "updated");
+    assert_eq!(f.success("verify", &[])["ok"], true);
+    f.success("uninstall", &[]);
+    assert!(!f.game.join("ProjectZomboid64.site.json").exists());
+}
+
+#[test]
+fn an_unreadable_override_is_named_and_set_aside() {
+    let broken = b"{ \"vmArgs\": [ broken";
+    for command in ["repair", "uninstall"] {
+        let f = Fixture::new();
+        f.install();
+        let site = f.game.join("ProjectZomboid64.site.json");
+        fs::write(&site, broken).unwrap();
+        let verified = f.command("verify", &[]);
+        assert_eq!(verified.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&verified.stdout).contains("ProjectZomboid64.site.json"),
+            "{verified:?}"
+        );
+        let args = ["--package", f.package.to_str().unwrap()];
+        let result = f.command("install", &args);
+        assert_eq!(result.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("ProjectZomboid64.site.json"),
+            "{result:?}"
+        );
+        let result = f.success(command, if command == "repair" { &args } else { &[] });
+        let copy = result["invalidLauncherPreserved"].as_str().unwrap();
+        assert!(Path::new(copy).starts_with(f.game.join(".luabuddy/recovery")));
+        assert_eq!(fs::read(copy).unwrap(), broken);
+        if command == "repair" {
+            assert_eq!(f.success("verify", &[])["ok"], true);
         } else {
             assert!(!site.exists());
-            f.install();
-            assert_eq!(f.site()["classpath"], json!(["updated.jar"]));
         }
     }
+}
+
+#[test]
+fn repair_refuses_a_different_package() {
+    let f = Fixture::new();
+    f.install();
+    let installed = f.record()["current"]["package_digest"].clone();
+    let second = f.next_package("Second");
+    let supplied = format!(
+        "{:x}",
+        Sha256::digest(fs::read(second.join("manifest.json")).unwrap())
+    );
+    let result = f.command("repair", &["--package", second.to_str().unwrap()]);
+    assert_eq!(result.status.code(), Some(2));
+    let message = String::from_utf8_lossy(&result.stderr).into_owned();
+    for expected in [installed.as_str().unwrap(), &supplied, "update"] {
+        assert!(message.contains(expected), "{message}");
+    }
+    assert_eq!(f.record()["current"]["package_digest"], installed);
 }
 
 #[test]
@@ -1108,9 +1280,8 @@ fn renamed_exe_is_not_a_windows_runtime_and_locked_dll_is_not_removed() {
     assert!(!site.exists());
 }
 
-#[cfg(windows)]
 #[test]
-fn windows_uninstall_does_not_need_the_new_vendor_schema_or_discard_prior_edits() {
+fn uninstall_does_not_need_the_new_vendor_schema_or_discard_prior_edits() {
     for original_site in [false, true] {
         let f = Fixture::new();
         let site = f.game.join("ProjectZomboid64.site.json");
@@ -1130,8 +1301,12 @@ fn windows_uninstall_does_not_need_the_new_vendor_schema_or_discard_prior_edits(
             );
         }
         fs::write(&base, br#"{"windows":{"newVmArgs":["-Xmx1g"]}}"#).unwrap();
+        // An override that predates LuaBuddy is the user's and follows no base.
         let verify = f.command("verify", &[]);
-        assert_eq!(verify.status.code(), Some(1));
+        assert_eq!(
+            verify.status.code(),
+            Some(if original_site { 0 } else { 1 })
+        );
         assert!(String::from_utf8_lossy(&verify.stdout).contains("base launcher JSON changed"));
         // Even while the vendor config is absent, owned removal is possible.
         fs::remove_file(&base).unwrap();

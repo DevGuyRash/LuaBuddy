@@ -796,60 +796,163 @@ fn launcher_paths(game: &Path) -> Result<(PathBuf, PathBuf)> {
     Ok((base, site))
 }
 
-fn vendor_digest(data: &[u8]) -> Result<String> {
-    let value: Value = serde_json::from_slice(data).map_err(|e| {
-        invalid(format!(
-            "Invalid vendor launcher JSON: {e}. You can still uninstall LuaBuddy."
-        ))
-    })?;
-    Ok(sha256(&json_bytes(&value)?))
-}
-
-fn launcher_config(data: &[u8]) -> Result<Value> {
-    let value: Value =
-        serde_json::from_slice(data).map_err(|e| invalid(format!("Invalid launcher JSON: {e}")))?;
-    let args = value
-        .get("vmArgs")
-        .and_then(Value::as_array)
-        .ok_or_else(|| invalid("Launcher vmArgs must be an array of strings"))?;
-    if !value.is_object() || args.iter().any(|arg| !arg.is_string()) {
-        return Err(invalid("Launcher vmArgs must be an array of strings"));
+fn launcher_config(data: &[u8], path: &Path) -> Result<Value> {
+    let value: Value = serde_json::from_slice(data)
+        .map_err(|e| invalid(format!("Invalid launcher JSON in {}: {e}", path.display())))?;
+    let valid = value.is_object()
+        && value
+            .get("vmArgs")
+            .and_then(Value::as_array)
+            .is_some_and(|args| args.iter().all(Value::is_string));
+    if !valid {
+        return Err(invalid(format!(
+            "Launcher vmArgs must be an array of strings in {}",
+            path.display()
+        )));
     }
     Ok(value)
 }
 
-fn owned_property(argument: &str) -> bool {
-    [
-        "luabuddy.config",
-        "luabuddy.templates",
-        "luabuddy.debug",
-        "luabuddy.earlyUI",
-    ]
-    .iter()
-    .any(|name| argument == format!("-D{name}") || argument.starts_with(&format!("-D{name}=")))
+fn vm_args(config: &Value) -> Vec<String> {
+    config["vmArgs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
 }
 
-fn without_integration(data: &[u8], record: &InstallRecord) -> Result<Value> {
-    let mut config = launcher_config(data)?;
-    let generations: Vec<_> = std::iter::once(&record.current)
-        .chain(record.previous.iter())
-        .collect();
-    let args = config["vmArgs"]
-        .as_array()
-        .ok_or_else(|| invalid("Invalid launcher arguments"))?
+fn property(argument: &str, name: &str) -> bool {
+    argument
+        .strip_prefix("-D")
+        .and_then(|rest| rest.strip_prefix(name))
+        .is_some_and(|value| value.is_empty() || value.starts_with('='))
+}
+
+fn owned_agent(game: &Path, argument: &str) -> bool {
+    argument
+        .strip_prefix("-agentpath:")
+        .is_some_and(|path| Path::new(path).starts_with(game.join(INSTALL_DIR).join("native")))
+}
+
+fn owned_argument(game: &Path, argument: &str) -> bool {
+    owned_agent(game, argument)
+        || [
+            "luabuddy.config",
+            "luabuddy.templates",
+            "luabuddy.debug",
+            "luabuddy.earlyUI",
+        ]
         .iter()
-        .filter(|value| {
-            value.as_str().is_none_or(|arg| {
-                !owned_property(arg)
-                    && !generations
-                        .iter()
-                        .any(|generation| arg == generation.agent_argument)
-            })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    config["vmArgs"] = json!(args);
-    Ok(config)
+        .any(|name| property(argument, name))
+}
+
+/// Splits launcher settings into everything else and LuaBuddy's own arguments.
+fn split_integration(game: &Path, mut config: Value) -> (Value, Vec<String>) {
+    let (owned, kept): (Vec<_>, Vec<_>) = vm_args(&config)
+        .into_iter()
+        .partition(|argument| owned_argument(game, argument));
+    config["vmArgs"] = json!(kept);
+    (config, owned)
+}
+
+/// The base launcher settings an unedited override was built from, when known.
+fn recorded_base(record: &InstallRecord, clean: &Value) -> Result<Option<Value>> {
+    if let Some(data) = &record.base_bytes {
+        return serde_json::from_slice(data)
+            .map(Some)
+            .map_err(|e| invalid(format!("Invalid recorded base launcher: {e}")));
+    }
+    let matches = match &record.windows_base_digest {
+        Some(digest) => *digest == sha256(&json_bytes(clean)?),
+        None => false,
+    };
+    Ok(matches.then(|| clean.clone()))
+}
+
+/// The settings to build on, without LuaBuddy's arguments, and whether later
+/// changes to Steam's base can be told apart from user edits. An override that
+/// LuaBuddy created follows Steam's base; one that predates it is the user's.
+fn launcher_source(
+    game: &Path,
+    site: &Path,
+    data: &[u8],
+    record: &InstallRecord,
+    base: Option<&Value>,
+) -> Result<(Value, bool)> {
+    let config = launcher_config(data, site).map_err(|error| {
+        invalid(format!(
+            "{error}. Run repair to keep a copy and restore the recorded settings."
+        ))
+    })?;
+    let (clean, _) = split_integration(game, config);
+    if record.original_site.is_some() {
+        return Ok((clean, true));
+    }
+    match (recorded_base(record, &clean)?, base) {
+        (Some(was), Some(now)) => Ok((rebase(clean, &was, now), true)),
+        (_, now) => {
+            let unedited = now == Some(&clean);
+            Ok((clean, unedited))
+        }
+    }
+}
+
+/// Carries the user's edits, the difference between `mine` and the base it was
+/// built from, over to Steam's current base.
+fn rebase(mut mine: Value, was: &Value, now: &Value) -> Value {
+    let keys: BTreeSet<_> = [was, now]
+        .into_iter()
+        .filter_map(Value::as_object)
+        .flat_map(|fields| fields.keys().cloned())
+        .collect();
+    for key in keys {
+        let (edit, old, new) = (mine.get(&key), was.get(&key), now.get(&key));
+        let merged = if edit == old {
+            new.cloned()
+        } else if old != new
+            && let (Some(Value::Array(edit)), Some(Value::Array(old)), Some(Value::Array(new))) =
+                (edit, old, new)
+        {
+            let kept = new
+                .iter()
+                .filter(|item| edit.contains(item) || !old.contains(item));
+            let added = edit
+                .iter()
+                .filter(|item| !old.contains(item) && !new.contains(item));
+            Some(kept.chain(added).cloned().collect())
+        } else {
+            edit.cloned()
+        };
+        match merged {
+            Some(value) => mine[key.as_str()] = value,
+            None => {
+                if let Some(fields) = mine.as_object_mut() {
+                    fields.remove(&key);
+                }
+            }
+        }
+    }
+    mine
+}
+
+/// The override to work from. Repair and uninstall set unreadable contents
+/// aside and use the recorded ones.
+fn recorded_if_broken(
+    game: &Path,
+    site: &Path,
+    data: Option<Vec<u8>>,
+    record: &InstallRecord,
+) -> Result<(Option<Vec<u8>>, Option<PathBuf>)> {
+    match data {
+        Some(broken) if launcher_config(&broken, site).is_err() => {
+            let name = format!("launcher-{}.json", sha256(&broken));
+            let copy = preserve(game, &name, &broken)?;
+            Ok((Some(record.current.site_bytes.clone()), Some(copy)))
+        }
+        data => Ok((data, None)),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -873,8 +976,11 @@ pub struct InstallRecord {
     pub game: PathBuf,
     pub profiles: PathBuf,
     pub original_site: Option<Vec<u8>>,
-    // Windows .site.json is a full replacement for Steam's base file. Detect
-    // a game update rather than silently pinning an old VM/classpath layout.
+    // The site file replaces Steam's base file entirely. The base it was built
+    // from tells a Steam update apart from a user's edit. Records written before
+    // it was kept have only a Windows digest, or nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_bytes: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub windows_base_digest: Option<String>,
     pub current: InstalledGeneration,
@@ -1270,8 +1376,12 @@ fn read_record(game: &Path) -> Result<Option<InstallRecord>> {
     let Some(data) = optional_bytes(&path, METADATA_LIMIT)? else {
         return Ok(None);
     };
-    let record: InstallRecord = serde_json::from_slice(&data)
-        .map_err(|e| invalid(format!("Invalid native installation record: {e}")))?;
+    let record: InstallRecord = serde_json::from_slice(&data).map_err(|e| {
+        invalid(format!(
+            "Invalid native installation record {}: {e}",
+            path.display()
+        ))
+    })?;
     if record.schema != SCHEMA || record.game != game || !record.profiles.is_absolute() {
         return Err(invalid(
             "Native installation record does not match this game",
@@ -1432,27 +1542,41 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
     let _lock = InstallLock::acquire(game)?;
     let recovered = recover(game)?;
     let prior = read_record(game)?;
-    let original_site = optional_bytes(&site, METADATA_LIMIT)?;
-    let base_bytes = bytes(&base, METADATA_LIMIT)?;
-    let windows_base_digest = if cfg!(windows) {
-        Some(vendor_digest(&base_bytes)?)
-    } else {
-        None
-    };
-    if let Some(saved) = prior.as_ref().and_then(|r| r.windows_base_digest.as_ref())
-        && Some(saved) != windows_base_digest.as_ref()
+    if options.repair
+        && let Some(record) = &prior
+        && record.current.package_digest != package.digest
     {
-        return Err(invalid(BASE_CHANGED));
+        return Err(invalid(format!(
+            "Repair needs the installed package {}, but the supplied package is {}. Use update to change packages.",
+            record.current.package_digest, package.digest
+        )));
     }
-    let selected_launcher = original_site.clone().unwrap_or(base_bytes);
-    let mut config = launcher_config(&selected_launcher)?;
-    let old_args: Vec<String> = config["vmArgs"]
-        .as_array()
-        .ok_or_else(|| invalid("Invalid launcher arguments"))?
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect();
+    let current_site = optional_bytes(&site, METADATA_LIMIT)?;
+    let base_bytes = bytes(&base, METADATA_LIMIT)?;
+    let base_config = launcher_config(&base_bytes, &base)?;
+    let (launcher, broken_launcher) = match &prior {
+        Some(record) if options.repair => {
+            recorded_if_broken(game, &site, current_site.clone(), record)?
+        }
+        _ => (current_site.clone(), None),
+    };
+    let (mut config, follows_base) = match (&launcher, &prior) {
+        (None, _) => (split_integration(game, base_config).0, true),
+        (Some(data), Some(record)) => {
+            launcher_source(game, &site, data, record, Some(&base_config))?
+        }
+        (Some(data), None) => (
+            split_integration(game, launcher_config(data, &site)?).0,
+            true,
+        ),
+    };
+    let old_args = match launcher
+        .as_ref()
+        .or(prior.as_ref().map(|r| &r.current.site_bytes))
+    {
+        Some(data) => split_integration(game, launcher_config(data, &site)?).1,
+        None => Vec::new(),
+    };
     let old_profile = old_args
         .iter()
         .rev()
@@ -1511,35 +1635,16 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
             .to_str()
             .ok_or_else(|| invalid("Template path must be UTF-8"))?
     );
-    let mut args = Vec::new();
-    for arg in old_args {
-        let prior_agent = prior.as_ref().is_some_and(|r| {
-            arg == r.current.agent_argument
-                || r.previous.as_ref().is_some_and(|p| arg == p.agent_argument)
-        });
-        if prior_agent
-            || arg.starts_with("-Dluabuddy.config=")
-            || arg.starts_with("-Dluabuddy.templates=")
-        {
-            continue;
+    let mut args = vm_args(&config);
+    for (name, choice) in [
+        ("luabuddy.debug", options.debug),
+        ("luabuddy.earlyUI", options.early_ui),
+    ] {
+        match choice {
+            Some(true) => args.push(format!("-D{name}=true")),
+            Some(false) => (),
+            None => args.extend(old_args.iter().filter(|arg| property(arg, name)).cloned()),
         }
-        if options.debug.is_some()
-            && (arg == "-Dluabuddy.debug" || arg.starts_with("-Dluabuddy.debug="))
-        {
-            continue;
-        }
-        if options.early_ui.is_some()
-            && (arg == "-Dluabuddy.earlyUI" || arg.starts_with("-Dluabuddy.earlyUI="))
-        {
-            continue;
-        }
-        args.push(arg);
-    }
-    if options.debug == Some(true) {
-        args.push("-Dluabuddy.debug=true".into());
-    }
-    if options.early_ui == Some(true) {
-        args.push("-Dluabuddy.earlyUI=true".into());
     }
     args.push(config_argument.clone());
     args.push(templates_argument.clone());
@@ -1618,8 +1723,9 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
         original_site: prior
             .as_ref()
             .map(|r| r.original_site.clone())
-            .unwrap_or(original_site.clone()),
-        windows_base_digest,
+            .unwrap_or(current_site.clone()),
+        base_bytes: follows_base.then_some(base_bytes),
+        windows_base_digest: None,
         current: generation,
         previous: if same {
             prior.as_ref().and_then(|r| r.previous.clone())
@@ -1646,7 +1752,7 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
     });
     changes.push(Change {
         path: site,
-        before: original_site,
+        before: current_site,
         after: Some(site_bytes),
         executable: false,
     });
@@ -1668,7 +1774,7 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
     }
     let changed = transact(game, &profiles, &missing, changes, retired)?;
     Ok(
-        json!({"operation": if options.repair { "repair" } else { "install" }, "changed":changed, "recoveredInterruptedOperation":recovered, "profiles":profiles, "modifiedRetiredFilesPreserved":retained_modified, "runtime":record.current.runtime, "runtimeVerified":false, "nextStep":"Fully restart Project Zomboid through its normal launcher. Package integrity is verified; in-game operation requires its own runtime evidence."}),
+        json!({"operation": if options.repair { "repair" } else { "install" }, "changed":changed, "recoveredInterruptedOperation":recovered, "profiles":profiles, "modifiedRetiredFilesPreserved":retained_modified, "invalidLauncherPreserved":broken_launcher, "runtime":record.current.runtime, "runtimeVerified":false, "nextStep":"Fully restart Project Zomboid through its normal launcher. Package integrity is verified; in-game operation requires its own runtime evidence."}),
     )
 }
 
@@ -1680,16 +1786,13 @@ pub struct InstallationStatus {
     pub problems: Vec<String>,
 }
 
-const BASE_CHANGED: &str = "Steam's base launcher JSON changed. Close the game and uninstall LuaBuddy. If a personal site override remains, compare it with the new base before reinstalling.";
+const BASE_CHANGED: &str = "Steam's base launcher JSON changed since the launcher override was built from it. Close the game, then run update or repair to rebuild the override.";
 
-fn installation_problems(game: &Path, record: &InstallRecord) -> Result<Vec<String>> {
+/// What is wrong with an installation, and what a user changed around it.
+fn inspect(game: &Path, record: &InstallRecord) -> Result<(Vec<String>, Vec<String>)> {
     let (base, site) = launcher_paths(game)?;
     let mut problems = Vec::new();
-    if let Some(saved) = &record.windows_base_digest
-        && *saved != vendor_digest(&bytes(&base, METADATA_LIMIT)?)?
-    {
-        problems.push(BASE_CHANGED.into());
-    }
+    let mut notes = Vec::new();
     for (path, digest) in &record.current.files {
         match optional_bytes(path, RUNTIME_LIMIT)? {
             Some(data) if sha256(&data) == *digest => (),
@@ -1703,8 +1806,68 @@ fn installation_problems(game: &Path, record: &InstallRecord) -> Result<Vec<Stri
             )),
         }
     }
-    if optional_bytes(&site, METADATA_LIMIT)?.as_ref() != Some(&record.current.site_bytes) {
-        problems.push("Launcher override differs from the last installed generation; user edits are preserved".into());
+    let base_bytes = bytes(&base, METADATA_LIMIT)?;
+    let base_config = serde_json::from_slice::<Value>(&base_bytes).ok();
+    let base_changed = match (
+        &record.base_bytes,
+        &record.windows_base_digest,
+        &base_config,
+    ) {
+        (Some(saved), _, _) => serde_json::from_slice(saved).ok() != base_config,
+        (None, Some(saved), Some(now)) => *saved != sha256(&json_bytes(now)?),
+        (None, Some(_), None) => true,
+        (None, None, _) => false,
+    };
+    if base_changed && record.original_site.is_none() {
+        problems.push(BASE_CHANGED.into());
+    } else if base_changed {
+        notes.push(format!(
+            "Steam's base launcher JSON changed since the last install. {} is your own override, so compare it with {}.",
+            site.display(),
+            base.display()
+        ));
+    }
+    match optional_bytes(&site, METADATA_LIMIT)?.map(|data| launcher_config(&data, &site)) {
+        None => problems.push(format!(
+            "Launcher override is missing; run repair: {}",
+            site.display()
+        )),
+        Some(Err(error)) => problems.push(format!(
+            "{error}. Run repair to keep a copy and restore the recorded settings."
+        )),
+        Some(Ok(config)) => {
+            let generation = &record.current;
+            let args = vm_args(&config);
+            let last = |name: &str| args.iter().rev().find(|arg| property(arg, name));
+            if !args
+                .iter()
+                .filter(|arg| owned_agent(game, arg))
+                .eq([&generation.agent_argument])
+                || last("luabuddy.config") != Some(&generation.config_argument)
+                || last("luabuddy.templates") != Some(&generation.templates_argument)
+            {
+                problems.push(format!(
+                    "The launcher override does not select the installed generation; run repair: {}",
+                    site.display()
+                ));
+            }
+            if launcher_config(&generation.site_bytes, &site)? != config {
+                notes.push(format!(
+                    "The launcher override was edited since the last install. Unrelated edits are kept: {}",
+                    site.display()
+                ));
+            }
+            if record.base_bytes.is_none()
+                && record.windows_base_digest.is_none()
+                && record.original_site.is_none()
+                && base_config.as_ref() != Some(&split_integration(game, config).0)
+            {
+                notes.push(format!(
+                    "The launcher override differs from Steam's base launcher, and this older installation did not record which settings are yours. If you did not edit it, close the game, remove {} and run repair.",
+                    site.display()
+                ));
+            }
+        }
     }
     if !record.profiles.is_dir() {
         problems.push(format!(
@@ -1716,7 +1879,7 @@ fn installation_problems(game: &Path, record: &InstallRecord) -> Result<Vec<Stri
     if game.join(INSTALL_DIR).join(JOURNAL_FILE).exists() {
         problems.push("An interrupted operation awaits recover, install, or uninstall".into());
     }
-    Ok(problems)
+    Ok((problems, notes))
 }
 
 pub fn installation_status(game: &Path) -> Result<Option<InstallationStatus>> {
@@ -1724,8 +1887,8 @@ pub fn installation_status(game: &Path) -> Result<Option<InstallationStatus>> {
     let Some(record) = read_record(game)? else {
         return Ok(None);
     };
-    let problems = match installation_problems(game, &record) {
-        Ok(problems) => problems,
+    let problems = match inspect(game, &record) {
+        Ok((problems, _)) => problems,
         Err(error) => vec![format!(
             "Installation checks could not be completed: {error}"
         )],
@@ -1742,10 +1905,10 @@ pub fn verify_install(game: &Path) -> Result<Value> {
     launcher_paths(game)?;
     let record =
         read_record(game)?.ok_or_else(|| invalid("LuaBuddy native runtime is not installed"))?;
-    let problems = installation_problems(game, &record)?;
+    let (problems, notes) = inspect(game, &record)?;
     let ok = problems.is_empty();
     Ok(
-        json!({"ok":ok, "game":game, "profiles":record.profiles, "packageVersion":record.current.package_version, "packageDigest":record.current.package_digest, "runtime":record.current.runtime, "runtimeVerified":false, "problems":problems, "jvm":record.jvm}),
+        json!({"ok":ok, "game":game, "profiles":record.profiles, "packageVersion":record.current.package_version, "packageDigest":record.current.package_digest, "runtime":record.current.runtime, "runtimeVerified":false, "problems":problems, "notes":notes, "jvm":record.jvm}),
     )
 }
 
@@ -1762,11 +1925,6 @@ pub fn rollback(game: &Path) -> Result<Value> {
     recover(game)?;
     let mut record =
         read_record(game)?.ok_or_else(|| invalid("LuaBuddy native runtime is not installed"))?;
-    if let Some(saved) = &record.windows_base_digest
-        && *saved != vendor_digest(&bytes(&base, METADATA_LIMIT)?)?
-    {
-        return Err(invalid(BASE_CHANGED));
-    }
     let mut previous = record
         .previous
         .take()
@@ -1780,35 +1938,21 @@ pub fn rollback(game: &Path) -> Result<Value> {
         }
     }
     let current_site = optional_bytes(&site, METADATA_LIMIT)?;
-    if current_site.as_ref() != Some(&record.current.site_bytes) {
-        return Err(invalid(
-            "Launcher override has user changes; rollback refused without overwriting them",
-        ));
-    }
-    let mut config = without_integration(&record.current.site_bytes, &record)?;
-    let prior_config = launcher_config(&previous.site_bytes)?;
-    let owned_args = prior_config["vmArgs"]
-        .as_array()
-        .ok_or_else(|| invalid("Invalid previous launcher arguments"))?
-        .iter()
-        .filter(|value| {
-            value
-                .as_str()
-                .is_some_and(|arg| owned_property(arg) || arg == previous.agent_argument)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    config["vmArgs"]
-        .as_array_mut()
-        .ok_or_else(|| invalid("Invalid launcher arguments"))?
-        .extend(owned_args);
-    let profile_argument = config["vmArgs"]
-        .as_array()
-        .ok_or_else(|| invalid("Invalid launcher arguments"))?
+    let base_bytes = bytes(&base, METADATA_LIMIT)?;
+    let base_config = launcher_config(&base_bytes, &base)?;
+    let (mut config, follows_base) = match &current_site {
+        Some(data) => launcher_source(game, &site, data, &record, Some(&base_config))?,
+        None => (split_integration(game, base_config).0, true),
+    };
+    record.base_bytes = follows_base.then_some(base_bytes);
+    record.windows_base_digest = None;
+    let mut args = vm_args(&config);
+    args.extend(split_integration(game, launcher_config(&previous.site_bytes, &site)?).1);
+    config["vmArgs"] = json!(args);
+    let profile_argument = args
         .iter()
         .rev()
-        .filter_map(Value::as_str)
-        .find(|arg| *arg == "-Dluabuddy.config" || arg.starts_with("-Dluabuddy.config="))
+        .find(|arg| property(arg, "luabuddy.config"))
         .ok_or_else(|| invalid("Previous generation has no profile directory argument"))?;
     let profiles = profile_argument
         .strip_prefix("-Dluabuddy.config=")
@@ -1853,26 +1997,36 @@ pub fn uninstall(game: &Path) -> Result<Value> {
         );
     };
     let current_site = optional_bytes(&site, METADATA_LIMIT)?;
-    let restored = if let Some(content) = &current_site {
-        let clean = without_integration(content, &record)?;
-        // Windows has the original semantic base digest. Removal of its
-        // complete site override must not depend on Steam retaining the old
-        // JSON schema, or on the replacement base file even existing.
-        let matches_baseline = if let Some(original) = &record.original_site {
-            clean == launcher_config(original)?
-        } else if let Some(saved) = &record.windows_base_digest {
-            *saved == sha256(&json_bytes(&clean)?)
-        } else {
-            clean == launcher_config(&bytes(&base, METADATA_LIMIT)?)?
-        };
-        if matches_baseline {
-            record.original_site.clone()
-        } else {
-            Some(json_bytes(&clean)?)
+    // The override must be removable whatever Steam's base file became.
+    let base_config = bytes(&base, METADATA_LIMIT)
+        .and_then(|data| launcher_config(&data, &base))
+        .ok();
+    let (launcher, broken_launcher) =
+        recorded_if_broken(game, &site, current_site.clone(), &record)?;
+    let restored = match launcher {
+        None => None,
+        Some(data) => {
+            let (source, _) = launcher_source(game, &site, &data, &record, base_config.as_ref())?;
+            match &record.original_site {
+                Some(original) if source == launcher_config(original, &site)? => {
+                    Some(original.clone())
+                }
+                _ if base_config.as_ref() == Some(&source)
+                    || base_config.is_none()
+                        && recorded_base(&record, &source)?.as_ref() == Some(&source) =>
+                {
+                    None
+                }
+                _ => Some(json_bytes(&source)?),
+            }
         }
-    } else {
-        None
     };
+    let notes = restored.as_ref().map(|_| {
+        format!(
+            "{} stays because it holds your own settings. It replaces Steam's base launcher entirely, so compare them if the game does not start.",
+            site.display()
+        )
+    });
     let mut changes = vec![Change {
         path: site,
         before: current_site,
@@ -1893,7 +2047,7 @@ pub fn uninstall(game: &Path) -> Result<Value> {
     });
     let changed = transact(game, &record.profiles, &[], changes, retired)?;
     Ok(
-        json!({"operation":"uninstall", "changed":changed, "profilesPreserved":record.profiles, "modifiedFilesPreserved":retained, "restartRequired":true}),
+        json!({"operation":"uninstall", "changed":changed, "profilesPreserved":record.profiles, "modifiedFilesPreserved":retained, "invalidLauncherPreserved":broken_launcher, "notes":Vec::from_iter(notes), "restartRequired":true}),
     )
 }
 
