@@ -90,7 +90,7 @@ A transaction journal records file contents before mutation. Launcher activation
 luabuddy recover --game-dir /path/to/ProjectZomboid
 ```
 
-Recovery preserves a file that changed independently after interruption and names the file and journal that need attention. Concurrent installers use an owned process lock. Linux process identity includes the process start time so a reused process ID cannot make an old lock look current.
+Recovery preserves a file that changed independently after interruption and names the file and journal that need attention. Concurrent installers are excluded by an operating-system lock on `.luabuddy/install.lock`. The system releases it when the installer exits, so the file can stay in place.
 
 ## Uninstall
 

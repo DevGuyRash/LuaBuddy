@@ -897,7 +897,6 @@ fn existing_launcher_override_is_restored_byte_for_byte() {
         fs::read(f.game.join("ProjectZomboid64.json")).unwrap(),
         vanilla
     );
-    assert!(!f.game.join(".luabuddy/native-install.lock").exists());
 }
 
 #[cfg(windows)]
@@ -941,25 +940,36 @@ fn windows_refuses_stale_full_launcher_override_and_uninstalls_to_updated_base()
     }
 }
 
+#[test]
+fn a_held_installer_lock_refuses_and_a_leftover_lock_file_does_not() {
+    let f = Fixture::new();
+    f.install();
+    let site = f.game.join("ProjectZomboid64.site.json");
+    let before = fs::read(&site).unwrap();
+    let held = fs::OpenOptions::new()
+        .write(true)
+        .open(f.game.join(".luabuddy/install.lock"))
+        .unwrap();
+    held.lock().unwrap();
+    for command in ["uninstall", "recover", "rollback"] {
+        let result = f.command(command, &[]);
+        assert_eq!(result.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("install.lock"));
+    }
+    assert_eq!(fs::read(&site).unwrap(), before);
+    drop(held);
+    // Older releases identified the owner by file contents and an empty file wedged them.
+    fs::write(f.game.join(".luabuddy/native-install.lock"), "").unwrap();
+    assert_eq!(f.success("uninstall", &[])["changed"], true);
+}
+
 #[cfg(windows)]
 #[test]
-fn windows_refuses_a_foreign_locked_file_and_destination_junction() {
-    use std::os::windows::fs::OpenOptionsExt;
+fn windows_refuses_a_destination_junction() {
     let f = Fixture::new();
     let state = f.game.join(".luabuddy");
     fs::create_dir(&state).unwrap();
-    let lock = state.join("native-install.lock");
-    let foreign = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .share_mode(0)
-        .open(&lock)
-        .unwrap();
     let args = ["--package", f.package.to_str().unwrap()];
-    assert_eq!(f.command("install", &args).status.code(), Some(2));
-    assert!(!f.game.join("ProjectZomboid64.site.json").exists());
-    drop(foreign);
-    fs::remove_file(&lock).unwrap();
 
     let outside = f.root.join("unrelated storage");
     fs::create_dir(&outside).unwrap();

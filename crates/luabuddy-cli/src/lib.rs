@@ -8,13 +8,11 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(windows)]
-use windows::InstallLock;
 
 const SCHEMA: u32 = 1;
 const METADATA_LIMIT: u64 = 4 * 1024 * 1024;
@@ -22,6 +20,7 @@ const RUNTIME_LIMIT: u64 = 256 * 1024 * 1024;
 const JOURNAL_LIMIT: u64 = 512 * 1024 * 1024;
 const INSTALL_DIR: &str = ".luabuddy";
 const RECORD_FILE: &str = "native-install.json";
+const LOCK_FILE: &str = "install.lock";
 const JOURNAL_FILE: &str = "native-transaction.json";
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -934,83 +933,35 @@ fn write_atomic(path: &Path, data: Option<&[u8]>, executable: bool) -> Result<()
     }
 }
 
-#[cfg(not(windows))]
-struct InstallLock {
-    path: PathBuf,
-    identity: String,
-}
+// The kernel owns the lock, so an exit releases it and a leftover file is harmless.
+struct InstallLock(#[expect(dead_code, reason = "held until drop")] File);
 
-#[cfg(not(windows))]
 impl InstallLock {
     fn acquire(game: &Path) -> Result<Self> {
         let root = game.join(INSTALL_DIR);
         plain_directory(&root)?;
-        let path = root.join("native-install.lock");
-        let identity = process_identity(std::process::id())?;
-        if let Some(data) = optional_bytes(&path, 4096)? {
-            let prior = String::from_utf8(data).map_err(|_| {
-                invalid("Invalid native installer lock; preserve it for inspection")
-            })?;
-            let pid: u32 = prior
-                .split_once(':')
-                .and_then(|(pid, _)| pid.parse().ok())
-                .ok_or_else(|| invalid("Invalid native installer lock identity"))?;
-            match process_identity(pid) {
-                Ok(current) if current == prior => {
-                    return Err(invalid(format!(
-                        "Another native installer is running with process ID {pid}"
-                    )));
-                }
-                Ok(_) => fs::remove_file(&path)
-                    .map_err(|e| io_error("Remove stale native installer lock", &path, e))?,
-                Err(_) if !Path::new(&format!("/proc/{pid}")).exists() => fs::remove_file(&path)
-                    .map_err(|e| io_error("Remove stale native installer lock", &path, e))?,
-                Err(error) => return Err(error),
-            }
+        let path = root.join(LOCK_FILE);
+        if fs::symlink_metadata(&path).is_ok_and(|kind| link_like(&kind) || !kind.is_file()) {
+            return Err(invalid(format!(
+                "Expected a regular installer lock file: {}",
+                path.display()
+            )));
         }
-        write_new(&path, identity.as_bytes(), false)?;
-        Ok(Self { path, identity })
-    }
-    fn release(self) -> Result<()> {
-        if optional_bytes(&self.path, 4096)?.as_deref() != Some(self.identity.as_bytes()) {
-            return Err(invalid("Native installer lock ownership changed"));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| io_error("Open installer lock", &path, e))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self(file)),
+            Err(TryLockError::WouldBlock) => Err(invalid(format!(
+                "Another LuaBuddy installer is running and holds {}",
+                path.display()
+            ))),
+            Err(TryLockError::Error(e)) => Err(io_error("Lock", &path, e)),
         }
-        fs::remove_file(&self.path)
-            .map_err(|e| io_error("Release native installer lock", &self.path, e))
-    }
-}
-
-#[cfg(not(windows))]
-impl Drop for InstallLock {
-    fn drop(&mut self) {
-        if fs::read(&self.path).ok().as_deref() == Some(self.identity.as_bytes()) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn process_identity(pid: u32) -> Result<String> {
-    #[cfg(target_os = "linux")]
-    {
-        let path = PathBuf::from(format!("/proc/{pid}/stat"));
-        let text = fs::read_to_string(&path)
-            .map_err(|e| io_error("Read installer process identity", &path, e))?;
-        let (_, fields) = text
-            .rsplit_once(')')
-            .ok_or_else(|| invalid("Malformed process identity"))?;
-        let start = fields
-            .split_whitespace()
-            .nth(19)
-            .ok_or_else(|| invalid("Process identity lacks start time"))?;
-        Ok(format!("{pid}:{start}"))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        Err(invalid(
-            "Native installation is unverified on this platform",
-        ))
     }
 }
 
@@ -1318,7 +1269,7 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
             "Package architecture does not match the actual bundled JVM process",
         ));
     }
-    let lock = InstallLock::acquire(game)?;
+    let _lock = InstallLock::acquire(game)?;
     let recovered = recover(game)?;
     let prior = read_record(game)?;
     let original_site = optional_bytes(&site, METADATA_LIMIT)?;
@@ -1610,7 +1561,6 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
         }
     }
     let changed = transact(game, &profiles, changes)?;
-    lock.release()?;
     Ok(
         json!({"operation": if options.repair { "repair" } else { "install" }, "changed":changed, "recoveredInterruptedOperation":recovered, "profiles":profiles, "modifiedRetiredFilesPreserved":retained_modified, "runtime":record.current.runtime, "runtimeVerified":false, "nextStep":"Fully restart Project Zomboid through its normal launcher. Package integrity is verified; in-game operation requires its own runtime evidence."}),
     )
@@ -1695,15 +1645,14 @@ pub fn verify_install(game: &Path) -> Result<Value> {
 
 pub fn recover_install(game: &Path) -> Result<Value> {
     launcher_paths(game)?;
-    let lock = InstallLock::acquire(game)?;
+    let _lock = InstallLock::acquire(game)?;
     let recovered = recover(game)?;
-    lock.release()?;
     Ok(json!({"operation":"recover", "recovered":recovered}))
 }
 
 pub fn rollback(game: &Path) -> Result<Value> {
     let (base, site) = launcher_paths(game)?;
-    let lock = InstallLock::acquire(game)?;
+    let _lock = InstallLock::acquire(game)?;
     recover(game)?;
     let mut record =
         read_record(game)?.ok_or_else(|| invalid("LuaBuddy native runtime is not installed"))?;
@@ -1783,7 +1732,6 @@ pub fn rollback(game: &Path) -> Result<Value> {
         },
     ];
     let changed = transact(game, &record.profiles, changes)?;
-    lock.release()?;
     Ok(
         json!({"operation":"rollback", "changed":changed, "packageVersion":record.current.package_version, "profilesPreserved":record.profiles, "restartRequired":true}),
     )
@@ -1791,10 +1739,9 @@ pub fn rollback(game: &Path) -> Result<Value> {
 
 pub fn uninstall(game: &Path) -> Result<Value> {
     let (base, site) = supported_launcher_files(game)?;
-    let lock = InstallLock::acquire(game)?;
+    let _lock = InstallLock::acquire(game)?;
     let recovered = recover(game)?;
     let Some(record) = read_record(game)? else {
-        lock.release()?;
         return Ok(
             json!({"operation":"uninstall", "changed":false, "recoveredInterruptedOperation":recovered}),
         );
@@ -1855,7 +1802,6 @@ pub fn uninstall(game: &Path) -> Result<Value> {
         executable: false,
     });
     let changed = transact(game, &record.profiles, changes)?;
-    lock.release()?;
     Ok(
         json!({"operation":"uninstall", "changed":changed, "profilesPreserved":record.profiles, "modifiedFilesPreserved":retained, "restartRequired":true}),
     )
