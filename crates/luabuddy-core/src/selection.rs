@@ -257,11 +257,21 @@ pub fn merge(mut persistent: Vec<Profile>, once: &[Profile]) -> Result<Vec<Profi
     Ok(persistent)
 }
 
+/// A profile whose ID differs from `id` only by letter case, which is easy to mistype.
+pub fn case_variant<'a>(profiles: &'a [Profile], id: &ModId) -> Option<&'a Profile> {
+    let lower = id.as_str().to_lowercase();
+    profiles
+        .iter()
+        .find(|profile| profile.id != *id && profile.id.as_str().to_lowercase() == lower)
+}
+
+/// Selects a mod, starting a new profile from `template` text when one exists.
 pub fn select(
     directory: &Path,
     id: &ModId,
     source: Option<&Path>,
     lifetime: Lifetime,
+    template: Option<&str>,
 ) -> Result<Profile, CoreError> {
     let directory = safe_directory(directory, 0, false)?;
     let persistent = read_profiles(&directory)?;
@@ -273,6 +283,15 @@ pub fn select(
         && !path.is_dir()
     {
         return Err(error(path, "A mod path must be a directory"));
+    }
+    if let Some(variant) = case_variant(&persistent, id) {
+        return Err(error(
+            &variant.file,
+            format!(
+                "Mod IDs are case-sensitive; {id} is not selected, but {} exists",
+                variant.id
+            ),
+        ));
     }
     let existing = persistent.iter().find(|profile| &profile.id == id);
     if lifetime == Lifetime::Once && existing.is_some()
@@ -288,8 +307,7 @@ pub fn select(
     if lifetime == Lifetime::Once {
         let destination = safe_directory(&pending_directory(&directory), 2, true)?;
         let path = destination.join(crate::profile::profile_filename(id.as_str()));
-        let text = new_profile(id, source.as_deref())?;
-        let profile = Profile::parse(&path, &text)?;
+        let (text, profile) = new_profile(&path, id, source.as_deref(), template)?;
         if let Some(existing) = queued.iter().find(|profile| &profile.id == id) {
             if existing == &profile {
                 return Ok(profile);
@@ -320,21 +338,36 @@ pub fn select(
         return set_enabled(existing, true);
     }
     let path = directory.join(crate::profile::profile_filename(id.as_str()));
-    let text = new_profile(id, source.as_deref())?;
-    let profile = Profile::parse(&path, &text)?;
+    let (text, profile) = new_profile(&path, id, source.as_deref(), template)?;
     publish(&path, &text, None)?;
     Ok(profile)
 }
 
-fn new_profile(id: &ModId, source: Option<&Path>) -> Result<String, CoreError> {
-    let mut text = format!("id={}\n", escape(id.as_str()));
+fn new_profile(
+    path: &Path,
+    id: &ModId,
+    source: Option<&Path>,
+    template: Option<&str>,
+) -> Result<(String, Profile), CoreError> {
+    // The blank line ends a template whose last line continues.
+    let mut text = match template {
+        Some(template) => format!("{template}\n\nenabled=true\n"),
+        None => format!("id={}\n", escape(id.as_str())),
+    };
     if let Some(source) = source {
         let value = source
             .to_str()
             .ok_or_else(|| error(source, "Mod path must be UTF-8"))?;
         text.push_str(&format!("path={}\n", escape(value)));
     }
-    Ok(text)
+    let profile = Profile::parse(path, &text)?;
+    if profile.id != *id || !profile.enabled {
+        return Err(error(
+            path,
+            "The template would change this selection unexpectedly",
+        ));
+    }
+    Ok((text, profile))
 }
 
 fn set_enabled(profile: &Profile, enabled: bool) -> Result<Profile, CoreError> {

@@ -1,4 +1,4 @@
-use luabuddy_core::{ModId, Profile, read_profiles};
+use luabuddy_core::{ModId, Profile, read_profiles, selection::case_variant};
 pub mod extensions;
 #[cfg(windows)]
 mod windows;
@@ -1453,33 +1453,36 @@ fn read_profiles_if_exists(directory: &Path) -> Result<Vec<Profile>> {
     }
 }
 
+/// A word the user can paste back into their shell.
+fn shell_word(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_alphanumeric() || "_./:\\-".contains(c) && (c != '\\' || cfg!(windows)))
+    {
+        value.to_owned()
+    } else if cfg!(windows) {
+        format!("\"{value}\"")
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+struct SelectedProfiles {
+    files: Vec<(PathBuf, Vec<u8>)>,
+    outcomes: Vec<Value>,
+}
+
 fn selected_profile_files(
     ids: &[String],
     directory: &Path,
     package: &Package,
-) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+) -> Result<SelectedProfiles> {
     let existing = read_profiles_if_exists(directory)?;
-    let mut file_names = BTreeMap::new();
-    if directory.exists() {
-        for entry in
-            fs::read_dir(directory).map_err(|e| io_error("Read profile directory", directory, e))?
-        {
-            let entry =
-                entry.map_err(|e| io_error("Read profile directory entry", directory, e))?;
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| invalid("Profile filenames must be UTF-8"))?;
-            file_names
-                .entry(name.to_lowercase())
-                .or_insert_with(Vec::new)
-                .push((name, entry.path()));
-        }
-    }
     let templates = read_profiles_if_exists(&package.directory.join("profiles"))?;
-    let templates: BTreeMap<_, _> = templates.into_iter().map(|p| (p.id.clone(), p)).collect();
     let mut selected = BTreeMap::new();
-    let mut result = Vec::new();
+    let mut files = Vec::new();
+    let mut outcomes = Vec::new();
     for id in ids {
         if id.chars().any(char::is_control) {
             return Err(invalid("Mod IDs must not contain control characters"));
@@ -1494,32 +1497,48 @@ fn selected_profile_files(
             }
             continue;
         }
-        let target = directory.join(&name);
-        if let Some(matches) = file_names.get(&name.to_lowercase()) {
-            if matches.len() != 1 || matches[0].0 != name {
-                return Err(invalid(format!("Profile filename collision for {name}")));
-            }
-            if !existing
-                .iter()
-                .any(|profile| profile.file == target && profile.id == id)
-            {
-                return Err(invalid(format!(
-                    "Existing profile {name} belongs to another mod"
-                )));
-            }
-        }
-        if existing
-            .iter()
-            .any(|profile| profile.id == id && profile.file != target)
-        {
+        if let Some(variant) = case_variant(&existing, &id) {
             return Err(invalid(format!(
-                "Mod ID {id} already exists under another profile filename"
+                "Mod IDs are case-sensitive; {id} is not selected, but {} exists in {}",
+                variant.id,
+                variant.file.display()
             )));
         }
-        if target.exists() {
+        let target = directory.join(&name);
+        if let Some(profile) = existing.iter().find(|profile| profile.id == id) {
+            if profile.file != target {
+                return Err(invalid(format!(
+                    "Mod ID {id} already exists under another profile filename: {}",
+                    profile.file.display()
+                )));
+            }
+            outcomes.push(if profile.enabled {
+                json!({"id":id, "outcome":"alreadyEnabled", "profile":target})
+            } else {
+                json!({"id":id, "outcome":"existsDisabled", "profile":target, "enableCommand":format!(
+                    "luabuddy select --profiles-dir {} --mod {}",
+                    shell_word(&directory.to_string_lossy()),
+                    shell_word(id.as_str())
+                )})
+            });
             continue;
         }
-        let content = if let Some(template) = templates.get(&id) {
+        if directory.exists() {
+            for entry in fs::read_dir(directory)
+                .map_err(|e| io_error("Read profile directory", directory, e))?
+            {
+                let entry =
+                    entry.map_err(|e| io_error("Read profile directory entry", directory, e))?;
+                if entry.file_name().to_string_lossy().to_lowercase() == name.to_lowercase() {
+                    return Err(invalid(format!(
+                        "Profile filename for {id} is taken by another mod: {}",
+                        entry.path().display()
+                    )));
+                }
+            }
+        }
+        let template = templates.iter().find(|profile| profile.id == id);
+        let content = if let Some(template) = template {
             bytes(&template.file, METADATA_LIMIT)?
         } else {
             format!(
@@ -1536,9 +1555,12 @@ fn selected_profile_files(
             &target,
             std::str::from_utf8(&content).map_err(|_| invalid("Profile is not UTF-8"))?,
         )?;
-        result.push((target, content));
+        outcomes.push(
+            json!({"id":id, "outcome":"created", "profile":target, "fromTemplate":template.is_some(), "templateWithDifferentCase":case_variant(&templates, &id).map(|profile| &profile.id)}),
+        );
+        files.push((target, content));
     }
-    Ok(result)
+    Ok(SelectedProfiles { files, outcomes })
 }
 
 pub use luabuddy_core::profile::profile_filename;
@@ -1621,7 +1643,10 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
             "Profile directory contains a forbidden control character",
         ));
     }
-    let profile_files = selected_profile_files(&options.mods, &profiles, &package)?;
+    let SelectedProfiles {
+        files: profile_files,
+        outcomes,
+    } = selected_profile_files(&options.mods, &profiles, &package)?;
     plain_directory(&profiles)?;
     #[cfg(windows)]
     let (profiles, profile_files) = {
@@ -1800,8 +1825,27 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
     }
     let changed = transact(game, &profiles, &missing, changes, retired)?;
     Ok(
-        json!({"operation": if options.repair { "repair" } else { "install" }, "changed":changed, "recoveredInterruptedOperation":recovered, "profiles":profiles, "modifiedRetiredFilesPreserved":retained_modified, "invalidLauncherPreserved":broken_launcher, "runtime":record.current.runtime, "runtimeVerified":false, "nextStep":"Fully restart Project Zomboid through its normal launcher. Package integrity is verified; in-game operation requires its own runtime evidence."}),
+        json!({"operation": if options.repair { "repair" } else { "install" }, "changed":changed, "recoveredInterruptedOperation":recovered, "profiles":profiles, "mods":outcomes, "modifiedRetiredFilesPreserved":retained_modified, "invalidLauncherPreserved":broken_launcher, "runtime":record.current.runtime, "runtimeVerified":false, "nextStep":"Fully restart Project Zomboid through its normal launcher. Package integrity is verified; in-game operation requires its own runtime evidence."}),
     )
+}
+
+/// The directories an installation uses.
+pub struct InstalledDirectories {
+    pub profiles: PathBuf,
+    pub templates: PathBuf,
+}
+
+pub fn installed_directories(game: &Path) -> Result<InstalledDirectories> {
+    let record = read_record(game)?.ok_or_else(|| {
+        invalid(format!(
+            "LuaBuddy native runtime is not installed in {}",
+            game.display()
+        ))
+    })?;
+    Ok(InstalledDirectories {
+        templates: record.current.runtime.with_file_name("profiles"),
+        profiles: record.profiles,
+    })
 }
 
 #[derive(Debug, Clone)]

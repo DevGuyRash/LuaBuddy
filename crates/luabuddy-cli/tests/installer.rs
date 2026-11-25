@@ -128,6 +128,9 @@ impl Fixture {
                 | "rollback"
                 | "recover"
                 | "uninstall"
+                | "select"
+                | "deselect"
+                | "profiles"
         ) {
             cmd.arg("--game-dir").arg(self.game.parent().unwrap());
         }
@@ -553,6 +556,233 @@ fn repair_retains_modified_runtime_and_preserves_user_profiles() {
     f.success("uninstall", &[]);
     assert_eq!(fs::read_to_string(profile).unwrap(), original);
     assert_eq!(fs::read(&backups[0]).unwrap(), b"user modified runtime");
+}
+
+#[test]
+fn install_reports_what_happened_to_each_requested_mod() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.profile_dir()).unwrap();
+    let off = f.profile_dir().join("Off.properties");
+    fs::write(&off, "id=Off\nenabled=false\n").unwrap();
+    fs::write(f.profile_dir().join("On.properties"), "id=On\n").unwrap();
+    let result = f.success(
+        "install",
+        &[
+            "--package",
+            f.package.to_str().unwrap(),
+            "--mod",
+            "Example",
+            "--mod",
+            "Off",
+            "--mod",
+            "On",
+        ],
+    );
+    let outcomes: Vec<_> = result["mods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            (
+                entry["id"].as_str().unwrap(),
+                entry["outcome"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("Example", "created"),
+            ("Off", "existsDisabled"),
+            ("On", "alreadyEnabled")
+        ]
+    );
+    assert_eq!(result["mods"][0]["fromTemplate"], true);
+    assert_eq!(fs::read_to_string(&off).unwrap(), "id=Off\nenabled=false\n");
+    // The reported command enables the mod when run as printed.
+    let command = result["mods"][1]["enableCommand"].as_str().unwrap();
+    #[cfg(unix)]
+    {
+        let path = Path::new(env!("CARGO_BIN_EXE_luabuddy")).parent().unwrap();
+        let output = Command::new("/bin/sh")
+            .args(["-c", command])
+            .env("PATH", path)
+            .env("PZ_GAME_DIR", &f.game)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{command}: {output:?}");
+        let profiles = luabuddy_core::read_profiles(&f.profile_dir()).unwrap();
+        assert!(profiles.iter().all(|profile| profile.enabled));
+    }
+    assert!(command.contains("--mod Off"));
+
+    let result = f.command(
+        "install",
+        &["--package", f.package.to_str().unwrap(), "--mod", "example"],
+    );
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("but Example exists"));
+}
+
+#[test]
+fn selection_commands_default_to_the_installed_profiles_and_templates() {
+    let f = Fixture::new();
+    fs::write(
+        f.templates.join("Scoped.properties"),
+        "id=Scoped\nexclude=client/skip.lua\n",
+    )
+    .unwrap();
+    let package = f.root.join("package-scoped");
+    f.package(&package);
+    let missing = f.root.join("typo");
+    let explicit = ["--profiles-dir", missing.to_str().unwrap()];
+    for command in ["select", "deselect"] {
+        let result = f.command(command, &["--mod", "Scoped"]);
+        assert_eq!(result.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("--profiles-dir"));
+        let result = f.command(command, &[&explicit[..], &["--mod", "Scoped"]].concat());
+        assert_eq!(result.status.code(), Some(2));
+        assert!(!missing.exists());
+    }
+
+    // The packaged executable installs its own package.
+    let executable = package.join(format!("luabuddy{}", std::env::consts::EXE_SUFFIX));
+    let run = |args: &[&str]| {
+        let output = Command::new(&executable)
+            .args(args)
+            .arg("--game-dir")
+            .arg(&f.game)
+            .current_dir(&f.root)
+            .env_remove("PZ_GAME_DIR")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    assert_eq!(run(&["install"])["changed"], true);
+    let selected = run(&["select", "--mod", "Scoped"]);
+    assert_eq!(selected["profile"]["exclude"], json!(["client/skip.lua"]));
+    let once = run(&["select", "--mod", "Example", "--once"]);
+    assert_eq!(once["lifetime"], "next-game-process");
+    let listed = f.success("profiles", &[]);
+    assert_eq!(listed["profiles"][0]["id"], "Scoped");
+    assert_eq!(listed["queuedForNextLaunch"][0]["id"], "Example");
+    assert_eq!(listed["skippedAtNextLaunch"], json!([]));
+    assert_eq!(f.success("deselect", &["--mod", "Scoped"])["changed"], true);
+    let result = f.command("select", &["--mod", "scoped"]);
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("but Scoped exists"));
+    let profiles = luabuddy_core::read_profiles(&f.profile_dir()).unwrap();
+    assert_eq!(profiles.len(), 1);
+    assert!(!profiles[0].enabled);
+    assert_eq!(profiles[0].exclude, ["client/skip.lua"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn paths_reached_through_links_install_but_linked_owned_directories_do_not() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    let real = f.root.join("var-home");
+    fs::create_dir(&real).unwrap();
+    let home = f.root.join("home");
+    symlink(&real, &home).unwrap();
+    let profiles = home.join("profiles");
+    let args = [
+        "--package",
+        f.package.to_str().unwrap(),
+        "--profiles-dir",
+        profiles.to_str().unwrap(),
+    ];
+    let outside = f.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::create_dir(f.game.join(".luabuddy")).unwrap();
+    symlink(&outside, f.game.join(".luabuddy/native")).unwrap();
+    assert_eq!(f.command("install", &args).status.code(), Some(2));
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    fs::remove_file(f.game.join(".luabuddy/native")).unwrap();
+
+    f.success("install", &args);
+    assert_eq!(
+        Path::new(f.record()["profiles"].as_str().unwrap()),
+        real.canonicalize().unwrap().join("profiles")
+    );
+    assert_eq!(f.success("verify", &[])["ok"], true);
+    f.success("select", &[&args[2..], &["--mod", "Example"]].concat());
+    assert!(real.join("profiles/Example.properties").is_file());
+    f.package(&home.join("packaged"));
+    assert!(real.join("packaged/manifest.json").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn discovery_lists_every_candidate_and_survives_unreadable_libraries() {
+    let f = Fixture::new();
+    let home = f.root.join("home");
+    let native = home.join(".local/share/Steam");
+    let flatpak = home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam");
+    let library = f.root.join("Library");
+    let game = |library: &Path| {
+        let game = library.join("steamapps/common/ProjectZomboid");
+        fs::create_dir_all(&game).unwrap();
+        fs::write(game.join("projectzomboid.jar"), []).unwrap();
+    };
+    game(&native);
+    game(&flatpak);
+    game(&library);
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_luabuddy"))
+            .arg("discover")
+            .args(args)
+            .env("HOME", &home)
+            .env_remove("PZ_GAME_DIR")
+            .output()
+            .unwrap()
+    };
+    let list = home.join("libraries.vdf");
+    fs::write(&list, format!("\"path\" \"{}\"", library.display())).unwrap();
+    std::os::unix::fs::symlink(&list, native.join("steamapps/libraryfolders.vdf")).unwrap();
+    fs::write(flatpak.join("steamapps/libraryfolders.vdf"), b"\xff\xfe").unwrap();
+
+    let output = run(&[]);
+    assert_eq!(output.status.code(), Some(1));
+    let found: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(found["game"], Value::Null);
+    assert_eq!(found["candidates"].as_array().unwrap().len(), 3);
+    for searched in [&native, &flatpak, &library] {
+        assert!(
+            found["steamLibraries"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(searched))
+        );
+    }
+    let warnings = found["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0]
+            .as_str()
+            .unwrap()
+            .contains(flatpak.to_str().unwrap())
+    );
+
+    let output = run(&["--game-dir", f.game.to_str().unwrap()]);
+    assert!(output.status.success());
+    let found: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(found["game"], json!(f.game));
+    assert_eq!(found["candidates"].as_array().unwrap().len(), 3);
+
+    let ambiguous = Command::new(env!("CARGO_BIN_EXE_luabuddy"))
+        .arg("verify")
+        .env("HOME", &home)
+        .env_remove("PZ_GAME_DIR")
+        .output()
+        .unwrap();
+    assert_eq!(ambiguous.status.code(), Some(2));
+    let message = String::from_utf8_lossy(&ambiguous.stderr).into_owned();
+    for candidate in [&native, &flatpak, &library] {
+        assert!(message.contains(candidate.to_str().unwrap()), "{message}");
+    }
 }
 
 #[test]
