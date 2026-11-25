@@ -1406,6 +1406,13 @@ fn records_without_a_base_keep_working() {
 fn windows_records_with_a_base_digest_follow_a_steam_update() {
     let f = Fixture::new();
     f.install();
+    let mut edited = f.site();
+    edited["personal"] = json!("mine");
+    fs::write(
+        f.game.join("ProjectZomboid64.site.json"),
+        serde_json::to_vec(&edited).unwrap(),
+    )
+    .unwrap();
     let base = f.game.join("ProjectZomboid64.json");
     let original: Value = serde_json::from_slice(&fs::read(&base).unwrap()).unwrap();
     let mut digested = serde_json::to_vec_pretty(&original).unwrap();
@@ -1423,13 +1430,14 @@ fn windows_records_with_a_base_digest_follow_a_steam_update() {
     )
     .unwrap();
     assert_eq!(f.success("verify", &[])["ok"], true);
+    // Reinstalling before Steam's update is what records the base itself.
+    f.install();
     fs::write(&base, FRESH_BASE).unwrap();
     assert_eq!(f.command("verify", &[]).status.code(), Some(1));
     f.install();
     assert_eq!(f.site()["mainClass"], "updated");
+    assert_eq!(f.site()["personal"], "mine");
     assert_eq!(f.success("verify", &[])["ok"], true);
-    f.success("uninstall", &[]);
-    assert!(!f.game.join("ProjectZomboid64.site.json").exists());
 }
 
 #[test]

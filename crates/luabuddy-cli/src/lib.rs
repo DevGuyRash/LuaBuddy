@@ -858,18 +858,24 @@ fn split_integration(game: &Path, mut config: Value) -> (Value, Vec<String>) {
     (config, owned)
 }
 
-/// The base launcher settings an unedited override was built from, when known.
-fn recorded_base(record: &InstallRecord, clean: &Value) -> Result<Option<Value>> {
+/// The base launcher settings the override was built from, when known. A
+/// digest from an older record identifies them among the candidates at hand.
+fn recorded_base(
+    record: &InstallRecord,
+    clean: &Value,
+    base: Option<&Value>,
+) -> Result<Option<Value>> {
     if let Some(data) = &record.base_bytes {
         return serde_json::from_slice(data)
             .map(Some)
             .map_err(|e| invalid(format!("Invalid recorded base launcher: {e}")));
     }
-    let matches = match &record.windows_base_digest {
-        Some(digest) => *digest == sha256(&json_bytes(clean)?),
-        None => false,
-    };
-    Ok(matches.then(|| clean.clone()))
+    for candidate in base.into_iter().chain([clean]) {
+        if record.windows_base_digest.as_ref() == Some(&sha256(&json_bytes(candidate)?)) {
+            return Ok(Some(candidate.clone()));
+        }
+    }
+    Ok(None)
 }
 
 /// The settings to build on, without LuaBuddy's arguments, and whether later
@@ -891,7 +897,7 @@ fn launcher_source(
     if record.original_site.is_some() {
         return Ok((clean, true));
     }
-    match (recorded_base(record, &clean)?, base) {
+    match (recorded_base(record, &clean, base)?, base) {
         (Some(was), Some(now)) => Ok((rebase(clean, &was, now), true)),
         (_, now) => {
             let unedited = now == Some(&clean);
@@ -2095,7 +2101,7 @@ pub fn uninstall(game: &Path) -> Result<Value> {
                 }
                 _ if base_config.as_ref() == Some(&source)
                     || base_config.is_none()
-                        && recorded_base(&record, &source)?.as_ref() == Some(&source) =>
+                        && recorded_base(&record, &source, None)?.as_ref() == Some(&source) =>
                 {
                     None
                 }
