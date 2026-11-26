@@ -21,7 +21,7 @@ The archive contains a folder named `LuaBuddy-` followed by a package identifier
 2. Check the game folder shown in setup. If discovery needs help, choose the folder containing `projectzomboid.jar` and `ProjectZomboid64`, or its enclosing `ProjectZomboid` folder.
 3. Choose **Install / update** and read the result.
 4. Close setup and launch Project Zomboid normally through Steam.
-5. Open **Options > Mods > LuaBuddy > Manage mods**.
+5. Choose **LUABUDDY** in the game's main menu.
 
 Setup verifies the adjacent package before installation. Keep its executable, native library, manifests, profiles, and licenses together. Do not move `luabuddy` out of the extracted folder. A failed package check is an error to resolve before installation, not a successful activation.
 
@@ -31,15 +31,15 @@ The prebuilt package includes its own Rust loader and patch engine. No other mod
 
 ## Choose a mod
 
-Install the upstream mod and its actual dependencies. Search **Installed** in LuaBuddy's manager. Inspect its description, dependency information, and observed states before selecting an action.
+Install the upstream mod and its actual dependencies. Open LuaBuddy and type part of the mod's name. Select it to see its state and what LuaBuddy can do with it.
 
-- To load eligible client/shared Lua during a multiplayer session, use **This session > Enable late**, then **Load enabled**. Read the result for loaded, failed, reconnect, or restart instructions.
-- To use the normal startup lifecycle, use **Next launch > Startup enable**, then restart the game.
-- To reload, use **Reload a profile** and search the installed list or type an ID with suggestions. Reload requires an explicit cleanup contract. Otherwise reconnect.
+- In the menu, choose **Turn on**; it loads whenever you join a server. On a server, choose **Load now** to load it into the current game.
+- When its details say it has to start with the game, choose **Start with the game**, then restart.
+- The button under a mod's details is the action its state calls for, such as **Try again** or **Reload**. Right-click it, or choose **More...**, for every other action that applies to it.
 
-Apply or discard pending Options edits first. Disabling a selection does not hot-unload running code. Late loading cannot supply missing server code, bypass server policy, or register every native asset. Bundled profiles are optional integrations, and their upstream mods are not included.
+Apply or cancel pending Options edits first. Turning a mod off does not unload running code; that ends when you reconnect. Late loading cannot supply missing server code, bypass server policy, or register every native asset. Bundled profiles are optional integrations, and their upstream mods are not included.
 
-Use **Help & guides** for full in-game workflows. The [workflow reference](https://github.com/DevGuyRash/LuaBuddy/blob/main/docs/workflows.md) covers local mods, one-launch testing, downloads, and troubleshooting.
+The [workflow reference](https://github.com/DevGuyRash/LuaBuddy/blob/main/docs/workflows.md) covers local mods, one-launch testing, downloads, and troubleshooting.
 
 ## Update the native runtime
 

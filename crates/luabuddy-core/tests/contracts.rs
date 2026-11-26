@@ -1,9 +1,6 @@
 use luabuddy_core::lifecycle::{
     Candidate, CleanupDecision, CleanupOutcome, GenerationState, Operation, RequestContext, Session,
 };
-use luabuddy_core::management::{
-    ActivationState, DownloadState, ManagedMod, Observation, PendingAction,
-};
 use luabuddy_core::profile::parse_properties;
 use luabuddy_core::source::{
     Generation, Glob, ModuleKey, ModuleRegistry, Owner, Require, Source, scan_sources,
@@ -572,63 +569,6 @@ fn lifecycle_rejects_pending_edits_retired_environment_reentrancy_and_other_thre
 }
 
 #[test]
-fn management_subscription_download_activation_and_disable_have_distinct_verified_states() {
-    let mut state = ManagedMod {
-        id: id("A"),
-        workshop: Some(10),
-        download: DownloadState::Unsubscribed,
-        activation: ActivationState::Disabled,
-        requires: BTreeSet::new(),
-        pending: None,
-    };
-    let available = BTreeSet::new();
-    state.request(PendingAction::Subscribe, &available).unwrap();
-    state.request(PendingAction::Subscribe, &available).unwrap();
-    assert_eq!(state.download, DownloadState::Unsubscribed);
-    assert!(
-        state
-            .observe(Observation::LoadedVerified { generation: 1 })
-            .is_err()
-    );
-    state.observe(Observation::SubscriptionVerified).unwrap();
-    assert_eq!(state.download, DownloadState::Subscribed);
-    state.request(PendingAction::Download, &available).unwrap();
-    state
-        .observe(Observation::DownloadProgress {
-            downloaded: 2,
-            total: Some(10),
-        })
-        .unwrap();
-    assert!(matches!(
-        state.download,
-        DownloadState::Downloading { downloaded: 2, .. }
-    ));
-    assert!(
-        state
-            .observe(Observation::DownloadProgress {
-                downloaded: 11,
-                total: Some(10)
-            })
-            .is_err()
-    );
-    state.observe(Observation::InstallationVerified).unwrap();
-    assert_eq!(state.download, DownloadState::Installed);
-    state.request(PendingAction::Enable, &available).unwrap();
-    state.observe(Observation::EnabledVerified).unwrap();
-    state.request(PendingAction::Load, &available).unwrap();
-    state
-        .observe(Observation::LoadedVerified { generation: 3 })
-        .unwrap();
-    assert_eq!(state.activation, ActivationState::Loaded { generation: 3 });
-    state.request(PendingAction::Disable, &available).unwrap();
-    state.observe(Observation::DisabledVerified).unwrap();
-    assert!(matches!(
-        state.activation,
-        ActivationState::ReconnectRequired { .. }
-    ));
-}
-
-#[test]
 fn selection_edits_preserve_properties_and_existing_sources() {
     use luabuddy_core::selection::{self, Lifetime};
     let root = Directory::new();
@@ -871,4 +811,64 @@ fn one_launch_refuses_symlink_registrations_without_following_them() {
     assert_eq!(selection::skipped(&root.0).unwrap().len(), 1);
     assert_eq!(fs::read_to_string(&original).unwrap(), "id=Original\n");
     assert!(pending.join("Original.properties").is_symlink());
+}
+
+#[test]
+fn toggling_a_profile_keeps_its_other_lines_and_does_not_grow() {
+    use luabuddy_core::profile::with_enabled;
+    let original = "# chosen by hand\nid=Example\nreplay=OnGameStart\n";
+    let off = with_enabled(original, false);
+    assert_eq!(off, format!("{original}enabled=false\n"));
+    let on = with_enabled(&off, true);
+    assert_eq!(on, original);
+    let mut text = original.to_owned();
+    for _ in 0..20 {
+        text = with_enabled(&with_enabled(&text, false), true);
+    }
+    assert_eq!(text, original);
+    // A continued line that merely mentions the key is not removed.
+    let continued = "id=Example\nexclude=a.lua;\\\nenabled=false\n";
+    let edited = with_enabled(continued, false);
+    assert!(edited.starts_with(continued));
+    assert!(!Profile::parse("x", &edited).unwrap().enabled);
+}
+
+#[test]
+fn one_unreadable_profile_does_not_hide_the_others() {
+    let directory = std::env::temp_dir().join(format!("luabuddy-each-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("A.properties"), "id=A\n").unwrap();
+    fs::write(directory.join("Bad.properties"), "id=Bad\nenabeld=true\n").unwrap();
+    fs::write(directory.join("Copy.properties"), "id=A\n").unwrap();
+    fs::write(directory.join("C.properties"), "id=C\n").unwrap();
+    let (profiles, errors) = luabuddy_core::profile::read_each_profile(&directory).unwrap();
+    assert_eq!(
+        profiles
+            .iter()
+            .map(|profile| profile.id.as_str())
+            .collect::<Vec<_>>(),
+        ["A", "C"]
+    );
+    assert_eq!(errors.len(), 2);
+    assert!(errors.iter().any(|error| error.message.contains("enabeld")));
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("Duplicate profile for A"))
+    );
+    assert!(read_profiles(&directory).is_err());
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn source_folders_match_without_regard_to_case() {
+    let root = std::env::temp_dir().join(format!("luabuddy-case-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("Media/LUA/Shared/Sub")).unwrap();
+    fs::write(root.join("Media/LUA/Shared/Sub/Thing.lua"), "return 1").unwrap();
+    let profile = Profile::parse(root.join("p.properties"), "id=Case\n").unwrap();
+    let sources = scan_sources(&profile, std::slice::from_ref(&root), &BTreeSet::new()).unwrap();
+    assert_eq!(sources[0].name, "shared/Sub/Thing.lua");
+    fs::remove_dir_all(&root).unwrap();
 }

@@ -58,12 +58,23 @@ impl Jvmti {
     }
 
     pub(crate) fn enable_proof_capabilities(&self) -> Result<(), String> {
-        let caps = [
-            (1_u32 << 3) | (1_u32 << 14) | (1_u32 << 19) | (1_u32 << 26),
-            1_u32 << 1,
-            0,
-            0,
-        ];
+        self.enable_required_capabilities()?;
+        self.enable_breakpoint_capabilities()
+    }
+
+    /// Reading bytecode and transforming a class as it loads.
+    pub(crate) fn enable_required_capabilities(&self) -> Result<(), String> {
+        self.add_capabilities([(1_u32 << 3) | (1_u32 << 26), 0, 0, 0])
+    }
+
+    /// Breakpoints, local variables and early return. The JVM grants breakpoints
+    /// to one agent only, so another agent such as a debugger can hold them.
+    pub(crate) fn enable_breakpoint_capabilities(&self) -> Result<(), String> {
+        self.add_capabilities([(1_u32 << 14) | (1_u32 << 19), 1_u32 << 1, 0, 0])?;
+        self.event(62, true)
+    }
+
+    fn add_capabilities(&self, caps: [u32; 4]) -> Result<(), String> {
         // SAFETY: JVMTI slot 142 is AddCapabilities. The four words match the
         // JVMTI capability bit layout on the enabled x64 ABIs. The Windows
         // fixture checks the named bitfields against the actual JDK/MSVC headers.
@@ -112,7 +123,6 @@ impl Jvmti {
             "SetEventCallbacks",
         )?;
         self.event(50, true)?;
-        self.event(62, true)?;
         if load.is_some() {
             self.event(54, true)?;
         }

@@ -560,16 +560,16 @@ fn configuration_preflight_refusal(env: &mut JNIEnv<'_>, fixture: &Fixture) -> R
         || !reason.contains("UnsupportedOption.properties")
     {
         return Err(format!(
-            "Unsupported profile option did not refuse before mutation: {ok} {reason}"
+            "An unreadable profile was not reported: {ok} {reason}"
         ));
     }
     trigger(&mut context, "OnTick")?;
     lua(
         &mut context,
-        "assert(LuaBuddy == heldConfigurationNamespace); assert(LuaBuddy.mods.ConfigurationResident == 'loaded' and configurationResidentRuns == 1 and configurationResidentTicks == 2); assert(not unsupportedOptionRuns and not configurationNewRuns and LuaBuddy.mods.ConfigurationNew == nil)",
+        "assert(LuaBuddy == heldConfigurationNamespace); assert(LuaBuddy.mods.ConfigurationResident == 'loaded' and configurationResidentRuns == 1 and configurationResidentTicks == 2); assert(not unsupportedOptionRuns and LuaBuddy.mods.UnsupportedOption == nil); assert(LuaBuddy.mods.ConfigurationNew == 'loaded' and configurationNewRuns == 1)",
     )?;
     if report(fixture)?["mods"]["ConfigurationResident"] != loaded_record {
-        return Err("Invalid profile changed an unrelated loaded generation's diagnostics".into());
+        return Err("An unreadable profile changed an unrelated loaded generation's diagnostics".into());
     }
     fixture.snapshot("configuration-preflight-refused")?;
     fixture.profile("UnsupportedOption", "")?;
@@ -585,7 +585,7 @@ fn configuration_preflight_refusal(env: &mut JNIEnv<'_>, fixture: &Fixture) -> R
         "assert(LuaBuddy == heldConfigurationNamespace); assert(LuaBuddy.mods.ConfigurationResident == 'loaded' and configurationResidentRuns == 1 and configurationResidentTicks == 3); assert(LuaBuddy.mods.UnsupportedOption == 'loaded' and unsupportedOptionRuns == 1); assert(LuaBuddy.mods.ConfigurationNew == 'loaded' and configurationNewRuns == 1)",
     )?;
     println!(
-        "PASS unsupported profile preflight, preserved unrelated generation and callbacks, and corrected pending loads"
+        "PASS unreadable profile reported alone, unrelated profiles loaded and preserved, and the corrected profile loaded"
     );
     fixture.snapshot("configuration-preflight-recovered")?;
     Ok(())

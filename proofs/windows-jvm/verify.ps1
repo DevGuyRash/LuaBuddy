@@ -73,7 +73,7 @@ header-layout.exe
     $argsJvm = @('-Xverify:all','-Xcheck:jni',"-Duser.home=$root",'-cp',$classes,"-agentpath:$dll",'-XshowSettings:properties','-version')
     $missing = Invoke-Checked $java $argsJvm
     $platform = @('(?m)^\s*java\.specification\.version = 25\s*$','(?m)^\s*os\.arch = (amd64|x86_64)\s*$','(?m)^\s*os\.name = Windows','(?m)^\s*sun\.arch\.data\.model = 64\s*$')
-    Assert-Markers $missing ($platform + @('\[LuaBuddy\] startup inactive:', 'NoClassDefFoundError: zombie/Lua/Event'))
+    Assert-Markers $missing ($platform + @('\[LuaBuddy\] agent\.startup: Inactive:', 'NoClassDefFoundError: zombie/Lua/Event'))
 
     # Inert input, not an implementation of any game method. Its presence proves
     # ClassFileLoadHook reached the agent and refused the unrecognized layout.
@@ -81,9 +81,9 @@ header-layout.exe
     'package zombie.Lua; public final class Event {}' | Set-Content -LiteralPath $source -Encoding ascii
     [void](Invoke-Checked $javac @('-proc:none','-d',$classes,$source))
     $unknown = Invoke-Checked $java $argsJvm
-    Assert-Markers $unknown ($platform + @('\[LuaBuddy native bridge\] rejected: host bridge target method not found','\[LuaBuddy\] startup inactive: native event dispatcher was not registered'))
+    Assert-Markers $unknown ($platform + @('\[LuaBuddy native bridge\] rejected: host bridge target method not found','\[LuaBuddy\] agent\.startup: Inactive: native event dispatcher was not registered'))
     foreach ($log in @($missing,$unknown)) {
-        if ($log -match 'WARNING in native method|FATAL ERROR in native method|JNI DETECTED ERROR|Rust runtime waiting for game lifecycle|panic contained|Rust runtime inactive:') {
+        if ($log -match 'WARNING in native method|FATAL ERROR in native method|JNI DETECTED ERROR|\[LuaBuddy\] agent\.started:|panic contained|Rust runtime inactive:') {
             throw "Unexpected JVM or product state: $log"
         }
     }

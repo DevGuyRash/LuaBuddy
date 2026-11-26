@@ -296,6 +296,15 @@ impl Profile {
 }
 
 pub fn read_profiles(directory: &Path) -> Result<Vec<Profile>, CoreError> {
+    let (profiles, errors) = read_each_profile(directory)?;
+    match errors.into_iter().next() {
+        Some(error) => Err(error),
+        None => Ok(profiles),
+    }
+}
+
+/// Reads every profile that can be read. One bad file doesn't hide the others.
+pub fn read_each_profile(directory: &Path) -> Result<(Vec<Profile>, Vec<CoreError>), CoreError> {
     let mut files = fs::read_dir(directory)
         .map_err(|e| CoreError::new("profile-read", e.to_string()).at(directory))?
         .map(|entry| entry.map(|entry| entry.path()))
@@ -305,18 +314,61 @@ pub fn read_profiles(directory: &Path) -> Result<Vec<Profile>, CoreError> {
     files.sort();
     let mut ids = BTreeSet::new();
     let mut profiles = Vec::new();
+    let mut errors = Vec::new();
     for file in files {
-        let text = fs::read_to_string(&file)
-            .map_err(|e| CoreError::new("profile-read", e.to_string()).at(&file))?;
-        let profile = Profile::parse(&file, &text)?;
-        if !ids.insert(profile.id.clone()) {
-            return Err(
+        let profile = fs::read_to_string(&file)
+            .map_err(|e| CoreError::new("profile-read", e.to_string()).at(&file))
+            .and_then(|text| Profile::parse(&file, &text));
+        match profile {
+            Ok(profile) if ids.insert(profile.id.clone()) => profiles.push(profile),
+            Ok(profile) => errors.push(
                 CoreError::new("profile", format!("Duplicate profile for {}", profile.id)).at(file),
-            );
+            ),
+            Err(error) => errors.push(error),
         }
-        profiles.push(profile);
     }
-    Ok(profiles)
+    Ok((profiles, errors))
+}
+
+/// Returns `text` with its effective `enabled` value changed and every other
+/// line kept byte for byte. Earlier plain `enabled` lines are removed, so
+/// toggling a profile repeatedly does not grow the file.
+pub fn with_enabled(text: &str, enabled: bool) -> String {
+    let mut result = String::with_capacity(text.len() + 16);
+    let mut continued = false;
+    let mut removed = false;
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let ends_open = body.chars().rev().take_while(|ch| *ch == '\\').count() % 2 == 1;
+        let comment = !continued
+            && body
+                .trim_start_matches([' ', '\t', '\u{000c}'])
+                .starts_with(['#', '!']);
+        let standalone = !continued && !comment && !ends_open;
+        let is_enabled = standalone
+            && parse_properties(body)
+                .is_ok_and(|values| values.len() == 1 && values.contains_key("enabled"));
+        if is_enabled {
+            removed = true;
+        } else {
+            result.push_str(line);
+        }
+        continued = !comment && ends_open;
+    }
+    // A true default needs no line, unless an unusual spelling of the key remains.
+    let remaining = Profile::parse("profile", &result).map(|profile| profile.enabled);
+    if remaining.as_ref() == Ok(&enabled) && (removed || result == text) {
+        return result;
+    }
+    if !result.is_empty() && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result.push_str(if enabled {
+        "enabled=true\n"
+    } else {
+        "enabled=false\n"
+    });
+    result
 }
 
 fn split_list(value: &str) -> Vec<String> {

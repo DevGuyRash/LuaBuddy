@@ -454,7 +454,17 @@ fn event_proof(
         "(Ljava/lang/Object;Ljava/lang/Object;)V",
         &[JValue::Object(&events_key), JValue::Object(&events)],
     )?;
-    crate::events::prepare(env, event_handler)?;
+    crate::events::prepare(
+        env,
+        event_handler,
+        &[
+            "LuaBuddyNativeOuter",
+            "LuaBuddyNativeNested",
+            "LuaBuddyNativeQueued",
+            "LuaBuddyNative\0🌙",
+        ],
+        |error| eprintln!("[LuaBuddy native proof] {error}"),
+    )?;
     let math_key = env.new_string("math")?;
     let math = env
         .call_method(

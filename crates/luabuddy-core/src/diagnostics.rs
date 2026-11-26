@@ -34,6 +34,9 @@ pub struct ModDiagnostic {
     pub java_traceback: Option<String>,
     pub source_count: usize,
     pub generation: u64,
+    /// Milliseconds spent in each step of the last attempt to load it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub timings_ms: BTreeMap<String, f64>,
     #[serde(flatten)]
     pub configuration: ProfileDiagnostic,
 }

@@ -138,7 +138,7 @@ impl ItemId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ItemState {
     pub subscribed: bool,
     pub installed: bool,
@@ -407,7 +407,9 @@ impl HostDownload {
                 self.instance.as_obj(),
                 "n_DownloadItem",
                 "(JZ)Z",
-                &[JValue::Long(item.get() as i64), JValue::Bool(0)],
+                // High priority, as the game itself asks for. The native side holds
+                // one slot, so a queued low-priority request would block joining.
+                &[JValue::Long(item.get() as i64), JValue::Bool(1)],
             )
             .and_then(|value| value.z())
             .map_err(host_jni_error);
@@ -671,7 +673,9 @@ impl SteamWorkshop {
             workshop: self.clone(),
             item: intent.item,
             started,
+            timeout,
             deadline,
+            last: None,
             finished: false,
         })
     }
@@ -737,14 +741,15 @@ impl Query {
                 "Workshop query has already completed or been cancelled".into(),
             ));
         }
-        if Instant::now() >= self.deadline {
-            self.cancel()?;
-            return Err(SteamError(
-                "Workshop query timed out. Check the Steam connection and retry".into(),
-            ));
-        }
+        // A finished result counts even when nobody asked for it in time.
         match self.api.call_completed(self.call) {
-            Ok(false) => return Ok(Poll::Pending),
+            Ok(false) if Instant::now() < self.deadline => return Ok(Poll::Pending),
+            Ok(false) => {
+                self.cancel()?;
+                return Err(SteamError(
+                    "Steam didn't answer in time. Check your connection, then try again.".into(),
+                ));
+            }
             Ok(true) => (),
             Err(error) => {
                 self.cancel()?;
@@ -772,16 +777,19 @@ impl Query {
         let handle = self
             .handle
             .ok_or_else(|| SteamError("Workshop query handle was released".into()))?;
-        if response.result != RESULT_OK
-            || response.handle != handle
-            || response.returned > MAX_RESULTS
-            || response.cached > 1
-        {
+        let result = response.result;
+        if result != RESULT_OK {
             self.cancel()?;
             return Err(SteamError(format!(
-                "Workshop query failed with Steam result {} or incompatible response",
-                response.result
+                "Steam couldn't list Workshop items: {}",
+                explain(result)
             )));
+        }
+        if response.handle != handle || response.returned > MAX_RESULTS || response.cached > 1 {
+            self.cancel()?;
+            return Err(SteamError(
+                "Steam's Workshop answer had an unexpected layout, so it was not used.".into(),
+            ));
         }
         let mut items = Vec::with_capacity(response.returned as usize);
         let mut unavailable = Vec::new();
@@ -866,12 +874,10 @@ impl Subscription {
                 "Subscription request has already completed".into(),
             ));
         }
-        if Instant::now() >= self.deadline {
-            self.phase = SubscriptionPhase::Finished;
-            self.release_pending();
-            return Err(SteamError("Subscription result is unconfirmed after timeout. Refresh item state before retrying; Steam may still finish the request".into()));
+        let mut outcome = self.poll_pending();
+        if matches!(&outcome, Ok(Poll::Pending)) && Instant::now() >= self.deadline {
+            outcome = Err(SteamError("Steam didn't confirm the subscription in time. It may still finish; look at the item again before retrying.".into()));
         }
-        let outcome = self.poll_pending();
         if !matches!(&outcome, Ok(Poll::Pending)) {
             self.phase = SubscriptionPhase::Finished;
             self.release_pending();
@@ -894,9 +900,10 @@ impl Subscription {
             // exact callback ID is selected for this request's action.
             unsafe { self.api.call_result(self.call, callback, &mut response) }?;
             if response.result != RESULT_OK || response.item != self.item.get() {
+                let result = response.result;
                 return Err(SteamError(format!(
-                    "Workshop subscription change failed with Steam result {}",
-                    response.result
+                    "Steam didn't change the subscription: {}",
+                    explain(result)
                 )));
             }
             self.phase = SubscriptionPhase::AwaitingState;
@@ -930,7 +937,9 @@ pub struct Download {
     workshop: SteamWorkshop,
     item: ItemId,
     started: Instant,
+    timeout: Duration,
     deadline: Instant,
+    last: Option<(u32, Option<u64>)>,
     finished: bool,
 }
 
@@ -957,7 +966,8 @@ impl Download {
         {
             self.finished = true;
             return Err(SteamError(format!(
-                "Workshop download failed with Steam result {result}"
+                "Steam couldn't download it: {}",
+                explain(result)
             )));
         }
         let progress = self.workshop.download_progress(self.item)?;
@@ -966,9 +976,15 @@ impl Download {
             self.finished = true;
             return Ok(Poll::Ready(progress));
         }
+        // Only a download that stops advancing times out, however large it is.
+        let observed = Some((progress.state.raw, progress.downloaded_bytes));
+        if self.last.is_some() && observed != self.last {
+            self.deadline = deadline(self.timeout)?;
+        }
+        self.last = observed;
         if Instant::now() >= self.deadline {
             self.finished = true;
-            return Err(SteamError("Workshop download remains unconfirmed after timeout. Steam may still be downloading; refresh its progress before retrying".into()));
+            return Err(SteamError("The download stopped advancing. Steam may still continue it; look at the item again before retrying.".into()));
         }
         Ok(Poll::Pending)
     }
@@ -1251,17 +1267,22 @@ impl Api {
             return Ok(QueryItem::Unavailable(unavailable));
         }
         let id = ItemId::new(details.id)?;
-        let title = terminated_utf8(&details.title, "Workshop title")?;
-        let description = terminated_utf8(&details.description, "Workshop description")?;
-        let tags = terminated_utf8(&details.tags, "Workshop tags")?
+        let title = terminated_text(&details.title);
+        let description = terminated_text(&details.description);
+        let tags = terminated_text(&details.tags)
             .split(',')
             .filter(|tag| !tag.is_empty())
             .map(str::to_owned)
             .collect();
         if details.children > MAX_CHILDREN {
-            return Err(SteamError(
-                "Workshop dependency count exceeds the supported safety bound".into(),
-            ));
+            return Ok(QueryItem::Unavailable(UnavailableItem {
+                index,
+                id: Some(id),
+                result: Some(RESULT_OK),
+                consumer_app: Some(PROJECT_ZOMBOID_APP_ID),
+                banned: Some(false),
+                reason: "It lists more required items than can be read.".into(),
+            }));
         }
         let mut children = vec![0_u64; details.children as usize];
         if !children.is_empty() {
@@ -1302,8 +1323,8 @@ impl Api {
             },
             children: children
                 .into_iter()
-                .map(ItemId::new)
-                .collect::<Result<Vec<_>>>()?,
+                .filter_map(|child| ItemId::new(child).ok())
+                .collect(),
             state: self.item_state(id)?,
         }))
     }
@@ -1333,9 +1354,7 @@ fn unavailable_details(
             result: Some(result),
             consumer_app: None,
             banned: None,
-            reason: format!(
-                "Steam returned result {result} for Workshop result {index}; item details are unavailable"
-            ),
+            reason: format!("Steam won't show it: {}", explain(result)),
         }));
     }
     if details.banned > 1 || details.accepted > 1 || details.truncated > 1 {
@@ -1362,6 +1381,36 @@ fn unavailable_details(
         banned: Some(banned),
         reason,
     }))
+}
+
+/// What a Steam result means to the player. The number stays for lookup.
+fn explain(result: i32) -> String {
+    let meaning = match result {
+        3 => "there is no connection to Steam. Check that Steam is online.",
+        8 => "it rejected the request as invalid.",
+        9 => "the item no longer exists.",
+        10 => "Steam is busy. Try again in a moment.",
+        15 => "this account has no access. The item may be private.",
+        16 => "Steam took too long. Try again.",
+        20 => "the Workshop is unavailable right now. Try again later.",
+        21 => "Steam is not logged in.",
+        25 => "a Steam limit was reached.",
+        84 => "too many requests were made. Wait a minute, then try again.",
+        _ => "Steam gave no further reason.",
+    };
+    format!("{meaning} (Steam result {result})")
+}
+
+/// Text that only describes an item. One badly encoded or cut character must
+/// not hide the item, let alone every other result on its page.
+fn terminated_text(bytes: &[u8]) -> String {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end])
+        .trim_end_matches('\u{fffd}')
+        .to_owned()
 }
 
 fn terminated_utf8(bytes: &[u8], field: &str) -> Result<String> {
@@ -1960,7 +2009,7 @@ mod subscription_tests {
             .download(UserIntent::download(item), Duration::from_secs(1))
             .unwrap();
         request.deadline = Instant::now();
-        assert!(request.poll().unwrap_err().0.contains("unconfirmed"));
+        assert!(request.poll().unwrap_err().0.contains("stopped advancing"));
         drop(request);
         assert!(workshop.api.download_outcomes.borrow().is_empty());
         assert!(
@@ -2035,7 +2084,7 @@ mod subscription_tests {
         assert_eq!(request.poll().unwrap(), Poll::Pending);
         assert_eq!(request.deadline, original_deadline);
         request.deadline = Instant::now();
-        assert!(request.poll().unwrap_err().0.contains("unconfirmed"));
+        assert!(request.poll().unwrap_err().0.contains("in time"));
         assert!(request.poll().is_err());
         drop(start(&workshop, true, Duration::from_secs(1)));
         NATIVE.with(|s| {

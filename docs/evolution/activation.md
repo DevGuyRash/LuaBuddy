@@ -15,13 +15,13 @@ The optional `live` property selects a bounded loading policy.
 
 An explicit value in the user's profile takes precedence over catalog metadata. Catalog inheritance never selects or enables another mod. The bundled integrations declare `live=client-shared` because their documented behavior is client and shared Lua restoration. This preserves that scope for already selected legacy profiles without rewriting user files or promising their native components.
 
-The adapter examines known resource directories beneath each native common and version root. It recognizes definitions, maps, animations, animation sets, texture packs, and server Lua. Directory-name matching is case insensitive within those known path segments, including the actual `media/AnimSets` layout on Linux. It does not recursively search unrelated mod directories.
+The adapter examines known resource directories beneath each native common and version root. It recognizes definitions, maps, animation assets, texture packs, clothing, and server Lua, which require native startup under `live=auto`, and sandbox settings, which are only reported as a limitation. Animation folders count only when they hold animation files; mods ship placeholder text files there to silence the game. Directory-name matching is case insensitive within those known path segments, including the actual `media/AnimSets` layout on Linux. It does not recursively search unrelated mod directories.
 
 No resource scan establishes that arbitrary Lua code can load safely. Compilation, dependency ordering, host compatibility, initialization behavior, and cooperative cleanup still apply. Use `live=startup` when a mod requires an earlier lifecycle even if no startup-only directory is present.
 
 ## Native startup preferences
 
-The browser's **Startup enable** and **Startup disable** buttons operate on `ActiveMods.getById("default")`. They do not modify `currentGame`, the native loaded-mod snapshot, the server's active IDs, checksums, or a save's mod list. A running mod remains active until the native lifecycle ends.
+The manager's **Start with the game** and **Don't start with the game** actions operate on `ActiveMods.getById("default")`. They do not modify `currentGame`, the native loaded-mod snapshot, the server's active IDs, checksums, or a save's mod list. A running mod remains active until the native lifecycle ends.
 
 Enabling a startup selection resolves the game's actual required dependencies and rejects missing mods, incompatible versions, and cycles. Disabling a required dependency is refused while a selected native dependent remains. Unrelated default mod IDs and native map order are preserved.
 

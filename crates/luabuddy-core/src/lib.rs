@@ -1,8 +1,8 @@
 //! Host-independent configuration, resolution, and lifecycle policy for LuaBuddy.
 
 pub mod diagnostics;
+pub mod journal;
 pub mod lifecycle;
-pub mod management;
 pub mod profile;
 pub mod resolve;
 pub mod selection;

@@ -82,7 +82,12 @@ impl<'a, 'vm> Context<'a, 'vm> {
                         .and_then(|v| v.l())
                         && let Ok(text) = self.env.get_string(&JString::from(text))
                     {
-                        detail.push_str(&format!("\nJava cause: {}", text.to_string_lossy()));
+                        // The cause says what happened; that something was thrown does not.
+                        let text = text.to_string_lossy();
+                        detail = text
+                            .strip_prefix("se.krka.kahlua.vm.KahluaException: ")
+                            .unwrap_or(&text)
+                            .to_owned();
                     }
                     let _ = self.env.exception_clear();
                 }
@@ -213,6 +218,9 @@ impl<'a, 'vm> Context<'a, 'vm> {
     }
 
     pub fn get(&mut self, table: &Value, name: &str) -> Result<Value> {
+        if table.is_nil() {
+            return Err(format!("Tried to read {name} of a missing Lua value"));
+        }
         self.jni(|env| {
             let key = env.new_string(name)?;
             let value = env

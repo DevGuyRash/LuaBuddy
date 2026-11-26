@@ -9,11 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub(crate) type Handler =
     for<'a> fn(&mut JNIEnv<'a>, &JObject<'a>, i32, u64) -> Result<i32, String>;
 
-#[derive(Clone)]
 struct Registration {
-    id: usize,
     callable: WeakRef,
-    owner: String,
+    owner: &'static str,
     generation: u64,
     context: u64,
     handler: Handler,
@@ -22,7 +20,6 @@ struct Registration {
 static METHOD: AtomicUsize = AtomicUsize::new(0);
 static NATIVE_READY: AtomicBool = AtomicBool::new(false);
 static REGISTRY: Mutex<Vec<Registration>> = Mutex::new(Vec::new());
-static NEXT: AtomicUsize = AtomicUsize::new(1);
 
 pub(crate) fn prepare(env: &mut JNIEnv<'_>, jvmti: &Jvmti) -> Result<(), String> {
     let class = env
@@ -46,7 +43,7 @@ pub(crate) fn prepare(env: &mut JNIEnv<'_>, jvmti: &Jvmti) -> Result<(), String>
 
 pub(crate) fn create(
     env: &mut JNIEnv<'_>,
-    owner: &str,
+    owner: &'static str,
     generation: u64,
     context: u64,
     handler: Handler,
@@ -67,9 +64,8 @@ pub(crate) fn create(
         .lock()
         .map_err(|_| "native callable registry poisoned")?
         .push(Registration {
-            id: NEXT.fetch_add(1, Ordering::Relaxed),
             callable: weak,
-            owner: owner.to_owned(),
+            owner,
             generation,
             context,
             handler,
@@ -87,48 +83,50 @@ pub(crate) fn invoke<'a>(
     frame: &JObject<'a>,
     arguments: i32,
 ) -> Result<i32, String> {
-    let registrations = REGISTRY
-        .lock()
-        .map_err(|_| "native callable registry poisoned")?
-        .clone();
-    for registration in registrations {
-        if registration
-            .callable
-            .is_same_object(env, receiver)
-            .map_err(|e| e.to_string())?
-        {
-            let result = (registration.handler)(env, frame, arguments, registration.context)?;
-            if result < 0 {
-                return Err("native callable returned negative result count".to_owned());
+    let found = {
+        let registry = REGISTRY
+            .lock()
+            .map_err(|_| "native callable registry poisoned")?;
+        let mut found = None;
+        // Newest first: an interface's callbacks outnumber and follow the rest.
+        for registration in registry.iter().rev() {
+            if registration
+                .callable
+                .is_same_object(env, receiver)
+                .map_err(|e| e.to_string())?
+            {
+                found = Some((registration.handler, registration.context));
+                break;
             }
-            return Ok(result);
         }
+        found
+    };
+    // The lock is released before the handler, which may create or call others.
+    let Some((handler, context)) = found else {
+        return Ok(0);
+    };
+    let result = handler(env, frame, arguments, context)?;
+    if result < 0 {
+        return Err("native callable returned negative result count".to_owned());
     }
-    Ok(0)
+    Ok(result)
 }
 
 fn sweep(env: &JNIEnv<'_>) -> Result<(), String> {
-    let registrations = REGISTRY
+    let mut registry = REGISTRY
         .lock()
-        .map_err(|_| "native callable registry poisoned")?
-        .clone();
-    let mut collected = std::collections::BTreeSet::new();
-    for registration in registrations {
-        if registration
-            .callable
-            .is_garbage_collected(env)
-            .map_err(|e| e.to_string())?
-        {
-            collected.insert(registration.id);
-        }
-    }
-    if !collected.is_empty() {
-        REGISTRY
-            .lock()
-            .map_err(|_| "native callable registry poisoned")?
-            .retain(|entry| !collected.contains(&entry.id));
-    }
-    Ok(())
+        .map_err(|_| "native callable registry poisoned")?;
+    let mut failure = None;
+    registry.retain(
+        |registration| match registration.callable.is_garbage_collected(env) {
+            Ok(collected) => !collected,
+            Err(error) => {
+                failure = Some(error.to_string());
+                true
+            }
+        },
+    );
+    failure.map_or(Ok(()), Err)
 }
 
 pub(crate) fn unregister(owner: &str, generation: u64) -> Result<usize, String> {

@@ -1,4 +1,8 @@
-use crate::lua::{Context, Result, Value};
+use crate::{
+    game, log,
+    lua::{Context, Result, Value},
+    runtime::{self, Deferred},
+};
 
 pub const IDS: &[&str] = &[
     "AllInfo",
@@ -19,6 +23,18 @@ pub const IDS: &[&str] = &[
     "WalkLootForage",
 ];
 
+/// Formerly hooks that only restored saved settings.
+const SETTINGS_ONLY: &[&str] = &[
+    "KADropnLoot",
+    "LootSenseQuickStack",
+    "LootSenseStorage",
+    "LootTrackerB42",
+    "NutritionHelper",
+    "P4AlarmSyndrome",
+    "TrueLineOfSight",
+    "WalkLootForage",
+];
+
 pub fn after(
     context: &mut Context<'_, '_>,
     id: &str,
@@ -27,11 +43,6 @@ pub fn after(
 ) -> Result<()> {
     if !IDS.contains(&id) {
         return Err(format!("Unknown Rust profile hook {id}"));
-    }
-    if id != "AutoAll" && id != "RetroDashboard" {
-        let api = context.global("PZAPI")?;
-        let options = context.get(&api, "ModOptions")?;
-        context.invoke(&options, "load", &[])?;
     }
     match id {
         "AutoAll" => {
@@ -42,7 +53,13 @@ pub fn after(
             for field in ["coreLoaded", "mechLoaded", "mechUIHooked"] {
                 let value = context.get(&auto, field)?;
                 if !context.truth(&value)? {
-                    return Err(format!("AutoAll Mechanics did not initialize: {field}"));
+                    // An upstream rename must not turn a working mod into a failed one.
+                    log::warn(
+                        "mod.unexpected",
+                        format!("AutoAll did not report {field}; its mechanics may be incomplete"),
+                    )
+                    .about(&owner.id)
+                    .write();
                 }
             }
         }
@@ -53,7 +70,12 @@ pub fn after(
                 || context.jni(|env| env.call_method(providers.object(), "len", "()I", &[])?.i())?
                     <= 0
             {
-                return Err("AllInfo providers did not initialize".into());
+                log::warn(
+                    "mod.unexpected",
+                    "AllInfo reported no info providers; its tooltips may be empty",
+                )
+                .about(&owner.id)
+                .write();
             }
             if runtime {
                 let options = context.global("MainOptions")?;
@@ -106,7 +128,21 @@ pub fn after(
         "NeatUI_Inventory" => inventory(context, runtime)?,
         "NeatUI_Mechanics" => mechanics(context)?,
         "RetroDashboard" => dashboard(context)?,
-        "QuickBuildMenu" if !runtime => crate::runtime::schedule_favorites(context, owner)?,
+        "QuickBuildMenu" if !runtime => runtime::after_startup(
+            owner,
+            Deferred::new(|context| {
+                let Some((player, keys)) = favorites(context)? else {
+                    return Ok(None);
+                };
+                Ok(Some(Deferred::new(move |context| {
+                    restore_favorites(context, &player, &keys)?;
+                    Ok(None)
+                })))
+            }),
+        )?,
+        // Saved settings are restored for every mod that registers some, so these
+        // need nothing more. Existing profiles still name them.
+        _ if SETTINGS_ONLY.contains(&id) => (),
         _ => (),
     }
     Ok(())
@@ -243,4 +279,94 @@ fn dashboard(context: &mut Context<'_, '_>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Quick Build Menu's startup cleanup clears native handcraft favorites, so they
+/// are remembered before it runs and put back after.
+fn favorites(context: &mut Context<'_, '_>) -> Result<Option<(Value, Vec<String>)>> {
+    let player = first(context.call_global("getPlayer", &[])?)?;
+    if player.is_nil() {
+        return Ok(None);
+    }
+    let data = mod_data(context, &player)?;
+    let recipes = context.jni(|env| {
+        let manager = env
+            .get_static_field(
+                "zombie/scripting/ScriptManager",
+                "instance",
+                "Lzombie/scripting/ScriptManager;",
+            )?
+            .l()?;
+        let value = env
+            .call_method(
+                manager,
+                "getAllCraftRecipes",
+                "()Ljava/util/ArrayList;",
+                &[],
+            )?
+            .l()?;
+        env.new_global_ref(value).map(|v| Value(Some(v)))
+    })?;
+    let mut favorites = Vec::new();
+    for recipe in game::java_list(context, &recipes)? {
+        let key = context.jni(|env| {
+            let key = env
+                .call_static_method(
+                    "zombie/entity/components/crafting/BaseCraftingLogic",
+                    "getFavouriteModDataString",
+                    "(Lzombie/scripting/entity/components/crafting/CraftRecipe;)Ljava/lang/String;",
+                    &[jni::objects::JValue::Object(recipe.object())],
+                )?
+                .l()?;
+            env.new_global_ref(key).map(|v| Value(Some(v)))
+        })?;
+        let name = context.text(&key)?;
+        let value = context.get(&data, &name)?;
+        let exactly_true = context.jni(|env| {
+            if value.is_nil() || !env.is_instance_of(value.object(), "java/lang/Boolean")? {
+                return Ok(false);
+            }
+            env.call_method(value.object(), "booleanValue", "()Z", &[])?
+                .z()
+        })?;
+        if exactly_true {
+            favorites.push(name);
+        }
+    }
+    Ok((!favorites.is_empty()).then_some((player, favorites)))
+}
+
+fn restore_favorites(context: &mut Context<'_, '_>, player: &Value, keys: &[String]) -> Result<()> {
+    let data = mod_data(context, player)?;
+    let mut restored = 0;
+    for key in keys {
+        if context.get(&data, key)?.is_nil() {
+            let yes = context.boolean(true)?;
+            context.set(&data, key, &yes)?;
+            restored += 1;
+        }
+    }
+    if restored > 0 {
+        context.jni(|env| env.call_method(player.object(), "transmitModData", "()V", &[]))?;
+        log::info(
+            "favorites.restored",
+            format!("Put back {restored} handcraft favorites after startup cleanup"),
+        )
+        .write();
+    }
+    Ok(())
+}
+
+fn mod_data(context: &mut Context<'_, '_>, player: &Value) -> Result<Value> {
+    context.jni(|env| {
+        let value = env
+            .call_method(
+                player.object(),
+                "getModData",
+                "()Lse/krka/kahlua/vm/KahluaTable;",
+                &[],
+            )?
+            .l()?;
+        env.new_global_ref(value).map(|v| Value(Some(v)))
+    })
 }
