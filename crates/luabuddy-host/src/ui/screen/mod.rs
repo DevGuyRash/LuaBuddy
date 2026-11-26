@@ -543,7 +543,7 @@ impl Screen {
         self.dirty = false;
         self.shown_at = Instant::now();
         let place = self.live.world.place;
-        let (mut running, mut attention, mut waiting) = (0, 0, 0);
+        let (mut running, mut attention, mut waiting, mut ready) = (0, 0, 0, 0);
         let mut mods = Vec::new();
         let listed = self.listed();
         for id in &listed {
@@ -551,9 +551,16 @@ impl Screen {
             match view.section(place) {
                 Section::Running => running += 1,
                 Section::Attention => attention += 1,
-                // Ready is what loading would take now; off a server nothing is.
-                _ if view.state(place) == State::Ready => waiting += 1,
-                _ => (),
+                // Waiting counts toward the summary; Ready is also what
+                // loading would take now, which only happens on a server.
+                _ => match view.state(place) {
+                    State::Ready => {
+                        waiting += 1;
+                        ready += 1;
+                    }
+                    State::Waiting => waiting += 1,
+                    _ => (),
+                },
             }
             mods.push(view);
         }
@@ -593,7 +600,7 @@ impl Screen {
             .filter(|key| self.list.index_of(key).is_some())
             .cloned();
         self.totals = Totals {
-            waiting,
+            waiting: ready,
             restart: usize::from(self.live.startup != self.startup_at_open),
             ..extension_totals()
         };
@@ -1018,22 +1025,35 @@ impl Screen {
         self.close_menu(context)?;
         match name {
             "back" => self.close(context),
-            "primary" => match (self.list.selected.clone(), self.primary.clone()) {
-                (Some(Key::Header(section)), _) => self.toggle(context, section),
-                (_, Some(node)) => self.run_node(context, node),
-                _ => Ok(()),
-            },
+            "primary" => {
+                // Steam can change an item between frames. Show what holds now,
+                // and act only if the button still means what the player saw.
+                let seen = self.primary.clone();
+                self.refresh(context)?;
+                match (self.list.selected.clone(), self.primary.clone()) {
+                    (Some(Key::Header(section)), _) => self.toggle(context, section),
+                    (_, Some(node)) if Some(&node) == seen.as_ref() => self.run_node(context, node),
+                    _ => Ok(()),
+                }
+            }
             "footer" => match self.footer.clone() {
                 Some(node) => self.run_node(context, node),
                 None => Ok(()),
             },
             "more" => {
+                self.refresh(context)?;
                 let nodes = self.other_actions();
                 let at = self.above(context, &self.buttons.more.clone())?;
                 self.show_menu(context, nodes, at)
             }
             "tools" => {
-                let nodes = model::tools_menu(self.totals, self.live.world);
+                // Patches can change state while the window sits idle.
+                let totals = Totals {
+                    waiting: self.totals.waiting,
+                    restart: self.totals.restart,
+                    ..extension_totals()
+                };
+                let nodes = model::tools_menu(totals, self.live.world);
                 let button = self.buttons.tools.clone();
                 let x = kit::ask_number(context, &button, "getAbsoluteX")?;
                 let y = kit::ask_number(context, &button, "getAbsoluteY")?;

@@ -146,7 +146,12 @@ fn usable_id(id: String) -> Option<ModId> {
     }
     ModId::new(id.as_str())
         .inspect_err(|_| {
-            eprintln!("[LuaBuddy] Ignoring a mod ID LuaBuddy can't name: {id:?}");
+            // Read on every refresh, so each one is mentioned once.
+            static SEEN: std::sync::Mutex<BTreeSet<String>> =
+                std::sync::Mutex::new(BTreeSet::new());
+            if SEEN.lock().is_ok_and(|mut seen| seen.insert(id.clone())) {
+                eprintln!("[LuaBuddy] Ignoring a mod ID LuaBuddy can't name: {id:?}");
+            }
         })
         .ok()
 }
@@ -167,8 +172,10 @@ pub fn discover(
     resolve(context, profiles, native, true)
 }
 
-/// Finds the same mods without telling the game anything, for work that must
-/// leave the game as it was, such as warming the disk cache.
+/// Finds the same mods without registering Workshop folders or repairing their
+/// layout, for work that runs before anything is loaded, such as warming the
+/// disk cache. The game's own lookups still cache what they find, as they do
+/// for its menus.
 pub fn locate(
     context: &mut Context<'_, '_>,
     profiles: &[Profile],

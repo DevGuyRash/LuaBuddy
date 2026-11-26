@@ -218,6 +218,8 @@ impl Screen {
             Act::Rescan => {
                 let before = self.catalog.mods.len();
                 self.rescan_catalog(context)?;
+                // Selections can change outside the window too, by the command line.
+                self.reread(context)?;
                 let now = self.catalog.mods.len();
                 Ok((
                     Tone::Normal,
@@ -280,6 +282,7 @@ impl Screen {
                 log::info("extensions.status", "Native extension status")
                     .with(crate::extensions::diagnostics())
                     .write();
+                self.journal_revision = Some(log::revision());
                 self.entries = log::recent(usize::MAX);
                 if let Some(entry) = self.entries.first() {
                     self.chosen.insert(Tab::Activity, Key::Entry(entry.seq));
