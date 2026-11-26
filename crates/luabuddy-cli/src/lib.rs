@@ -1,4 +1,7 @@
-use luabuddy_core::{ModId, Profile, read_profiles, selection::case_variant};
+use luabuddy_core::{
+    ModId, Profile, diagnostics as report_contract, lifecycle::Operation, property as props,
+    read_profiles, selection::case_variant,
+};
 pub mod extensions;
 #[cfg(windows)]
 mod windows;
@@ -242,6 +245,9 @@ pub fn verify_package(directory: &Path) -> Result<Package> {
     }
     let mut actual = BTreeSet::new();
     walk_files(&directory, &directory, &mut actual)?;
+    // The verified bytes of the two binaries are inspected below without another read.
+    let mut runtime_bytes = None;
+    let mut windows_cli = None;
     let mut expected = BTreeSet::from(["manifest.json".to_owned(), "manifest.sha256".to_owned()]);
     for (name, expected_file) in &manifest.files {
         let relative = portable_path(name)?;
@@ -265,6 +271,11 @@ pub fn verify_package(directory: &Path) -> Result<Package> {
         if file.len() as u64 != expected_file.size || sha256(&file) != expected_file.sha256 {
             return Err(invalid(format!("Package integrity failed for {name}")));
         }
+        if *name == manifest.runtime {
+            runtime_bytes = Some(file);
+        } else if name == "luabuddy.exe" {
+            windows_cli = Some(file);
+        }
         expected.insert(name.clone());
     }
     if actual != expected {
@@ -276,7 +287,8 @@ pub fn verify_package(directory: &Path) -> Result<Package> {
     if checksum != format!("{digest}  manifest.json\n") {
         return Err(invalid("Manifest checksum does not match"));
     }
-    let runtime_bytes = bytes(&directory.join(&manifest.runtime), RUNTIME_LIMIT)?;
+    let runtime_bytes = runtime_bytes
+        .ok_or_else(|| invalid("Package runtime must be a listed file at the package root"))?;
     let (os, architecture) = binary_identity(&runtime_bytes)?;
     if os != manifest.os || architecture != manifest.architecture {
         return Err(invalid(
@@ -289,7 +301,7 @@ pub fn verify_package(directory: &Path) -> Result<Package> {
                 "Windows package must own luabuddy.exe and luabuddy_host.dll",
             ));
         }
-        let cli = bytes(&directory.join("luabuddy.exe"), RUNTIME_LIMIT)?;
+        let cli = windows_cli.ok_or_else(|| invalid("Windows package must own luabuddy.exe"))?;
         if binary_identity(&cli)? != (os, architecture) {
             return Err(invalid(
                 "Windows package CLI and runtime architectures disagree",
@@ -512,10 +524,14 @@ pub fn make_package(runtime: &Path, templates: &Path, output: &Path) -> Result<P
             format!("{}  manifest.json\n", sha256(&encoded)).as_bytes(),
             false,
         )?;
-        verify_package(&stage)?;
+        let mut package = verify_package(&stage)?;
+        // A rename within one directory keeps every byte, so the stage's
+        // verification stands for the published package.
         fs::rename(&stage, &output)
             .map_err(|e| io_error("Publish package directory", &output, e))?;
-        verify_package(&output)
+        package.directory =
+            fs::canonicalize(&output).map_err(|e| io_error("Resolve package", &output, e))?;
+        Ok(package)
     })();
     if result.is_err() && stage.exists() {
         fs::remove_dir_all(&stage)
@@ -840,10 +856,10 @@ fn owned_agent(game: &Path, argument: &str) -> bool {
 fn owned_argument(game: &Path, argument: &str) -> bool {
     owned_agent(game, argument)
         || [
-            "luabuddy.config",
-            "luabuddy.templates",
-            "luabuddy.debug",
-            "luabuddy.earlyUI",
+            props::CONFIG,
+            props::TEMPLATES,
+            props::DEBUG,
+            props::EARLY_UI,
         ]
         .iter()
         .any(|name| property(argument, name))
@@ -1191,6 +1207,10 @@ fn validate_transaction(game: &Path, journal: &Journal) -> Result<()> {
     Ok(())
 }
 
+fn record_path(game: &Path) -> PathBuf {
+    game.join(INSTALL_DIR).join(RECORD_FILE)
+}
+
 fn journal_path(game: &Path) -> PathBuf {
     game.join(INSTALL_DIR).join(JOURNAL_FILE)
 }
@@ -1404,7 +1424,7 @@ fn transact(
 }
 
 fn read_record(game: &Path) -> Result<Option<InstallRecord>> {
-    let path = game.join(INSTALL_DIR).join(RECORD_FILE);
+    let path = record_path(game);
     let Some(data) = optional_bytes(&path, METADATA_LIMIT)? else {
         return Ok(None);
     };
@@ -1486,16 +1506,18 @@ fn selected_profile_files(
 ) -> Result<SelectedProfiles> {
     let existing = read_profiles_if_exists(directory)?;
     let templates = read_profiles_if_exists(&package.directory.join("profiles"))?;
+    let queued = if directory.exists() {
+        luabuddy_core::selection::pending(directory)?
+    } else {
+        Vec::new()
+    };
     let mut selected = BTreeMap::new();
     let mut files = Vec::new();
     let mut outcomes = Vec::new();
     for id in ids {
-        if id.chars().any(char::is_control) {
-            return Err(invalid("Mod IDs must not contain control characters"));
-        }
         let id = ModId::new(id)?;
         let name = profile_filename(id.as_str());
-        if let Some(other) = selected.insert(name.to_lowercase(), id.clone()) {
+        if let Some(other) = selected.insert(name.to_ascii_lowercase(), id.clone()) {
             if other != id {
                 return Err(invalid(format!(
                     "Mod IDs {other} and {id} collide at {name}"
@@ -1529,38 +1551,23 @@ fn selected_profile_files(
             });
             continue;
         }
+        if queued.iter().any(|profile| profile.id == id) {
+            return Err(invalid(format!(
+                "{id} is queued for one future game launch. Cancel that first: luabuddy deselect --profiles-dir {} --mod {} --once",
+                shell_word(&directory.to_string_lossy()),
+                shell_word(id.as_str())
+            )));
+        }
         if directory.exists() {
-            for entry in fs::read_dir(directory)
-                .map_err(|e| io_error("Read profile directory", directory, e))?
-            {
-                let entry =
-                    entry.map_err(|e| io_error("Read profile directory entry", directory, e))?;
-                if entry.file_name().to_string_lossy().to_lowercase() == name.to_lowercase() {
-                    return Err(invalid(format!(
-                        "Profile filename for {id} is taken by another mod: {}",
-                        entry.path().display()
-                    )));
-                }
-            }
+            luabuddy_core::selection::filename_available(directory, &target)?;
         }
         let template = templates.iter().find(|profile| profile.id == id);
-        let content = if let Some(template) = template {
-            bytes(&template.file, METADATA_LIMIT)?
-        } else {
-            format!(
-                "id={}\n",
-                id.as_str()
-                    .replace('\\', "\\\\")
-                    .replace(' ', "\\ ")
-                    .replace('=', "\\=")
-                    .replace(':', "\\:")
-            )
-            .into_bytes()
-        };
-        Profile::parse(
-            &target,
-            std::str::from_utf8(&content).map_err(|_| invalid("Profile is not UTF-8"))?,
-        )?;
+        let template_text = template
+            .map(|template| luabuddy_core::profile::read_text(&template.file))
+            .transpose()?;
+        let (text, _) =
+            luabuddy_core::selection::new_profile(&target, &id, None, template_text.as_deref())?;
+        let content = text.into_bytes();
         outcomes.push(
             json!({"id":id, "outcome":"created", "profile":target, "fromTemplate":template.is_some(), "templateWithDifferentCase":case_variant(&templates, &id).map(|profile| &profile.id)}),
         );
@@ -1634,7 +1641,7 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
     let old_profile = old_args
         .iter()
         .rev()
-        .find_map(|arg| arg.strip_prefix("-Dluabuddy.config="))
+        .find_map(|arg| arg.strip_prefix(&props::argument(props::CONFIG, "")))
         .map(PathBuf::from);
     let profiles = resolve(
         &options
@@ -1679,26 +1686,26 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
         ));
     }
     let agent_argument = format!("-agentpath:{runtime_string}");
-    let config_argument = format!(
-        "-Dluabuddy.config={}",
+    let config_argument = props::argument(
+        props::CONFIG,
         profiles
             .to_str()
-            .ok_or_else(|| invalid("Profile path must be UTF-8"))?
+            .ok_or_else(|| invalid("Profile path must be UTF-8"))?,
     );
     let templates = generation_root.join("profiles");
-    let templates_argument = format!(
-        "-Dluabuddy.templates={}",
+    let templates_argument = props::argument(
+        props::TEMPLATES,
         templates
             .to_str()
-            .ok_or_else(|| invalid("Template path must be UTF-8"))?
+            .ok_or_else(|| invalid("Template path must be UTF-8"))?,
     );
     let mut args = vm_args(&config);
     for (name, choice) in [
-        ("luabuddy.debug", options.debug),
-        ("luabuddy.earlyUI", options.early_ui),
+        (props::DEBUG, options.debug),
+        (props::EARLY_UI, options.early_ui),
     ] {
         match choice {
-            Some(true) => args.push(format!("-D{name}=true")),
+            Some(true) => args.push(props::argument(name, "true")),
             Some(false) => (),
             None => args.extend(old_args.iter().filter(|arg| property(arg, name)).cloned()),
         }
@@ -1799,10 +1806,10 @@ pub fn install(game: &Path, options: &InstallOptions) -> Result<Value> {
             executable: false,
         });
     }
-    let record_path = game.join(INSTALL_DIR).join(RECORD_FILE);
+    let record_file = record_path(game);
     changes.push(Change {
-        before: optional_bytes(&record_path, METADATA_LIMIT)?,
-        path: record_path,
+        before: optional_bytes(&record_file, METADATA_LIMIT)?,
+        path: record_file,
         after: Some(json_bytes(&record)?),
         executable: false,
     });
@@ -1920,8 +1927,8 @@ fn inspect(game: &Path, record: &InstallRecord) -> Result<(Vec<String>, Vec<Stri
                 .iter()
                 .filter(|arg| owned_agent(game, arg))
                 .eq([&generation.agent_argument])
-                || last("luabuddy.config") != Some(&generation.config_argument)
-                || last("luabuddy.templates") != Some(&generation.templates_argument)
+                || last(props::CONFIG) != Some(&generation.config_argument)
+                || last(props::TEMPLATES) != Some(&generation.templates_argument)
             {
                 problems.push(format!(
                     "The launcher override does not select the installed generation; run repair: {}",
@@ -2034,10 +2041,10 @@ pub fn rollback(game: &Path) -> Result<Value> {
     let profile_argument = args
         .iter()
         .rev()
-        .find(|arg| property(arg, "luabuddy.config"))
+        .find(|arg| property(arg, props::CONFIG))
         .ok_or_else(|| invalid("Previous generation has no profile directory argument"))?;
     let profiles = profile_argument
-        .strip_prefix("-Dluabuddy.config=")
+        .strip_prefix(&props::argument(props::CONFIG, ""))
         .ok_or_else(|| invalid("Previous generation has an invalid profile directory argument"))?;
     if !Path::new(profiles).is_absolute() || profiles.contains(['\0', '\r', '\n']) {
         return Err(invalid(
@@ -2048,11 +2055,11 @@ pub fn rollback(game: &Path) -> Result<Value> {
     previous.config_argument = profile_argument.to_owned();
     previous.site_bytes = json_bytes(&config)?;
     record.previous = Some(std::mem::replace(&mut record.current, previous));
-    let record_path = game.join(INSTALL_DIR).join(RECORD_FILE);
+    let record_file = record_path(game);
     let changes = vec![
         Change {
-            before: optional_bytes(&record_path, METADATA_LIMIT)?,
-            path: record_path,
+            before: optional_bytes(&record_file, METADATA_LIMIT)?,
+            path: record_file,
             after: Some(json_bytes(&record)?),
             executable: false,
         },
@@ -2126,10 +2133,10 @@ pub fn uninstall(game: &Path) -> Result<Value> {
         .flat_map(|generation| generation.files.clone())
         .collect();
     let (retired, retained) = retire(&owned)?;
-    let record_path = game.join(INSTALL_DIR).join(RECORD_FILE);
+    let record_file = record_path(game);
     changes.push(Change {
-        before: optional_bytes(&record_path, METADATA_LIMIT)?,
-        path: record_path,
+        before: optional_bytes(&record_file, METADATA_LIMIT)?,
+        path: record_file,
         after: None,
         executable: false,
     });
@@ -2214,7 +2221,7 @@ fn valid_session(value: &str) -> bool {
 }
 
 pub fn diagnostics(cache: &Path) -> Result<Value> {
-    let path = cache.join("LuaBuddy/diagnostics.json");
+    let path = cache.join(report_contract::REPORT_PATH);
     let mut value: Value = read_json(&path)?;
     if !value.is_object() {
         return Err(invalid("LuaBuddy diagnostic report must be an object"));
@@ -2226,15 +2233,15 @@ pub fn diagnostics(cache: &Path) -> Result<Value> {
                 path.display()
             ))
         })?;
-    if report.schema_version != SCHEMA
-        || report.kind != "loader-initialization"
+    if report.schema_version != report_contract::SCHEMA_VERSION
+        || report.kind != report_contract::KIND
         || !valid_session(&report.session)
         || !valid_utc_timestamp(&report.started_at)
         || report
             .completed_at
             .as_ref()
             .is_some_and(|timestamp| !valid_utc_timestamp(timestamp))
-        || !matches!(report.operation.as_str(), "startup" | "refresh" | "reload")
+        || !Operation::NAMES.contains(&report.operation.as_str())
     {
         return Err(invalid(
             "Unsupported or incomplete LuaBuddy diagnostic report identity",
@@ -2283,7 +2290,7 @@ pub fn diagnostics(cache: &Path) -> Result<Value> {
 
 pub fn doctor(game: &Path, cache: &Path) -> Result<Value> {
     let mut value = verify_install(game)?;
-    let path = cache.join("LuaBuddy/diagnostics.json");
+    let path = cache.join(report_contract::REPORT_PATH);
     if !path.exists() {
         value["lastInitialization"] = Value::Null;
         value["warnings"] = json!([

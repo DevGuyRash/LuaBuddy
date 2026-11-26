@@ -678,6 +678,47 @@ fn selection_commands_default_to_the_installed_profiles_and_templates() {
     assert_eq!(profiles[0].exclude, ["client/skip.lua"]);
 }
 
+#[test]
+fn toggling_keeps_the_profile_size_and_the_queue_listing_is_disjoint() {
+    let f = Fixture::new();
+    f.install();
+    f.success("select", &["--mod", "Example"]);
+    let file = f.profile_dir().join("Example.properties");
+    let size = || fs::metadata(&file).unwrap().len();
+    f.success("deselect", &["--mod", "Example"]);
+    let off = size();
+    f.success("select", &["--mod", "Example"]);
+    let on = size();
+    for _ in 0..4 {
+        f.success("deselect", &["--mod", "Example"]);
+        assert_eq!(size(), off);
+        f.success("select", &["--mod", "Example"]);
+        assert_eq!(size(), on);
+    }
+
+    // A queued selection that a persistent profile now shadows is only skipped.
+    f.success("select", &["--mod", "Shadowed", "--once"]);
+    f.success("select", &["--mod", "Usable", "--once"]);
+    fs::write(
+        f.profile_dir().join("Shadowed.properties"),
+        "id=Shadowed\nenabled=false\n",
+    )
+    .unwrap();
+    let listed = f.success("profiles", &[]);
+    assert_eq!(listed["queuedForNextLaunch"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["queuedForNextLaunch"][0]["id"], "Usable");
+    assert_eq!(listed["skippedAtNextLaunch"].as_array().unwrap().len(), 1);
+
+    // Installing a mod that is queued for one launch is refused, as selecting it is.
+    let result = f.command(
+        "install",
+        &["--package", f.package.to_str().unwrap(), "--mod", "Usable"],
+    );
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("queued for one future game launch"));
+    assert!(!f.profile_dir().join("Usable.properties").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn paths_reached_through_links_install_but_linked_owned_directories_do_not() {

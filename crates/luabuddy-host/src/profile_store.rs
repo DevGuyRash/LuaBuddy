@@ -6,7 +6,9 @@ use crate::{
 };
 use luabuddy_core::{
     ModId, Profile,
-    profile::{profile_filename, read_each_profile, with_enabled},
+    profile::{profile_filename, read_each_profile, read_text, with_enabled},
+    property,
+    selection::{filename_available, new_profile},
 };
 use std::{
     fs::{self, OpenOptions},
@@ -15,7 +17,7 @@ use std::{
 };
 
 pub fn templates(context: &mut Context<'_, '_>) -> Result<Vec<Profile>> {
-    let path = game::property(context, "luabuddy.templates")?.map(PathBuf::from);
+    let path = game::property(context, property::TEMPLATES)?.map(PathBuf::from);
     match path {
         Some(path) if path.is_dir() => {
             let (templates, errors) =
@@ -38,10 +40,13 @@ pub fn effective(id: &ModId, profiles: &[Profile], templates: &[Profile]) -> Res
     {
         return Ok(profile.clone());
     }
-    Profile::parse(
+    new_profile(
         Path::new("LuaBuddy/unconfigured.properties"),
-        &format!("id={}\n", escape(id.as_str())),
+        id,
+        None,
+        None,
     )
+    .map(|(_, profile)| profile)
     .map_err(|error| error.to_string())
 }
 
@@ -115,10 +120,11 @@ pub fn select(context: &mut Context<'_, '_>, ids: &[ModId], enabled: bool) -> Re
             String::from_utf8(bytes.clone())
                 .map_err(|_| format!("{} is not UTF-8 text", path.display()))?
         } else if let Some(template) = templates.iter().find(|profile| &profile.id == id) {
-            fs::read_to_string(&template.file)
-                .map_err(|error| format!("Read {}: {error}", template.file.display()))?
+            read_text(&template.file).map_err(|error| error.to_string())?
         } else {
-            format!("id={}\n", escape(id.as_str()))
+            new_profile(&path, id, None, None)
+                .map_err(|error| error.to_string())?
+                .0
         };
         let before = Profile::parse(&path, &content).map_err(|error| error.to_string())?;
         let edited = with_enabled(&content, enabled);
@@ -157,27 +163,13 @@ pub fn select(context: &mut Context<'_, '_>, ids: &[ModId], enabled: bool) -> Re
 }
 
 fn refuse_collision(directory: &Path, path: &Path) -> Result<()> {
-    let filename = path
-        .file_name()
-        .ok_or("Profile destination has no filename")?
-        .to_string_lossy();
-    for entry in
-        fs::read_dir(directory).map_err(|error| format!("Inspect profile directory: {error}"))?
-    {
-        let entry = entry.map_err(|error| format!("Inspect profile filename: {error}"))?;
-        if entry.path() != path
-            && entry
-                .file_name()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&filename)
-        {
-            return Err(format!(
-                "Profile filename {} collides with {}; no selection changed",
-                path.display(),
-                entry.path().display()
-            ));
-        }
-    }
+    filename_available(directory, path).map_err(|error| {
+        format!(
+            "{} for {}; no selection changed",
+            error.message,
+            path.display()
+        )
+    })?;
     if path.parent() != Some(directory)
         || fs::symlink_metadata(path)
             .is_ok_and(|metadata| !metadata.is_file() || metadata.file_type().is_symlink())
@@ -188,17 +180,6 @@ fn refuse_collision(directory: &Path, path: &Path) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn escape(value: &str) -> String {
-    let mut escaped = String::new();
-    for character in value.chars() {
-        if matches!(character, '\\' | ' ' | ':' | '=' | '#' | '!') {
-            escaped.push('\\');
-        }
-        escaped.push(character);
-    }
-    escaped
 }
 
 type Edit = (PathBuf, Option<Vec<u8>>, Vec<u8>);

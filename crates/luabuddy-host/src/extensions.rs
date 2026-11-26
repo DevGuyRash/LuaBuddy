@@ -3,9 +3,14 @@ use crate::{
     lua::{Context, Result, Value},
     patcher::JvmPatcher,
 };
+use luabuddy_core::property;
 use luabuddy_patcher::{
     PatchState,
-    extension::{ApprovalRecordV1, EnableConsent, ExtensionManifest, LoadedExtension, verify},
+    extension::{
+        APPROVAL_FILE, ARTIFACT_LIMIT, ApprovalRecordV1, EnableConsent, ExtensionManifest,
+        LoadedExtension, MANIFEST_FILE, METADATA_LIMIT, RESERVED_DIRECTORY, STORE_DIRECTORY,
+        artifact_name, is_sha256_hex, valid_id, verify,
+    },
 };
 use serde_json::{Value as Json, json};
 use std::{
@@ -50,13 +55,13 @@ fn manager() -> &'static Mutex<Manager> {
 }
 
 fn root(context: &mut Context<'_, '_>) -> Result<PathBuf> {
-    if let Some(root) = game::property(context, "luabuddy.extensions")? {
+    if let Some(root) = game::property(context, property::EXTENSIONS)? {
         return Ok(PathBuf::from(root));
     }
     Ok(PathBuf::from(
-        game::property(context, "luabuddy.config")?.ok_or("Missing LuaBuddy profile directory")?,
+        game::property(context, property::CONFIG)?.ok_or("Missing LuaBuddy profile directory")?,
     )
-    .join("extensions"))
+    .join(STORE_DIRECTORY))
 }
 
 fn plain(path: &Path) -> Result<()> {
@@ -75,7 +80,7 @@ fn bytes(path: &Path) -> Result<Vec<u8>> {
     plain(path)?;
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("Inspect {}: {error}", path.display()))?;
-    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+    if !metadata.is_file() || metadata.len() > METADATA_LIMIT {
         return Err(format!(
             "Expected bounded regular extension metadata {}",
             path.display()
@@ -83,22 +88,12 @@ fn bytes(path: &Path) -> Result<Vec<u8>> {
     }
     let mut bytes = Vec::new();
     File::open(path)
-        .and_then(|file| file.take(1024 * 1024 + 1).read_to_end(&mut bytes))
+        .and_then(|file| file.take(METADATA_LIMIT + 1).read_to_end(&mut bytes))
         .map_err(|error| format!("Read {}: {error}", path.display()))?;
-    if bytes.len() > 1024 * 1024 {
+    if bytes.len() as u64 > METADATA_LIMIT {
         return Err("Extension metadata grew beyond its size limit".into());
     }
     Ok(bytes)
-}
-
-fn artifact_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "artifact.dll"
-    } else if cfg!(target_os = "macos") {
-        "artifact.dylib"
-    } else {
-        "artifact.so"
-    }
 }
 
 fn load_entry(context: &mut Context<'_, '_>, directory: &Path, engine: &mut JvmPatcher) -> Entry {
@@ -119,19 +114,12 @@ fn load_entry(context: &mut Context<'_, '_>, directory: &Path, engine: &mut JvmP
     };
     let result = (|| -> Result<()> {
         let record: ApprovalRecordV1 =
-            serde_json::from_slice(&bytes(&directory.join("approval.json"))?)
+            serde_json::from_slice(&bytes(&directory.join(APPROVAL_FILE))?)
                 .map_err(|error| error.to_string())?;
         record.validate().map_err(|error| error.to_string())?;
         entry.manifest_sha256 = record.manifest_sha256.clone();
         let consent = record.consent;
-        if consent.extension_id != entry.id
-            || consent.extension_id.is_empty()
-            || consent.extension_id.len() >= 64
-            || consent
-                .extension_id
-                .bytes()
-                .any(|b| !b.is_ascii_alphanumeric() && !b"._-".contains(&b))
-        {
+        if consent.extension_id != entry.id || !valid_id(&consent.extension_id) {
             return Err("Approval identity differs from its owned directory".into());
         }
         entry.sha256 = consent.artifact_sha256.clone();
@@ -143,17 +131,12 @@ fn load_entry(context: &mut Context<'_, '_>, directory: &Path, engine: &mut JvmP
         if !consent.enable {
             return Ok(());
         }
-        if consent.artifact_sha256.len() != 64
-            || !consent
-                .artifact_sha256
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        {
+        if !is_sha256_hex(&consent.artifact_sha256) {
             return Err("Native extension approval has an invalid SHA256 generation".into());
         }
         let generation = directory.join(&record.manifest_sha256);
         plain(&generation)?;
-        let manifest_bytes = bytes(&generation.join("manifest.json"))?;
+        let manifest_bytes = bytes(&generation.join(MANIFEST_FILE))?;
         use sha2::{Digest, Sha256};
         if format!("{:x}", Sha256::digest(&manifest_bytes)) != record.manifest_sha256 {
             return Err("Manifest bytes differ from explicit native approval".into());
@@ -168,10 +151,9 @@ fn load_entry(context: &mut Context<'_, '_>, directory: &Path, engine: &mut JvmP
         let artifact = generation.join(artifact_name());
         plain(&artifact)?;
         let metadata = fs::metadata(&artifact).map_err(|error| error.to_string())?;
-        if !metadata.is_file() || metadata.len() > 256 * 1024 * 1024 {
+        if !metadata.is_file() || metadata.len() > ARTIFACT_LIMIT {
             return Err("Native artifact exceeds the regular 256 MiB limit".into());
         }
-        verify(&artifact, manifest.clone(), &consent).map_err(|error| error.to_string())?;
         entry.pending = Some(Pending {
             artifact,
             manifest,
@@ -252,7 +234,7 @@ fn scan(
         .map_err(|error| format!("Read native approvals {}: {error}", root.display()))?
     {
         let directory = directory.map_err(|error| error.to_string())?;
-        if directory.file_name() == ".luabuddy" {
+        if directory.file_name() == RESERVED_DIRECTORY {
             continue;
         }
         if directory
