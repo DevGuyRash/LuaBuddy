@@ -930,6 +930,20 @@ impl Screen {
         Ok(())
     }
 
+    /// What pressing the main button would do. Hints may change without changing this.
+    fn press_meaning(&self) -> PressMeaning {
+        let primary = self.primary.as_ref();
+        PressMeaning {
+            row: self.list.selected.clone(),
+            act: primary.and_then(|node| node.act.clone()),
+            // A button with no action of its own, such as Show or Hide, is its label.
+            label: primary
+                .filter(|node| node.act.is_none())
+                .map(|node| node.label.clone()),
+            available: primary.map(|node| node.blocked.is_none()),
+        }
+    }
+
     /// What More and right-click offer: every action but the one on the main button.
     fn other_actions(&self) -> Vec<Node> {
         let mut nodes = self.actions.clone();
@@ -1027,12 +1041,16 @@ impl Screen {
             "back" => self.close(context),
             "primary" => {
                 // Steam can change an item between frames. Show what holds now,
-                // and act only if the button still means what the player saw.
-                let seen = self.primary.clone();
+                // and act only if the button still means what the player saw:
+                // the same row, the same action, just as available.
+                let seen = self.press_meaning();
                 self.refresh(context)?;
+                if self.press_meaning() != seen {
+                    return Ok(());
+                }
                 match (self.list.selected.clone(), self.primary.clone()) {
                     (Some(Key::Header(section)), _) => self.toggle(context, section),
-                    (_, Some(node)) if Some(&node) == seen.as_ref() => self.run_node(context, node),
+                    (_, Some(node)) => self.run_node(context, node),
                     _ => Ok(()),
                 }
             }
@@ -1388,6 +1406,15 @@ fn flatten(nodes: Vec<Node>) -> Vec<Node> {
 }
 
 use kit::first_line;
+
+/// The row, action and availability behind the main button.
+#[derive(PartialEq)]
+struct PressMeaning {
+    row: Option<Key>,
+    act: Option<Act>,
+    label: Option<String>,
+    available: Option<bool>,
+}
 
 /// Something listed that could not be read.
 #[derive(Clone, Copy)]
