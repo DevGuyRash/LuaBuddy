@@ -11,6 +11,20 @@ pub enum Operation {
     Reload(ModId),
 }
 
+impl Operation {
+    /// Every operation name a diagnostics report can carry.
+    pub const NAMES: [&'static str; 3] = ["startup", "refresh", "reload"];
+
+    /// The operation's name in the diagnostics report.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Startup => Self::NAMES[0],
+            Self::Refresh => Self::NAMES[1],
+            Self::Reload(_) => Self::NAMES[2],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GenerationState {
     Loaded,

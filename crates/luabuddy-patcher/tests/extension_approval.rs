@@ -116,3 +116,27 @@ fn manifest_schema_rejects_unknown_fields() {
         .insert("execute_lua".into(), "arbitrary code".into());
     assert!(serde_json::from_value::<ExtensionManifest>(value).is_err());
 }
+
+#[test]
+fn store_identifiers_and_digests_follow_the_documented_shapes() {
+    assert!(valid_id("math-guard_1.0"));
+    assert!(valid_id(&"a".repeat(63)));
+    for bad in [
+        "",
+        &"a".repeat(64),
+        ".",
+        "..",
+        ".luabuddy",
+        "a b",
+        "a/b",
+        "é",
+    ] {
+        assert!(!valid_id(bad), "{bad:?}");
+    }
+    // SHA256 of the empty input, written by hand from the specification.
+    let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    assert!(is_sha256_hex(empty));
+    assert!(!is_sha256_hex(&empty.to_uppercase()));
+    assert!(!is_sha256_hex(&empty[1..]));
+    assert!(!is_sha256_hex(&format!("g{}", &empty[1..])));
+}

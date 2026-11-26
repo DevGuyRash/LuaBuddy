@@ -1,11 +1,10 @@
 use crate::{CoreError, ModId, Profile, read_profiles};
 use std::fs::{self, OpenOptions, TryLockError};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const STORE: &str = ".launch-once";
-const LIMIT: u64 = 64 * 1024;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -36,26 +35,19 @@ fn safe_directory(path: &Path, owned: usize, create: bool) -> Result<PathBuf, Co
 }
 
 fn read(path: &Path) -> Result<String, CoreError> {
-    let metadata = fs::symlink_metadata(path).map_err(|e| error(path, e))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > LIMIT {
-        return Err(error(
-            path,
-            "Expected a regular selection file of at most 64 KiB",
-        ));
-    }
-    let mut bytes = Vec::new();
-    fs::File::open(path)
+    if fs::symlink_metadata(path)
         .map_err(|e| error(path, e))?
-        .take(LIMIT + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| error(path, e))?;
-    if bytes.len() as u64 > LIMIT {
-        return Err(error(path, "Selection file exceeded 64 KiB"));
+        .file_type()
+        .is_symlink()
+    {
+        return Err(error(path, "Refusing to follow a symlinked selection file"));
     }
-    String::from_utf8(bytes).map_err(|e| error(path, e))
+    crate::profile::read_text(path)
 }
 
-fn escape(value: &str) -> String {
+/// Escapes `value` for a `.properties` key or value, so a profile written
+/// from it parses back to exactly `value`.
+pub fn escape(value: &str) -> String {
     let mut result = String::new();
     for ch in value.chars() {
         match ch {
@@ -85,7 +77,10 @@ fn unique(directory: &Path, prefix: &str) -> PathBuf {
     ))
 }
 
-fn filename_available(directory: &Path, destination: &Path) -> Result<(), CoreError> {
+/// Fails when another entry in `directory` has `destination`'s filename apart
+/// from ASCII case, as on a case-insensitive disk. Generated profile filenames
+/// are ASCII, so no wider comparison applies.
+pub fn filename_available(directory: &Path, destination: &Path) -> Result<(), CoreError> {
     let filename = destination
         .file_name()
         .ok_or_else(|| error(destination, "Missing filename"))?;
@@ -99,7 +94,7 @@ fn filename_available(directory: &Path, destination: &Path) -> Result<(), CoreEr
         {
             return Err(error(
                 destination,
-                "Profile filename collides with another selection",
+                format!("Profile filename collides with {}", entry.path().display()),
             ));
         }
     }
@@ -166,16 +161,24 @@ fn pending_directory(directory: &Path) -> PathBuf {
     directory.join(STORE).join("pending")
 }
 
+/// The one-launch queue as a claim would see it: the registrations it can use,
+/// and the `.properties` entries it leaves in place with the reason. Each entry
+/// is in exactly one of the two lists.
+pub fn queue(directory: &Path) -> Result<(Vec<Profile>, Vec<CoreError>), CoreError> {
+    let (profiles, mut skipped) = read_queue(directory)?;
+    let (usable, conflicts) = split_conflicts(directory, profiles)?;
+    skipped.extend(conflicts);
+    Ok((usable, skipped))
+}
+
 /// Registrations a claim can use. Entries it would leave behind are in [`skipped`].
 pub fn pending(directory: &Path) -> Result<Vec<Profile>, CoreError> {
-    Ok(read_queue(directory)?.0)
+    Ok(queue(directory)?.0)
 }
 
 /// Queued `.properties` entries that a claim leaves in place, and why.
 pub fn skipped(directory: &Path) -> Result<Vec<CoreError>, CoreError> {
-    let (profiles, mut skipped) = read_queue(directory)?;
-    skipped.extend(split_conflicts(directory, profiles)?.1);
-    Ok(skipped)
+    Ok(queue(directory)?.1)
 }
 
 fn read_queue(directory: &Path) -> Result<(Vec<Profile>, Vec<CoreError>), CoreError> {
@@ -275,7 +278,7 @@ pub fn select(
 ) -> Result<Profile, CoreError> {
     let directory = safe_directory(directory, 0, false)?;
     let persistent = read_profiles(&directory)?;
-    let queued = pending(&directory)?;
+    let queued = read_queue(&directory)?.0;
     let source = source
         .map(|path| path.canonicalize().map_err(|e| error(path, e)))
         .transpose()?;
@@ -343,7 +346,9 @@ pub fn select(
     Ok(profile)
 }
 
-fn new_profile(
+/// The text and parsed form of a new enabled profile for `id`, from `template`
+/// text when one exists. `path` is where it will be saved.
+pub fn new_profile(
     path: &Path,
     id: &ModId,
     source: Option<&Path>,
@@ -383,7 +388,7 @@ fn set_enabled(profile: &Profile, enabled: bool) -> Result<Profile, CoreError> {
     if expected == *profile {
         return Ok(expected);
     }
-    let text = format!("{original}\n\nenabled={enabled}\n");
+    let text = crate::profile::with_enabled(&original, enabled);
     if Profile::parse(&profile.file, &text)? != expected {
         return Err(error(
             &profile.file,
@@ -394,11 +399,13 @@ fn set_enabled(profile: &Profile, enabled: bool) -> Result<Profile, CoreError> {
     Ok(expected)
 }
 
+/// Turns a persistent selection off, or cancels a queued one, including a
+/// queued one a claim would skip.
 pub fn deselect(directory: &Path, id: &ModId, lifetime: Lifetime) -> Result<bool, CoreError> {
     let directory = safe_directory(directory, 0, false)?;
     let profiles = match lifetime {
         Lifetime::Persistent => read_profiles(&directory)?,
-        Lifetime::Once => pending(&directory)?,
+        Lifetime::Once => read_queue(&directory)?.0,
     };
     let Some(profile) = profiles.iter().find(|profile| &profile.id == id) else {
         return Ok(false);

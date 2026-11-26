@@ -26,8 +26,7 @@ impl Target {
             || self.method.is_empty()
             || self.loader.is_empty()
             || !valid_method_descriptor(&self.descriptor)
-            || self.bytecode_sha256.len() != 64
-            || !self.bytecode_sha256.bytes().all(|c| c.is_ascii_hexdigit())
+            || !crate::extension::is_sha256_hex(&self.bytecode_sha256)
         {
             return Err(Error::Invalid(
                 "Invalid exact JVM target or SHA256 fingerprint".into(),

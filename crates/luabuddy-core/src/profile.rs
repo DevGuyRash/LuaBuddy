@@ -2,7 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+/// The largest profile or template file any reader accepts. Real profiles are
+/// a few hundred bytes; the bound only keeps a wrong file from being slurped.
+pub const PROFILE_LIMIT: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CoreError {
@@ -67,10 +72,10 @@ pub struct ModId(String);
 impl ModId {
     pub fn new(id: impl Into<String>) -> Result<Self, CoreError> {
         let id = id.into().trim_matches(|ch| ch <= '\u{0020}').to_owned();
-        if id.is_empty() || id.contains(['\0', '\n', '\r']) {
+        if id.is_empty() || id.contains(char::is_control) {
             return Err(CoreError::new(
                 "profile",
-                "A mod ID must be nonempty and contain no NUL or line break",
+                "A mod ID must be nonempty and contain no control characters",
             ));
         }
         Ok(Self(id))
@@ -303,6 +308,29 @@ pub fn read_profiles(directory: &Path) -> Result<Vec<Profile>, CoreError> {
     }
 }
 
+/// Reads a profile or template, following a link to a regular file of at most
+/// [`PROFILE_LIMIT`] bytes. Readers share this policy; code that rewrites a
+/// profile also refuses links itself.
+pub fn read_text(path: &Path) -> Result<String, CoreError> {
+    let error = |message: String| CoreError::new("profile-read", message).at(path);
+    let metadata = fs::metadata(path).map_err(|e| error(e.to_string()))?;
+    if !metadata.is_file() || metadata.len() > PROFILE_LIMIT {
+        return Err(error(
+            "Expected a regular profile file of at most 64 KiB".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(|e| error(e.to_string()))?
+        .take(PROFILE_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| error(e.to_string()))?;
+    if bytes.len() as u64 > PROFILE_LIMIT {
+        return Err(error("Profile file exceeded 64 KiB".into()));
+    }
+    String::from_utf8(bytes).map_err(|e| error(e.to_string()))
+}
+
 /// Reads every profile that can be read. One bad file doesn't hide the others.
 pub fn read_each_profile(directory: &Path) -> Result<(Vec<Profile>, Vec<CoreError>), CoreError> {
     let mut files = fs::read_dir(directory)
@@ -316,9 +344,7 @@ pub fn read_each_profile(directory: &Path) -> Result<(Vec<Profile>, Vec<CoreErro
     let mut profiles = Vec::new();
     let mut errors = Vec::new();
     for file in files {
-        let profile = fs::read_to_string(&file)
-            .map_err(|e| CoreError::new("profile-read", e.to_string()).at(&file))
-            .and_then(|text| Profile::parse(&file, &text));
+        let profile = read_text(&file).and_then(|text| Profile::parse(&file, &text));
         match profile {
             Ok(profile) if ids.insert(profile.id.clone()) => profiles.push(profile),
             Ok(profile) => errors.push(
@@ -361,6 +387,10 @@ pub fn with_enabled(text: &str, enabled: bool) -> String {
         return result;
     }
     if !result.is_empty() && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    // A blank line ends a final line that continues, so the new line stands alone.
+    if continued {
         result.push('\n');
     }
     result.push_str(if enabled {

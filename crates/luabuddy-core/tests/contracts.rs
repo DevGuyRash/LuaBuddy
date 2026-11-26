@@ -708,7 +708,8 @@ fn one_launch_keeps_a_queue_that_conflicts_with_a_later_persistent_selection() {
         fs::read_to_string(source.join("original.txt")).unwrap(),
         "keep this source"
     );
-    assert_eq!(selection::pending(&root.0).unwrap()[0].id, id("Temporary"));
+    // A conflicting entry is reported as skipped only, yet can still be cancelled.
+    assert!(selection::pending(&root.0).unwrap().is_empty());
     assert!(selection::deselect(&root.0, &id("Temporary"), Lifetime::Once).unwrap());
     assert!(selection::claim(&root.0).unwrap().is_empty());
 }
@@ -871,4 +872,87 @@ fn source_folders_match_without_regard_to_case() {
     let sources = scan_sources(&profile, std::slice::from_ref(&root), &BTreeSet::new()).unwrap();
     assert_eq!(sources[0].name, "shared/Sub/Thing.lua");
     fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_final_continuation_does_not_swallow_the_appended_enabled_line() {
+    use luabuddy_core::profile::with_enabled;
+    // By hand from the properties format: the backslash joins the next line to
+    // `requires`, so `enabled=false` must be separated by a blank line.
+    for text in ["id=foo\nrequires=a;\\\n", "id=foo\nrequires=a;\\"] {
+        let edited = with_enabled(text, false);
+        let profile = Profile::parse("x", &edited).unwrap();
+        assert!(!profile.enabled, "{edited:?}");
+        assert_eq!(profile.requires, [id("a")]);
+        let restored = Profile::parse("x", &with_enabled(&edited, true)).unwrap();
+        assert!(restored.enabled);
+        assert_eq!(restored.requires, [id("a")]);
+    }
+}
+
+#[test]
+fn repeated_selection_toggles_leave_the_profile_the_same_size() {
+    use luabuddy_core::selection::{self, Lifetime};
+    let root = Directory::new();
+    let file = root.0.join("Toggled.properties");
+    fs::write(&file, "# mine\nid=Toggled\nexclude=a.lua;\\\n b.lua\\").unwrap();
+    let toggle = |on: bool| {
+        if on {
+            selection::select(&root.0, &id("Toggled"), None, Lifetime::Persistent, None).unwrap();
+        } else {
+            assert!(selection::deselect(&root.0, &id("Toggled"), Lifetime::Persistent).unwrap());
+        }
+        fs::metadata(&file).unwrap().len()
+    };
+    let off = toggle(false);
+    let on = toggle(true);
+    for _ in 0..5 {
+        assert_eq!(toggle(false), off);
+        assert_eq!(toggle(true), on);
+    }
+    let profile = read_profiles(&root.0).unwrap().remove(0);
+    assert!(profile.enabled);
+    assert_eq!(profile.exclude, ["a.lua", "b.lua"]);
+}
+
+#[test]
+fn queued_and_skipped_registrations_are_disjoint() {
+    use luabuddy_core::selection::{self, Lifetime};
+    let root = Directory::new();
+    selection::select(&root.0, &id("Conflicted"), None, Lifetime::Once, None).unwrap();
+    selection::select(&root.0, &id("Usable"), None, Lifetime::Once, None).unwrap();
+    fs::write(
+        root.0.join("user.properties"),
+        "id=Conflicted\nenabled=false\n",
+    )
+    .unwrap();
+    let (usable, skipped) = selection::queue(&root.0).unwrap();
+    assert_eq!(
+        usable.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+        ["Usable"]
+    );
+    assert_eq!(skipped.len(), 1);
+    assert!(skipped[0].message.contains("Conflicted"));
+    assert_eq!(selection::pending(&root.0).unwrap(), usable);
+    assert_eq!(selection::skipped(&root.0).unwrap(), skipped);
+}
+
+#[test]
+fn mod_ids_reject_control_characters_and_profiles_have_one_size_limit() {
+    use luabuddy_core::profile::{PROFILE_LIMIT, read_text};
+    for bad in ["a\u{7}b", "a\tb", "a\u{85}b", "a\0b", "\n", ""] {
+        assert!(ModId::new(bad).is_err(), "{bad:?}");
+    }
+    assert_eq!(ModId::new("  Mod \n").unwrap().as_str(), "Mod");
+    let root = Directory::new();
+    let big = root.0.join("Big.properties");
+    fs::write(
+        &big,
+        format!("id=Big\n#{}\n", "x".repeat(PROFILE_LIMIT as usize)),
+    )
+    .unwrap();
+    assert!(read_text(&big).is_err());
+    assert!(read_profiles(&root.0).is_err());
+    fs::write(&big, format!("id=Big\n#{}\n", "x".repeat(1000))).unwrap();
+    assert_eq!(read_profiles(&root.0).unwrap().len(), 1);
 }

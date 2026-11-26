@@ -3,15 +3,14 @@ use crate::{
     write_atomic, write_new,
 };
 use luabuddy_patcher::extension::{
-    ApprovalRecordV1, EnableConsent, ExtensionManifest, Privilege, verify,
+    APPROVAL_FILE, ARTIFACT_LIMIT, ApprovalRecordV1, EnableConsent, ExtensionManifest,
+    MANIFEST_FILE, METADATA_LIMIT, Privilege, RESERVED_DIRECTORY, STORE_DIRECTORY, artifact_name,
+    is_sha256_hex, valid_id, verify,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-const METADATA_LIMIT: u64 = 1024 * 1024;
-const ARTIFACT_LIMIT: u64 = 256 * 1024 * 1024;
 
 pub struct Approval<'a> {
     pub sha256: &'a str,
@@ -64,33 +63,16 @@ pub fn parse_privileges(value: &str) -> Result<BTreeSet<Privilege>> {
 }
 
 fn store(profiles: &Path) -> Result<PathBuf> {
-    Ok(resolve(profiles)?.join("extensions"))
+    Ok(resolve(profiles)?.join(STORE_DIRECTORY))
 }
 
 fn identity(id: &str) -> Result<()> {
-    if id.is_empty()
-        || id.len() >= 64
-        || id
-            .bytes()
-            .any(|b| !b.is_ascii_alphanumeric() && !b"._-".contains(&b))
-        || matches!(id, "." | "..")
-        || id == ".luabuddy"
-    {
+    if valid_id(id) {
+        Ok(())
+    } else {
         Err(invalid(
             "Extension ID must be a nonempty portable ABI identifier",
         ))
-    } else {
-        Ok(())
-    }
-}
-
-fn artifact_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "artifact.dll"
-    } else if cfg!(target_os = "macos") {
-        "artifact.dylib"
-    } else {
-        "artifact.so"
     }
 }
 
@@ -110,7 +92,7 @@ fn read_manifest(path: &Path, expected: &str) -> Result<ExtensionManifest> {
 }
 
 fn read_approval(root: &Path) -> Result<ApprovalRecordV1> {
-    let path = root.join("approval.json");
+    let path = root.join(APPROVAL_FILE);
     let record: ApprovalRecordV1 = serde_json::from_slice(&bytes(&path, METADATA_LIMIT)?)
         .map_err(|error| invalid(format!("Read native approval {}: {error}", path.display())))?;
     record
@@ -142,7 +124,7 @@ fn write_immutable(path: &Path, data: &[u8]) -> Result<()> {
 }
 
 fn recover_approval_stage(root: &Path) -> Result<()> {
-    let stage = crate::stage_path(&root.join("approval.json"))?;
+    let stage = crate::stage_path(&root.join(APPROVAL_FILE))?;
     if let Some(data) = optional_bytes(&stage, METADATA_LIMIT)? {
         let history = root.join("approval-history");
         plain_directory(&history)?;
@@ -182,9 +164,9 @@ pub fn install(
     let generation = directory.join(&manifest_sha256);
     plain_directory(&generation)?;
     write_immutable(&generation.join(artifact_name()), &source)?;
-    write_immutable(&generation.join("manifest.json"), &manifest_bytes)?;
+    write_immutable(&generation.join(MANIFEST_FILE), &manifest_bytes)?;
     crate::sync_directory(&generation)?;
-    let approval_path = directory.join("approval.json");
+    let approval_path = directory.join(APPROVAL_FILE);
     let mut next = ApprovalRecordV1 {
         schema_version: 1,
         manifest_sha256: manifest_sha256.clone(),
@@ -242,7 +224,7 @@ pub fn enable(profiles: &Path, id: &str, approval: Approval<'_>) -> Result<Value
         ));
     }
     let generation = owned_generation(&root, &prior)?;
-    let manifest = read_manifest(&generation.join("manifest.json"), &prior.manifest_sha256)?;
+    let manifest = read_manifest(&generation.join(MANIFEST_FILE), &prior.manifest_sha256)?;
     let next = consent(&manifest, &prior.manifest_sha256, &approval, true)?;
     if next.extension_id != prior.consent.extension_id
         || next.artifact_sha256 != prior.consent.artifact_sha256
@@ -256,7 +238,7 @@ pub fn enable(profiles: &Path, id: &str, approval: Approval<'_>) -> Result<Value
     let changed = !prior.consent.enable;
     prior.consent.enable = true;
     let encoded = serde_json::to_vec_pretty(&prior).map_err(|error| invalid(error.to_string()))?;
-    write_atomic(&root.join("approval.json"), Some(&encoded), false)?;
+    write_atomic(&root.join(APPROVAL_FILE), Some(&encoded), false)?;
     Ok(
         json!({"ok":true,"id":id,"installed":true,"enabled":true,"manifestSha256":prior.manifest_sha256,"changed":changed,"restartRequired":true,"effective":"next JVM process"}),
     )
@@ -277,7 +259,7 @@ pub fn disable(profiles: &Path, id: &str) -> Result<Value> {
     approval.consent.enable = false;
     let encoded =
         serde_json::to_vec_pretty(&approval).map_err(|error| invalid(error.to_string()))?;
-    write_atomic(&root.join("approval.json"), Some(&encoded), false)?;
+    write_atomic(&root.join(APPROVAL_FILE), Some(&encoded), false)?;
     Ok(
         json!({"ok":true,"id":id,"enabled":false,"changed":changed,"restartRequired":true,"effective":"next JVM process","message":"Existing native code may remain active until the game exits. Restart to apply this saved disable."}),
     )
@@ -295,14 +277,16 @@ pub fn list(profiles: &Path) -> Result<Value> {
             .map_err(|error| invalid(error.to_string()))?;
         directories.sort();
         for root in directories {
-            if !root.is_dir() || root.file_name().and_then(|s| s.to_str()) == Some(".luabuddy") {
+            if !root.is_dir()
+                || root.file_name().and_then(|s| s.to_str()) == Some(RESERVED_DIRECTORY)
+            {
                 continue;
             }
             let entry = (|| -> Result<Value> {
                 let record = read_approval(&root)?;
                 let generation = owned_generation(&root, &record)?;
                 let manifest =
-                    read_manifest(&generation.join("manifest.json"), &record.manifest_sha256)?;
+                    read_manifest(&generation.join(MANIFEST_FILE), &record.manifest_sha256)?;
                 let approval = record.consent;
                 if manifest.id != approval.extension_id
                     || root.file_name().and_then(|name| name.to_str())
@@ -326,10 +310,7 @@ pub fn list(profiles: &Path) -> Result<Value> {
                         .file_type()
                         .map_err(|error| invalid(error.to_string()))?
                         .is_dir()
-                        && name.len() == 64
-                        && name
-                            .bytes()
-                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                        && is_sha256_hex(&name)
                     {
                         generations.push(name);
                     }
