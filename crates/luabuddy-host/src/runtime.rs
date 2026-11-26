@@ -745,3 +745,78 @@ fn generation_live(session: &Session, owner: &Owner) -> bool {
         .get(&owner.id)
         .is_some_and(|running| running.owner == *owner && running.state == GenerationState::Loaded)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::RunState;
+    use luabuddy_core::diagnostics::{ModDiagnostic, ModStatus, ProfileDiagnostic};
+
+    fn detail() -> ModDiagnostic {
+        ModDiagnostic {
+            status: ModStatus::Prepared,
+            stage: "running client code".into(),
+            profile: Default::default(),
+            source: None,
+            error: Some("earlier".into()),
+            traceback: Some("earlier trace".into()),
+            java_traceback: Some("earlier java".into()),
+            source_count: 0,
+            generation: 0,
+            timings_ms: Default::default(),
+            configuration: ProfileDiagnostic::default(),
+        }
+    }
+
+    #[test]
+    fn other_mods_read_the_same_status_text() {
+        // The strings `LuaBuddy.mods` exposed before the state was typed.
+        let cases = [
+            (RunState::Loaded, "loaded"),
+            (RunState::Disabled, "disabled"),
+            (RunState::ServerLoaded, "server-loaded"),
+            (
+                RunState::RestartRequired("maps".into()),
+                "restart-required: maps",
+            ),
+            (RunState::Failed("boom".into()), "failed: boom"),
+        ];
+        for (state, text) in cases {
+            assert_eq!(state.lua(), text);
+        }
+        assert!(RunState::Failed(String::new()).is_problem());
+        assert!(RunState::RestartRequired(String::new()).is_problem());
+        assert!(!RunState::ServerLoaded.is_problem());
+    }
+
+    #[test]
+    fn a_failure_keeps_its_tracebacks_apart() {
+        let mut detail = detail();
+        RunState::Failed(
+            "bad\nLua traceback:\nat a.lua:1\nJava traceback:\nKahluaException".into(),
+        )
+        .describe(&mut detail);
+        assert_eq!(detail.status, ModStatus::Failed);
+        assert_eq!(detail.traceback.as_deref(), Some("at a.lua:1"));
+        assert_eq!(detail.java_traceback.as_deref(), Some("KahluaException"));
+        assert!(detail.error.unwrap().starts_with("bad\nLua traceback:"));
+    }
+
+    #[test]
+    fn running_or_skipped_clears_old_errors_and_names_the_stage() {
+        let mut loaded = detail();
+        RunState::Loaded.describe(&mut loaded);
+        assert_eq!(loaded.stage, "complete");
+        assert_eq!(
+            (loaded.error, loaded.traceback, loaded.java_traceback),
+            (None, None, None)
+        );
+        let mut skipped = detail();
+        RunState::ServerLoaded.describe(&mut skipped);
+        assert_eq!(skipped.stage, "server-loaded");
+        assert_eq!(skipped.status, ModStatus::ServerLoaded);
+        let mut restart = detail();
+        RunState::RestartRequired("tiles".into()).describe(&mut restart);
+        assert_eq!(restart.error.as_deref(), Some("tiles"));
+        assert_eq!(restart.status, ModStatus::RestartRequired);
+    }
+}

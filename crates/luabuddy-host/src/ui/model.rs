@@ -1485,4 +1485,58 @@ mod tests {
                 .any(|node| node.label == "Native extensions" || node.act == Some(Act::Quit))
         );
     }
+
+    #[test]
+    fn a_queued_mod_cannot_be_turned_off_here() {
+        let mut view = installed("Queued");
+        view.selected = true;
+        view.queued = true;
+        let node = mod_menu(&view, world(Place::Server))
+            .into_iter()
+            .find(|node| matches!(node.act, Some(Act::TurnOff(_))))
+            .expect("Turn off is offered");
+        assert!(node.blocked.unwrap().contains("--once"));
+        view.queued = false;
+        let node = mod_menu(&view, world(Place::Server))
+            .into_iter()
+            .find(|node| matches!(node.act, Some(Act::TurnOff(_))))
+            .unwrap();
+        assert_eq!(node.blocked, None);
+    }
+
+    #[test]
+    fn the_footer_loads_what_waits_or_offers_to_quit() {
+        let waiting = Totals {
+            waiting: 2,
+            ..Totals::default()
+        };
+        let load = footer(waiting, world(Place::Server)).unwrap();
+        assert_eq!(
+            (load.label.as_str(), load.act),
+            ("Load 2 waiting mods", Some(Act::LoadWaiting))
+        );
+        assert_eq!(footer(waiting, world(Place::MainMenu)), None);
+        let restart = Totals {
+            restart: 1,
+            ..Totals::default()
+        };
+        assert_eq!(
+            footer(restart, world(Place::MainMenu)).unwrap().act,
+            Some(Act::Quit)
+        );
+        assert_eq!(footer(Totals::default(), world(Place::Server)), None);
+    }
+
+    #[test]
+    fn a_requirement_reads_as_its_state() {
+        let need = |installed, on| Requirement {
+            id: id("Needed"),
+            title: "Needed".into(),
+            installed,
+            on,
+        };
+        assert_eq!(need(false, true).state(), (Tone::Bad, "not installed"));
+        assert_eq!(need(true, true).state(), (Tone::Good, "on"));
+        assert_eq!(need(true, false).state(), (Tone::Muted, "off"));
+    }
 }
