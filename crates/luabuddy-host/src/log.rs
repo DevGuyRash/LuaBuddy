@@ -172,9 +172,16 @@ impl Operation {
         }
     }
 
+    /// Ends the operation. A failure is named `<event>.failed`, so its line
+    /// says so wherever it is read; anything else is `<event>.outcome`.
     pub fn finish(mut self, level: Level, outcome: impl Into<String>, data: Json) {
         self.finished = true;
-        let mut end = record(level, &format!("{}.outcome", self.event), outcome)
+        let ending = if level == Level::Error {
+            "failed"
+        } else {
+            "outcome"
+        };
+        let mut end = record(level, &format!("{}.{ending}", self.event), outcome)
             .with(data)
             .took(self.started.elapsed());
         end.0.module = self.module.clone();

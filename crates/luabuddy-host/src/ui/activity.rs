@@ -33,13 +33,18 @@ fn age(entry: &Entry, now: SystemTime) -> String {
     }
 }
 
+/// Whether the entry ends an action, however it went.
+fn ends(entry: &Entry) -> bool {
+    entry.event.ends_with(".outcome") || entry.event.ends_with(".failed")
+}
+
 /// Newest first. One action is one row: its outcome, and anything that went
 /// wrong on the way. Searching also finds every step in between.
 pub fn rows(entries: &[Entry], filter: &str) -> Vec<Row<Key>> {
     let now = SystemTime::now();
     let finished: BTreeSet<_> = entries
         .iter()
-        .filter(|entry| entry.event.ends_with(".outcome"))
+        .filter(|entry| ends(entry))
         .filter_map(|entry| entry.operation)
         .collect();
     entries
@@ -51,7 +56,7 @@ pub fn rows(entries: &[Entry], filter: &str) -> Vec<Row<Key>> {
             let step = entry
                 .operation
                 .is_some_and(|operation| finished.contains(&operation))
-                && !entry.event.ends_with(".outcome");
+                && !ends(entry);
             entry.level > if step { Level::Info } else { Level::Debug }
         })
         .map(|entry| Row {

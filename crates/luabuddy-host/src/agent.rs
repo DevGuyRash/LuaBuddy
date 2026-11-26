@@ -86,7 +86,7 @@ fn report(outcome: std::thread::Result<Result<(), String>>, jni: *mut RawJni, st
         Ok(Err(error)) => error,
         Err(_) => "Rust panic contained at JVM callback".to_owned(),
     };
-    crate::log::error(&format!("agent.{stage}"), error).write();
+    crate::log::error(&format!("agent.{stage}"), format!("Inactive: {error}")).write();
     // SAFETY: report is called before the native JVM callback returns.
     if let Ok(env) = unsafe { JNIEnv::from_raw(jni) }
         && matches!(env.exception_check(), Ok(true))
