@@ -432,7 +432,12 @@ impl Page {
                     1.0,
                 )?;
             }
-            for line in &self.lines {
+            // Lines are laid out top to bottom; skip straight to the first one in view.
+            let tallest = kit::line_height(Font::Large);
+            let first = self
+                .lines
+                .partition_point(|line| line.y + tallest < -scroll);
+            for line in &self.lines[first..] {
                 if line.y + kit::line_height(line.font) < -scroll || line.text.is_empty() {
                     continue;
                 }

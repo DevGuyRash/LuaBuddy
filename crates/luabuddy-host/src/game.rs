@@ -4,15 +4,21 @@ use luabuddy_core::{ModId, NativeMetadata, Profile};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-pub fn client(context: &mut Context<'_, '_>) -> Result<bool> {
+/// Whether this process is the dedicated server.
+pub fn server(context: &mut Context<'_, '_>) -> Result<bool> {
     context.jni(|env| {
-        Ok(env
-            .get_static_field("zombie/network/GameClient", "client", "Z")?
-            .z()?
-            && !env
-                .get_static_field("zombie/network/GameServer", "server", "Z")?
-                .z()?)
+        env.get_static_field("zombie/network/GameServer", "server", "Z")?
+            .z()
     })
+}
+
+/// Whether this process is a client connected to a server.
+pub fn client(context: &mut Context<'_, '_>) -> Result<bool> {
+    let connected = context.jni(|env| {
+        env.get_static_field("zombie/network/GameClient", "client", "Z")?
+            .z()
+    })?;
+    Ok(connected && !server(context)?)
 }
 
 pub fn property(context: &mut Context<'_, '_>, key: &str) -> Result<Option<String>> {
@@ -26,17 +32,20 @@ pub fn property(context: &mut Context<'_, '_>, key: &str) -> Result<Option<Strin
                 &[JValue::Object(&key)],
             )?
             .l()?;
-        if value.is_null() {
-            Ok(Value::default())
-        } else {
-            env.new_global_ref(value).map(|v| Value(Some(v)))
-        }
+        Value::retain(env, value)
     })?;
     if value.is_nil() {
         Ok(None)
     } else {
         context.text(&value).map(Some)
     }
+}
+
+/// The game's cache folder, the root of everything LuaBuddy writes there.
+pub fn cache_directory(context: &mut Context<'_, '_>) -> Result<std::path::PathBuf> {
+    let filesystem = instance(context)?;
+    let cache = object_method(context, &filesystem, "getCacheDir", "()Ljava/lang/String;")?;
+    Ok(std::path::PathBuf::from(context.text(&cache)?))
 }
 
 pub fn instance(context: &mut Context<'_, '_>) -> Result<Value> {
@@ -48,7 +57,7 @@ pub fn instance(context: &mut Context<'_, '_>) -> Result<Value> {
                 "Lzombie/ZomboidFileSystem;",
             )?
             .l()?;
-        env.new_global_ref(value).map(|v| Value(Some(v)))
+        Value::retain(env, value)
     })
 }
 
@@ -68,11 +77,7 @@ pub fn java_list(context: &mut Context<'_, '_>, list: &Value) -> Result<Vec<Valu
                     &[JValue::Int(i)],
                 )?
                 .l()?;
-            values.push(if value.is_null() {
-                Value::default()
-            } else {
-                Value(Some(env.new_global_ref(value)?))
-            });
+            values.push(Value::retain(env, value)?);
         }
         Ok(values)
     })
@@ -84,14 +89,12 @@ pub fn active(context: &mut Context<'_, '_>) -> Result<BTreeSet<ModId>> {
         let list = env
             .call_method(filesystem.object(), "getModIDs", "()Ljava/util/List;", &[])?
             .l()?;
-        env.new_global_ref(list).map(|v| Value(Some(v)))
+        Value::retain(env, list)
     })?;
     let mut ids = BTreeSet::new();
     for value in java_list(context, &list)? {
         let id = context.text(&value)?;
-        if !id.trim().is_empty() {
-            ids.insert(ModId::new(id).map_err(|e| e.to_string())?);
-        }
+        ids.extend(usable_id(id));
     }
     Ok(ids)
 }
@@ -115,12 +118,13 @@ fn object_method(
         let value = env
             .call_method(object.object(), method, signature, &[])?
             .l()?;
-        if value.is_null() {
-            Ok(Value::default())
-        } else {
-            env.new_global_ref(value).map(|v| Value(Some(v)))
-        }
+        Value::retain(env, value)
     })
+}
+
+/// The mods a mod's own metadata says it requires.
+pub fn requirements(context: &mut Context<'_, '_>, info: &Value) -> Result<Vec<ModId>> {
+    strings(context, info, "getRequire")
 }
 
 fn strings(context: &mut Context<'_, '_>, object: &Value, method: &str) -> Result<Vec<ModId>> {
@@ -128,12 +132,28 @@ fn strings(context: &mut Context<'_, '_>, object: &Value, method: &str) -> Resul
     let mut ids = Vec::new();
     for value in java_list(context, &list)? {
         let id = context.text(&value)?;
-        // A blank metadata line reaches here as one empty entry.
-        if !id.trim().is_empty() {
-            ids.push(ModId::new(id).map_err(|e| e.to_string())?);
-        }
+        ids.extend(usable_id(id));
     }
     Ok(ids)
+}
+
+/// A mod ID as LuaBuddy can name it. A blank metadata line arrives as an empty
+/// entry; an ID no profile could hold names nothing LuaBuddy loads, so neither
+/// stops the rest from being read.
+fn usable_id(id: String) -> Option<ModId> {
+    if id.trim().is_empty() {
+        return None;
+    }
+    ModId::new(id.as_str())
+        .inspect_err(|_| {
+            // Read on every refresh, so each one is mentioned once.
+            static SEEN: std::sync::Mutex<BTreeSet<String>> =
+                std::sync::Mutex::new(BTreeSet::new());
+            if SEEN.lock().is_ok_and(|mut seen| seen.insert(id.clone())) {
+                eprintln!("[LuaBuddy] Ignoring a mod ID LuaBuddy can't name: {id:?}");
+            }
+        })
+        .ok()
 }
 
 pub struct Discovered {
@@ -142,10 +162,33 @@ pub struct Discovered {
     pub failures: BTreeMap<ModId, String>,
 }
 
+/// Resolves the selected and native mods, registering Workshop folders with
+/// the game so its own file lookups find them.
 pub fn discover(
     context: &mut Context<'_, '_>,
     profiles: &[Profile],
     native: &BTreeSet<ModId>,
+) -> Result<Discovered> {
+    resolve(context, profiles, native, true)
+}
+
+/// Finds the same mods without registering Workshop folders or repairing their
+/// layout, for work that runs before anything is loaded, such as warming the
+/// disk cache. The game's own lookups still cache what they find, as they do
+/// for its menus.
+pub fn locate(
+    context: &mut Context<'_, '_>,
+    profiles: &[Profile],
+    native: &BTreeSet<ModId>,
+) -> Result<Discovered> {
+    resolve(context, profiles, native, false)
+}
+
+fn resolve(
+    context: &mut Context<'_, '_>,
+    profiles: &[Profile],
+    native: &BTreeSet<ModId>,
+    register: bool,
 ) -> Result<Discovered> {
     let mut result = Discovered {
         metadata: BTreeMap::new(),
@@ -157,7 +200,7 @@ pub fn discover(
             continue;
         }
         let resolved = if profile.enabled {
-            discover_one(context, profile)
+            discover_one(context, profile, register)
         } else {
             native_info(context, &profile.id).and_then(|info| metadata(context, &profile.id, info))
         };
@@ -190,7 +233,8 @@ pub fn discover(
     Ok(result)
 }
 
-fn native_info(context: &mut Context<'_, '_>, id: &ModId) -> Result<Value> {
+/// The game's record of an installed mod; nil when it isn't installed.
+pub fn native_info(context: &mut Context<'_, '_>, id: &ModId) -> Result<Value> {
     context.jni(|env| {
         let id = env.new_string(id.as_str())?;
         let value = env
@@ -201,7 +245,7 @@ fn native_info(context: &mut Context<'_, '_>, id: &ModId) -> Result<Value> {
                 &[JValue::Object(&id)],
             )?
             .l()?;
-        retain(env, &value)
+        Value::retain(env, &value)
     })
 }
 
@@ -216,7 +260,7 @@ fn read_mod_info(context: &mut Context<'_, '_>, root: &std::path::Path) -> Resul
                 &[JValue::Object(&path)],
             )?
             .l()?;
-        retain(env, &value)
+        Value::retain(env, &value)
     })
 }
 
@@ -247,7 +291,7 @@ fn registered_workshop_info(context: &mut Context<'_, '_>, id: &ModId) -> Result
                 &[JValue::Int(0), JValue::Object(&known)],
             )?;
         }
-        retain(env, &list)
+        Value::retain(env, &list)
     })?;
     for folder in java_list(context, &folders)? {
         let root = PathBuf::from(context.text(&folder)?);
@@ -265,6 +309,7 @@ fn registered_workshop_info(context: &mut Context<'_, '_>, id: &ModId) -> Result
 fn discover_one(
     context: &mut Context<'_, '_>,
     profile: &Profile,
+    register: bool,
 ) -> Result<(NativeMetadata, Value)> {
     let mut info = if profile.path.is_some() {
         Value::default()
@@ -308,7 +353,7 @@ fn discover_one(
                         &[JValue::Long(workshop_id as i64)],
                     )?
                     .l()?;
-                retain(env, &value)
+                Value::retain(env, &value)
             })?;
             if folder.is_nil() {
                 return Err(format!(
@@ -318,13 +363,13 @@ fn discover_one(
             luabuddy_core::source::absolute_normalized_path(&PathBuf::from(context.text(&folder)?))
                 .map_err(|e| e.to_string())?
         };
-        if profile.workshop.is_some() && root.join("mod.info").is_file() {
+        if register && profile.workshop.is_some() && root.join("mod.info").is_file() {
             repair_flat_root(context, &root)?;
         }
         info = read_mod_info(context, &root)?;
     }
     let resolved = metadata(context, &profile.id, info)?;
-    if profile.workshop.is_some() {
+    if register && profile.workshop.is_some() {
         let filesystem = instance(context)?;
         let dir = object_method(context, &resolved.1, "getDir", "()Ljava/lang/String;")?;
         context.jni(|env| {
@@ -356,7 +401,7 @@ pub(crate) fn repair_flat_root(
                 &[JValue::Object(&root)],
             )?
             .l()?;
-        retain(env, &flat)
+        Value::retain(env, &flat)
     })?;
     for method in ["getCommonDir", "getVersionDir"] {
         let dir = object_method(context, &flat, method, "()Ljava/lang/String;")?;
@@ -459,14 +504,6 @@ fn metadata(
     ))
 }
 
-fn retain(env: &jni::JNIEnv<'_>, object: &jni::objects::JObject<'_>) -> jni::errors::Result<Value> {
-    if object.is_null() {
-        Ok(Value::default())
-    } else {
-        env.new_global_ref(object).map(|v| Value(Some(v)))
-    }
-}
-
 pub fn mount(context: &mut Context<'_, '_>, id: &ModId, info: &Value) -> Result<()> {
     let filesystem = instance(context)?;
     let root = object_method(context, info, "getDir", "()Ljava/lang/String;")?;
@@ -512,6 +549,11 @@ pub fn callbacks(
             let callback = env
                 .call_method(&list, "get", "(I)Ljava/lang/Object;", &[JValue::Int(index)])?
                 .l()?;
+            // Only a Lua closure comes from a script file; anything else that
+            // was registered belongs to no mod and is left alone.
+            if !env.is_instance_of(&callback, "se/krka/kahlua/vm/LuaClosure")? {
+                continue;
+            }
             let prototype = env
                 .get_field(&callback, "prototype", "Lse/krka/kahlua/vm/Prototype;")?
                 .l()?;
@@ -544,7 +586,7 @@ pub fn callback_filename(context: &mut Context<'_, '_>, callback: &Value) -> Res
         let filename = env
             .get_field(prototype, "filename", "Ljava/lang/String;")?
             .l()?;
-        retain(env, &filename)
+        Value::retain(env, &filename)
     })?;
     context.text(&filename)
 }
@@ -589,7 +631,7 @@ pub fn remove_callbacks(
                 "Ljava/util/ArrayList;",
             )?
             .l()?;
-        retain(env, &list)
+        Value::retain(env, &list)
     })?;
     let mut removed = 0;
     for event in java_list(context, &events)? {
@@ -597,7 +639,7 @@ pub fn remove_callbacks(
             let name = env
                 .get_field(event.object(), "name", "Ljava/lang/String;")?
                 .l()?;
-            retain(env, &name)
+            Value::retain(env, &name)
         })?;
         let name = context.text(&name)?;
         let owned = callbacks(context, &name, filenames)?;

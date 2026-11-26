@@ -3,7 +3,7 @@
 //! Everything here is a pure function of observed state, so the action button,
 //! the right-click menu and the tests all read the same answer.
 
-use crate::{activation::Eligibility, observe::Place, steam::ItemState};
+use crate::{activation::Eligibility, observe::Place, runtime::RunState, steam::ItemState};
 use luabuddy_core::ModId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,18 +26,20 @@ pub enum Runtime {
 }
 
 impl Runtime {
-    pub fn read(status: &str) -> Self {
-        if status == "loaded" {
-            Self::Loaded
-        } else if let Some(reason) = status.strip_prefix("failed: ") {
-            Self::Failed(reason.to_owned())
-        } else if let Some(reason) = status.strip_prefix("restart-required: ") {
-            Self::NeedsGameStart(reason.to_owned())
-        } else {
-            Self::NotLoaded
+    /// What the interface needs from a mod's run state, if it has one.
+    pub fn of(state: Option<&RunState>) -> Self {
+        match state {
+            Some(RunState::Loaded) => Self::Loaded,
+            Some(RunState::Failed(reason)) => Self::Failed(reason.clone()),
+            Some(RunState::RestartRequired(reason)) => Self::NeedsGameStart(reason.clone()),
+            Some(RunState::Disabled | RunState::ServerLoaded) | None => Self::NotLoaded,
         }
     }
 }
+
+/// Why a change waits while the game's Options screen has unsaved edits.
+pub const OPTIONS_PENDING: &str = "Apply or cancel your pending game Options changes first.";
+const UPDATE_AVAILABLE: &str = "Update available";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct World {
@@ -50,8 +52,7 @@ pub struct World {
 
 impl World {
     fn change_blocked(&self) -> Option<String> {
-        self.options_pending
-            .then(|| "Apply or cancel your pending game Options changes first.".into())
+        self.options_pending.then(|| OPTIONS_PENDING.into())
     }
 
     fn load_blocked(&self) -> Option<String> {
@@ -67,6 +68,19 @@ pub struct Requirement {
     pub title: String,
     pub installed: bool,
     pub on: bool,
+}
+
+impl Requirement {
+    /// How a required mod stands, in a word.
+    pub fn state(&self) -> (Tone, &'static str) {
+        if !self.installed {
+            (Tone::Bad, "not installed")
+        } else if self.on {
+            (Tone::Good, "on")
+        } else {
+            (Tone::Muted, "off")
+        }
+    }
 }
 
 /// Everything known about one mod identity.
@@ -509,10 +523,10 @@ impl Node {
     }
 }
 
-/// The action this mod's state calls for, if any. Other actions stay in the
-/// menu rather than standing in for it.
-pub fn primary(view: &ModView, world: World) -> Option<Node> {
-    mod_menu(view, world).into_iter().find(|node| node.main)
+/// The action a mod's state calls for, if its menu has one. Other actions stay
+/// in the menu rather than standing in for it.
+pub fn primary(menu: &[Node]) -> Option<Node> {
+    menu.iter().find(|node| node.main).cloned()
 }
 
 /// Every action that applies to this mod in this situation, likeliest first.
@@ -592,17 +606,7 @@ pub fn mod_menu(view: &ModView, world: World) -> Vec<Node> {
             .iter()
             .map(|need| {
                 let node = Node::act(
-                    format!(
-                        "{} ({})",
-                        need.title,
-                        if !need.installed {
-                            "not installed"
-                        } else if need.on {
-                            "on"
-                        } else {
-                            "off"
-                        }
-                    ),
+                    format!("{} ({})", need.title, need.state().1),
                     Act::ShowMod(need.id.clone()),
                 );
                 node.blocked((!need.installed).then(|| format!("{} is not installed.", need.title)))
@@ -694,12 +698,22 @@ fn turn_off(view: &ModView, world: World) -> Option<Node> {
     } else {
         "Won't load any more. Files and saved settings are kept."
     };
+    // A one-launch queue entry would load it once more anyway; only the
+    // command line that queued it can cancel it.
+    let blocked = world.change_blocked().or_else(|| {
+        view.queued.then(|| {
+            format!(
+                "It is also queued for one future launch. Cancel that first with: luabuddy deselect --mod {} --once",
+                view.id
+            )
+        })
+    });
     let mut ids = vec![view.id.clone()];
     if view.dependents.is_empty() {
         return Some(
             Node::act("Turn off", Act::TurnOff(ids))
                 .hint(hint)
-                .blocked(world.change_blocked()),
+                .blocked(blocked),
         );
     }
     ids.extend(view.dependents.iter().map(|(id, _)| id.clone()));
@@ -725,7 +739,7 @@ fn turn_off(view: &ModView, world: World) -> Option<Node> {
                 .collect::<Vec<_>>()
                 .join(", ")
         ))
-        .blocked(world.change_blocked()),
+        .blocked(blocked),
     )
 }
 
@@ -801,7 +815,7 @@ impl ItemView {
         if state.downloading || state.download_pending {
             "Downloading"
         } else if state.installed && state.needs_update {
-            "Update available"
+            UPDATE_AVAILABLE
         } else if state.installed && state.subscribed {
             "Installed"
         } else if state.installed {
@@ -903,6 +917,17 @@ pub fn load_waiting(totals: Totals, world: World) -> Option<Node> {
     })
 }
 
+/// The action at the window's foot: loading what waits, or quitting to apply
+/// changes to the game's own mod list.
+pub fn footer(totals: Totals, world: World) -> Option<Node> {
+    load_waiting(totals, world).or_else(|| {
+        (totals.restart > 0).then(|| {
+            Node::act("Quit to apply...", Act::Quit)
+                .hint("Your changes to the game's mod list apply when you start it again.")
+        })
+    })
+}
+
 pub fn tools_menu(totals: Totals, world: World) -> Vec<Node> {
     let mut nodes = Vec::new();
     nodes.extend(load_waiting(totals, world));
@@ -990,13 +1015,7 @@ pub fn mod_document(view: &ModView, world: World) -> Vec<Block> {
     ));
     if !view.requirements.is_empty() {
         for need in &view.requirements {
-            let (tone, state) = if !need.installed {
-                (Tone::Bad, "not installed")
-            } else if need.on {
-                (Tone::Good, "on")
-            } else {
-                (Tone::Muted, "off")
-            };
+            let (tone, state) = need.state();
             blocks.push(Block::Fact(
                 "Needs".into(),
                 tone,
@@ -1020,7 +1039,7 @@ pub fn mod_document(view: &ModView, world: World) -> Vec<Block> {
                 Tone::Normal
             },
             if state.needs_update {
-                "Update available".into()
+                UPDATE_AVAILABLE.into()
             } else if state.subscribed {
                 "Subscribed".into()
             } else {
@@ -1210,11 +1229,13 @@ mod tests {
     fn an_off_mod_is_turned_on_in_the_menu_and_loaded_on_a_server() {
         let view = installed("A");
         assert_eq!(
-            primary(&view, world(Place::MainMenu)).unwrap().act,
+            primary(&mod_menu(&view, world(Place::MainMenu)))
+                .unwrap()
+                .act,
             Some(Act::TurnOn(id("A")))
         );
         assert_eq!(
-            primary(&view, world(Place::Server)).unwrap().act,
+            primary(&mod_menu(&view, world(Place::Server))).unwrap().act,
             Some(Act::LoadNow(id("A")))
         );
         // Nothing offered here can unload it, because it isn't on.
@@ -1293,7 +1314,7 @@ mod tests {
             "Failed: Broken.lua:1: unexpected symbol"
         );
         assert_eq!(
-            primary(&view, world(Place::Server)).unwrap().act,
+            primary(&mod_menu(&view, world(Place::Server))).unwrap().act,
             Some(Act::LoadNow(id("Broken")))
         );
         view.spent = true;
@@ -1315,16 +1336,23 @@ mod tests {
         view.selected = true;
         view.runtime = Runtime::Loaded;
         view.can_reload = true;
-        let first = primary(&view, world(Place::Server)).unwrap();
+        let first = primary(&mod_menu(&view, world(Place::Server))).unwrap();
         assert_eq!(first.act, Some(Act::Reload(id("Base"))));
         assert_eq!(first.blocked, None);
         view.running_dependents = vec!["Top".into()];
-        let blocked = primary(&view, world(Place::Server)).unwrap().blocked;
+        let blocked = primary(&mod_menu(&view, world(Place::Server)))
+            .unwrap()
+            .blocked;
         assert!(blocked.unwrap().starts_with("Top runs on top of it"));
         view.running_dependents.clear();
         let mut pending = world(Place::Server);
         pending.options_pending = true;
-        assert!(primary(&view, pending).unwrap().blocked.is_some());
+        assert!(
+            primary(&mod_menu(&view, pending))
+                .unwrap()
+                .blocked
+                .is_some()
+        );
     }
 
     #[test]
@@ -1456,5 +1484,59 @@ mod tests {
                 .iter()
                 .any(|node| node.label == "Native extensions" || node.act == Some(Act::Quit))
         );
+    }
+
+    #[test]
+    fn a_queued_mod_cannot_be_turned_off_here() {
+        let mut view = installed("Queued");
+        view.selected = true;
+        view.queued = true;
+        let node = mod_menu(&view, world(Place::Server))
+            .into_iter()
+            .find(|node| matches!(node.act, Some(Act::TurnOff(_))))
+            .expect("Turn off is offered");
+        assert!(node.blocked.unwrap().contains("--once"));
+        view.queued = false;
+        let node = mod_menu(&view, world(Place::Server))
+            .into_iter()
+            .find(|node| matches!(node.act, Some(Act::TurnOff(_))))
+            .unwrap();
+        assert_eq!(node.blocked, None);
+    }
+
+    #[test]
+    fn the_footer_loads_what_waits_or_offers_to_quit() {
+        let waiting = Totals {
+            waiting: 2,
+            ..Totals::default()
+        };
+        let load = footer(waiting, world(Place::Server)).unwrap();
+        assert_eq!(
+            (load.label.as_str(), load.act),
+            ("Load 2 waiting mods", Some(Act::LoadWaiting))
+        );
+        assert_eq!(footer(waiting, world(Place::MainMenu)), None);
+        let restart = Totals {
+            restart: 1,
+            ..Totals::default()
+        };
+        assert_eq!(
+            footer(restart, world(Place::MainMenu)).unwrap().act,
+            Some(Act::Quit)
+        );
+        assert_eq!(footer(Totals::default(), world(Place::Server)), None);
+    }
+
+    #[test]
+    fn a_requirement_reads_as_its_state() {
+        let need = |installed, on| Requirement {
+            id: id("Needed"),
+            title: "Needed".into(),
+            installed,
+            on,
+        };
+        assert_eq!(need(false, true).state(), (Tone::Bad, "not installed"));
+        assert_eq!(need(true, true).state(), (Tone::Good, "on"));
+        assert_eq!(need(true, false).state(), (Tone::Muted, "off"));
     }
 }

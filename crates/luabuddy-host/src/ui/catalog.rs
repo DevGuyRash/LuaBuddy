@@ -65,8 +65,7 @@ impl Catalog {
                 "(Ljava/util/List;)V",
                 &[JValue::Object(&list)],
             )?;
-            env.new_global_ref(list)
-                .map(|reference| Value(Some(reference)))
+            Value::retain(env, list)
         })?;
         let mut queue = VecDeque::new();
         let mut seen = BTreeSet::new();
@@ -99,21 +98,7 @@ impl Catalog {
         let mut changed = false;
         while let Some((directory, native)) = self.queue.pop_front() {
             changed = true;
-            // Each folder's references are released before the next one is read.
-            let read = context
-                .jni(|env| env.push_local_frame(64))
-                .and_then(|()| {
-                    let found = read(context, &directory, native);
-                    context
-                        .jni(|env| {
-                            // SAFETY: The frame was pushed just above and nothing read
-                            // in it escapes as a local reference; values are global.
-                            unsafe { env.pop_local_frame(&jni::objects::JObject::null()) }.map(drop)
-                        })
-                        .map(|()| found)
-                })
-                .and_then(|found| found);
-            match read {
+            match read(context, &directory, native) {
                 Ok(Some(found)) => {
                     self.mods
                         .entry(found.id.clone())
@@ -332,8 +317,7 @@ fn read(context: &mut Context<'_, '_>, directory: &str, native: bool) -> Result<
         if object.is_null() {
             Ok(Value::default())
         } else {
-            env.new_global_ref(object)
-                .map(|reference| Value(Some(reference)))
+            Value::retain(env, object)
         }
     })?;
     if info.is_nil() {
@@ -351,8 +335,7 @@ fn read(context: &mut Context<'_, '_>, directory: &str, native: bool) -> Result<
         if object.is_null() {
             Ok(Value::default())
         } else {
-            env.new_global_ref(object)
-                .map(|reference| Value(Some(reference)))
+            Value::retain(env, object)
         }
     })?;
     let mut requires = Vec::new();
@@ -456,8 +439,7 @@ fn game_version(
         if value.is_null() {
             Ok(Value::default())
         } else {
-            env.new_global_ref(value)
-                .map(|reference| Value(Some(reference)))
+            Value::retain(env, value)
         }
     })?;
     if value.is_nil() {

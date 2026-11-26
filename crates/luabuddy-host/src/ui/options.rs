@@ -1,7 +1,10 @@
 //! LuaBuddy's place in the game's Options screen, and rebuilding that screen's
 //! Mods page when newly loaded mods add settings to it.
 
-use super::{Event, callback, kit::first};
+use super::{
+    Event, callback,
+    kit::{self, first},
+};
 use crate::{
     log,
     lua::{Context, Result, Value},
@@ -122,8 +125,7 @@ pub fn refresh(context: &mut Context<'_, '_>) -> Result<()> {
             }
         }
         remove.sort_by_key(|index| std::cmp::Reverse(*index));
-        let table = context.global("table")?;
-        let table_remove = context.get(&table, "remove")?;
+        let table_remove = kit::table_function(context, "remove")?;
         for index in remove {
             let index = context.number(index as f64)?;
             context.call(&table_remove, &[keys.clone(), index])?;
@@ -144,9 +146,8 @@ pub fn refresh(context: &mut Context<'_, '_>) -> Result<()> {
     let (replacement_index, replacement) =
         replacement.ok_or("The rebuilt native Mods tab is absent from its view registry")?;
     context.set(&replacement, "id", &original_id)?;
-    let table = context.global("table")?;
-    let table_remove = context.get(&table, "remove")?;
-    let table_insert = context.get(&table, "insert")?;
+    let table_remove = kit::table_function(context, "remove")?;
+    let table_insert = kit::table_function(context, "insert")?;
     context.call(&table_remove, &[view_list.clone(), replacement_index])?;
     context.call(&table_insert, &[view_list, original_index, replacement])?;
     context.invoke(&options, "toUI", &[])?;

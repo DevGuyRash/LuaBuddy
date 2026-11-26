@@ -11,6 +11,8 @@ mod classfile;
 mod events;
 #[path = "../../../crates/luabuddy-host/src/jvmti.rs"]
 mod jvmti;
+#[path = "../../../crates/luabuddy-host/src/layout.rs"]
+mod layout;
 
 use jni::JNIEnv;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};

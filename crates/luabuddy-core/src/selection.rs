@@ -166,7 +166,27 @@ fn pending_directory(directory: &Path) -> PathBuf {
 /// is in exactly one of the two lists.
 pub fn queue(directory: &Path) -> Result<(Vec<Profile>, Vec<CoreError>), CoreError> {
     let (profiles, mut skipped) = read_queue(directory)?;
-    let (usable, conflicts) = split_conflicts(directory, profiles)?;
+    // A persistent file that can't be read might shadow any queued entry, so a
+    // claim keeps the whole queue until it can be read. Listing says the same,
+    // rather than failing as a claim does.
+    let (persistent, unreadable) = crate::profile::read_each_profile(directory)?;
+    if let Some(blocker) = unreadable.first() {
+        let blocker = blocker.path.as_deref().map_or_else(
+            || blocker.message.clone(),
+            |path| path.display().to_string(),
+        );
+        skipped.extend(profiles.iter().map(|profile| {
+            error(
+                &profile.file,
+                format!(
+                    "One-launch selection {} is held until {blocker} can be read",
+                    profile.id
+                ),
+            )
+        }));
+        return Ok((Vec::new(), skipped));
+    }
+    let (usable, conflicts) = split_conflicts(&persistent, profiles);
     skipped.extend(conflicts);
     Ok((usable, skipped))
 }
@@ -229,15 +249,12 @@ fn read_registration(path: &Path) -> Result<Profile, CoreError> {
     Ok(profile)
 }
 
-fn split_conflicts(
-    directory: &Path,
-    queued: Vec<Profile>,
-) -> Result<(Vec<Profile>, Vec<CoreError>), CoreError> {
-    let persistent = read_profiles(directory)?;
+/// Splits queued registrations from those a persistent profile shadows.
+fn split_conflicts(persistent: &[Profile], queued: Vec<Profile>) -> (Vec<Profile>, Vec<CoreError>) {
     let (conflicts, usable) = queued
         .into_iter()
         .partition::<Vec<_>, _>(|profile| persistent.iter().any(|other| other.id == profile.id));
-    Ok((usable, conflicts.iter().map(conflict).collect()))
+    (usable, conflicts.iter().map(conflict).collect())
 }
 
 fn conflict(profile: &Profile) -> CoreError {
@@ -463,7 +480,10 @@ pub fn claim(directory: &Path) -> Result<Vec<Profile>, CoreError> {
     }
     // Everything is validated before anything is consumed. Removing a file is
     // what claims it, so a registration cancelled meanwhile is not claimed.
-    let (profiles, _) = split_conflicts(&directory, read_queue(&directory)?.0)?;
+    // An unreadable persistent profile might shadow a queued one, so the queue
+    // is kept for the next launch rather than claimed around it.
+    let persistent = read_profiles(&directory)?;
+    let (profiles, _) = split_conflicts(&persistent, read_queue(&directory)?.0);
     let claimed = profiles
         .into_iter()
         .filter(|profile| fs::remove_file(&profile.file).is_ok())

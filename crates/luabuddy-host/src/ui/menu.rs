@@ -125,8 +125,7 @@ fn fill(
             context.set(&sub, "subOptionNums", &number)?;
             context.set(&option, "subOption", &number)?;
             let map = context.get(&menu.root, "instanceMap")?;
-            let table = context.global("table")?;
-            let insert = context.get(&table, "insert")?;
+            let insert = kit::table_function(context, "insert")?;
             context.call(&insert, &[map, sub.clone()])?;
             fill(context, session, menu, &sub, &node.children, pick)?;
         }
@@ -142,9 +141,7 @@ impl Menu {
     pub fn take_joypad(&self, context: &mut Context<'_, '_>, joypad: &Value) -> Result<()> {
         kit::set_number(context, &self.root, "mouseOver", 1.0)?;
         kit::set_flag(context, &self.root, "mouseOut", false)?;
-        context.set(joypad, "focus", &self.root)?;
-        context.call_global("updateJoypadFocus", std::slice::from_ref(joypad))?;
-        Ok(())
+        kit::focus_joypad(context, joypad, &self.root)
     }
 
     /// The submenu a native option refers to by number.

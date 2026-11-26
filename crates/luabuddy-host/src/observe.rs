@@ -8,6 +8,8 @@ use crate::{
 use jni::{
     JNIEnv,
     objects::{JObject, JObjectArray, JString},
+    signature::{Primitive, ReturnType},
+    sys::jvalue,
 };
 use serde_json::{Map, Value as Json, json};
 use std::{collections::BTreeMap, time::Duration};
@@ -410,6 +412,8 @@ fn globals_after(
     })
 }
 
+/// Callback counts per event. It runs twice for every loaded mod, so the
+/// lookups by name are resolved once per call rather than once per event.
 fn callbacks(context: &mut Context<'_, '_>) -> Result<BTreeMap<String, usize>> {
     context.jni(|env| {
         let list = env
@@ -419,19 +423,45 @@ fn callbacks(context: &mut Context<'_, '_>) -> Result<BTreeMap<String, usize>> {
                 "Ljava/util/ArrayList;",
             )?
             .l()?;
-        let count = env.call_method(&list, "size", "()I", &[])?.i()?;
+        let lists = env.find_class("java/util/ArrayList")?;
+        let get = env.get_method_id(&lists, "get", "(I)Ljava/lang/Object;")?;
+        let size = env.get_method_id(&lists, "size", "()I")?;
+        let events = env.find_class("zombie/Lua/Event")?;
+        let callbacks_field = env.get_field_id(&events, "callbacks", "Ljava/util/ArrayList;")?;
+        let name_field = env.get_field_id(&events, "name", "Ljava/lang/String;")?;
+        let int = ReturnType::Primitive(Primitive::Int);
+        // SAFETY: `size` was resolved on ArrayList and `list` is one.
+        let count = unsafe { env.call_method_unchecked(&list, size, int.clone(), &[]) }?.i()?;
         let mut result = BTreeMap::new();
         for index in 0..count {
             env.with_local_frame(8, |env| -> jni::errors::Result<()> {
-                let event = env
-                    .call_method(&list, "get", "(I)Ljava/lang/Object;", &[index.into()])?
-                    .l()?;
+                // SAFETY: `get` was resolved on ArrayList with this descriptor.
+                let event = unsafe {
+                    env.call_method_unchecked(
+                        &list,
+                        get,
+                        ReturnType::Object,
+                        &[jvalue { i: index }],
+                    )
+                }?
+                .l()?;
+                if !env.is_instance_of(&event, &events)? {
+                    return Ok(());
+                }
                 let callbacks = env
-                    .get_field(&event, "callbacks", "Ljava/util/ArrayList;")?
+                    .get_field_unchecked(&event, callbacks_field, ReturnType::Object)?
                     .l()?;
-                let size = env.call_method(&callbacks, "size", "()I", &[])?.i()?;
+                if callbacks.is_null() {
+                    return Ok(());
+                }
+                // SAFETY: the callbacks field is declared ArrayList, and `size` is ArrayList's.
+                let size =
+                    unsafe { env.call_method_unchecked(&callbacks, size, int.clone(), &[]) }?
+                        .i()?;
                 if size > 0 {
-                    let name = env.get_field(&event, "name", "Ljava/lang/String;")?.l()?;
+                    let name = env
+                        .get_field_unchecked(&event, name_field, ReturnType::Object)?
+                        .l()?;
                     let name = env
                         .get_string(&JString::from(name))?
                         .to_string_lossy()

@@ -1,4 +1,6 @@
-const CALL_DESCRIPTOR: &[u8] = b"(Lse/krka/kahlua/vm/LuaCallFrame;I)I";
+use crate::callables;
+
+const CALL_DESCRIPTOR: &[u8] = callables::DESCRIPTOR.as_bytes();
 
 enum Bridge {
     Callable,
@@ -93,7 +95,7 @@ fn native_method(bytes: &[u8], bridge: Bridge) -> Result<Vec<u8>, String> {
     }
     let pool_end = reader.position;
     let (target_name, target_descriptor) = match bridge {
-        Bridge::Callable => (b"call".as_slice(), CALL_DESCRIPTOR),
+        Bridge::Callable => (callables::METHOD_NAME.as_bytes(), CALL_DESCRIPTOR),
         Bridge::Event => (b"trigger".as_slice(), crate::events::DESCRIPTOR.as_bytes()),
     };
     if matches!(bridge, Bridge::Event) && utf8.contains(&Some(crate::events::ORIGINAL.as_bytes())) {
@@ -169,7 +171,7 @@ fn native_method(bytes: &[u8], bridge: Bridge) -> Result<Vec<u8>, String> {
         let instructions = code_reader.take(code_size)?;
         match bridge {
             Bridge::Callable => {
-                if max_stack != 1 || max_locals != 3 || instructions != [0x03, 0xac] {
+                if max_stack != 1 || max_locals != 3 || instructions != callables::ORIGINAL_CODE {
                     return Err("callable method is no longer the expected host no-op".into());
                 }
             }

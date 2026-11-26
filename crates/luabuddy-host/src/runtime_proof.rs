@@ -666,7 +666,7 @@ fn baseline(env: &mut JNIEnv<'_>, fixture: &Fixture) -> Result<()> {
             let filename = env
                 .get_field(prototype, "filename", "Ljava/lang/String;")?
                 .l()?;
-            env.new_global_ref(filename).map(|value| Value(Some(value)))
+            Value::retain(env, filename)
         })?;
         if context.text(&filename)?
             != fixture
@@ -1195,7 +1195,7 @@ fn native_ordering(env: &mut JNIEnv<'_>, fixture: &Fixture) -> Result<()> {
                             &[JValue::Object(&name)],
                         )?
                         .l()?;
-                    env.new_global_ref(path).map(|value| Value(Some(value)))
+                    Value::retain(env, path)
                 })?;
                 if context.text(&image)?
                     == fixture

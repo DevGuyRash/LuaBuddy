@@ -768,6 +768,25 @@ fn one_launch_keeps_the_queue_when_a_persistent_profile_is_unreadable() {
     assert!(!root.0.join(".launch-once/pending").exists());
 }
 
+#[test]
+fn listing_the_queue_survives_an_unreadable_persistent_profile() {
+    use luabuddy_core::selection::{self, Lifetime};
+    let root = Directory::new();
+    selection::select(&root.0, &id("Temporary"), None, Lifetime::Once, None).unwrap();
+    fs::write(
+        root.0.join("Broken.properties"),
+        "id=Broken\nunknown=true\n",
+    )
+    .unwrap();
+    // The listing still works, and says what a claim would do: hold the entry.
+    let (usable, skipped) = selection::queue(&root.0).unwrap();
+    assert!(usable.is_empty());
+    assert_eq!(skipped.len(), 1);
+    assert!(skipped[0].message.contains("Temporary"));
+    assert!(skipped[0].message.contains("Broken.properties"));
+    assert!(selection::claim(&root.0).is_err());
+}
+
 #[cfg(unix)]
 #[test]
 fn selections_follow_a_linked_parent_but_not_a_linked_store() {

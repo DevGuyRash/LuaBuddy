@@ -21,14 +21,19 @@ static METHOD: AtomicUsize = AtomicUsize::new(0);
 static NATIVE_READY: AtomicBool = AtomicBool::new(false);
 static REGISTRY: Mutex<Vec<Registration>> = Mutex::new(Vec::new());
 
+/// The game method LuaBuddy's callables enter through: a no-op until bound.
+pub(crate) const CLASS: &str = "zombie/Lua/LuaEventManager";
+pub(crate) const METHOD_NAME: &str = "call";
+pub(crate) const DESCRIPTOR: &str = "(Lse/krka/kahlua/vm/LuaCallFrame;I)I";
+/// Its unbound bytecode: `iconst_0; ireturn`.
+pub(crate) const ORIGINAL_CODE: [u8; 2] = [0x03, 0xac];
+
 pub(crate) fn prepare(env: &mut JNIEnv<'_>, jvmti: &Jvmti) -> Result<(), String> {
-    let class = env
-        .find_class("zombie/Lua/LuaEventManager")
-        .map_err(|e| e.to_string())?;
+    let class = env.find_class(CLASS).map_err(|e| e.to_string())?;
     let method = env
-        .get_method_id(class, "call", "(Lse/krka/kahlua/vm/LuaCallFrame;I)I")
+        .get_method_id(class, METHOD_NAME, DESCRIPTOR)
         .map_err(|e| e.to_string())?;
-    if jvmti.bytecodes(method.into_raw())? != [0x03, 0xac] {
+    if jvmti.bytecodes(method.into_raw())? != ORIGINAL_CODE {
         return Err(
             "incompatible LuaEventManager.call implementation; expected native no-op".to_owned(),
         );
@@ -53,7 +58,7 @@ pub(crate) fn create(
     }
     sweep(env)?;
     let callable = env
-        .new_object("zombie/Lua/LuaEventManager", "()V", &[])
+        .new_object(CLASS, "()V", &[])
         .and_then(|object| env.new_global_ref(object))
         .map_err(|e| e.to_string())?;
     let weak = env

@@ -1,5 +1,5 @@
 use crate::{
-    game,
+    callables, game,
     lua::{Context, Result, Value},
     patcher::JvmPatcher,
 };
@@ -441,7 +441,7 @@ pub fn diagnostics() -> Json {
     };
     let status = |installed| if installed { "installed" } else { "inactive" };
     let runtime_hooks = json!([
-        {"id":"luabuddy.callable-bridge","owner":"LuaBuddy","state":status(crate::bridge::ready()),"mechanism":"native declaration and RegisterNatives","disable":"restart required","target":{"class":"zombie/Lua/LuaEventManager","method":"call","descriptor":"(Lse/krka/kahlua/vm/LuaCallFrame;I)I","loader":"system","originalCode":"03ac"}},
+        {"id":"luabuddy.callable-bridge","owner":"LuaBuddy","state":status(crate::bridge::ready()),"mechanism":"native declaration and RegisterNatives","disable":"restart required","target":{"class":callables::CLASS,"method":callables::METHOD_NAME,"descriptor":callables::DESCRIPTOR,"loader":"system","originalCode":callables::ORIGINAL_CODE.iter().map(|byte| format!("{byte:02x}")).collect::<String>()}},
         {"id":"luabuddy.lifecycle","owner":"LuaBuddy","state":status(crate::events::installed()),"mechanism":"native bridge around unchanged original dispatcher","disable":"restart required","targets":targets("zombie/Lua/Event")},
         {"id":"luabuddy.workshop-download-observer","owner":"LuaBuddy","state":status(crate::download_events::installed()),"mechanism":"entry breakpoints","targets":targets("zombie/core/znet/SteamWorkshop")}
     ]);
@@ -454,23 +454,6 @@ pub fn publish(context: &mut Context<'_, '_>, state: &Value) -> Result<()> {
 }
 
 fn lua_value(context: &mut Context<'_, '_>, json: Json) -> Result<Value> {
-    context.jni(|env| env.push_local_frame(64))?;
-    let result = lua_value_inner(context, json);
-    let popped = context.jni(|env| {
-        // SAFETY: The matching frame was pushed above. Every returned Value owns
-        // a GlobalRef or null, so no callback-local handle escapes this frame.
-        unsafe { env.pop_local_frame(&jni::objects::JObject::null()) }.map(|_| ())
-    });
-    match result {
-        Ok(value) => {
-            popped?;
-            Ok(value)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn lua_value_inner(context: &mut Context<'_, '_>, json: Json) -> Result<Value> {
     match json {
         Json::Null => Ok(Value::default()),
         Json::Bool(value) => context.boolean(value),
@@ -502,6 +485,7 @@ fn lua_value_inner(context: &mut Context<'_, '_>, json: Json) -> Result<Value> {
                             jni::objects::JValue::Object(value.object()),
                         ],
                     )
+                    .map(drop)
                 })?;
             }
             Ok(table)

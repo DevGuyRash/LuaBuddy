@@ -74,9 +74,7 @@ pub fn rows(entries: &[Entry], filter: &str) -> Vec<Row<Key>> {
         .collect()
 }
 
-fn first_line(text: &str) -> &str {
-    text.lines().next().unwrap_or(text)
-}
+use super::kit::first_line;
 
 pub fn document(entry: &Entry, entries: &[Entry]) -> Vec<Block> {
     let mut blocks = vec![

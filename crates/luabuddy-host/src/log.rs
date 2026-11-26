@@ -52,21 +52,9 @@ pub fn attach(context: &mut Context<'_, '_>, session: u64, verbose: bool) -> Res
         .map_err(|error| format!("Open journal in {}: {error}", directory.display()))
 }
 
+/// LuaBuddy's folder in the game cache, holding the journal and diagnostics.
 pub fn directory(context: &mut Context<'_, '_>) -> Result<PathBuf> {
-    let filesystem = game::instance(context)?;
-    let cache = context.jni(|env| {
-        let cache = env
-            .call_method(
-                filesystem.object(),
-                "getCacheDir",
-                "()Ljava/lang/String;",
-                &[],
-            )?
-            .l()?;
-        env.new_global_ref(cache)
-            .map(|value| crate::lua::Value(Some(value)))
-    })?;
-    Ok(PathBuf::from(context.text(&cache)?).join("LuaBuddy"))
+    Ok(game::cache_directory(context)?.join("LuaBuddy"))
 }
 
 pub fn recent(limit: usize) -> Vec<Entry> {

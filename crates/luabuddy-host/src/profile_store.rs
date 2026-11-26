@@ -70,8 +70,9 @@ pub fn select(context: &mut Context<'_, '_>, ids: &[ModId], enabled: bool) -> Re
         })
         .collect::<Vec<_>>();
     let queued = crate::selections::queued(context)?;
+    let temporary = crate::selections::temporary_ids(context)?;
     for id in ids.iter().copied() {
-        if crate::selections::temporary(context, id)? {
+        if temporary.contains(id) {
             return Err(format!(
                 "{id} was selected for this game only, so it turns itself off when you quit. Nothing was changed."
             ));

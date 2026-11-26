@@ -1,13 +1,13 @@
 use crate::{
-    callables, game, hooks, log,
+    callables, game, log,
     lua::{Context, Result, Value},
     observe,
 };
 use jni::{JNIEnv, objects::JObject};
-use luabuddy_core::ModId;
 use luabuddy_core::diagnostics::{ModDiagnostic, ModStatus};
 use luabuddy_core::lifecycle::{GenerationState, Operation, Session as Policy};
 use luabuddy_core::source::{ModuleKey, ModuleRegistry, Owner, Require};
+use luabuddy_core::{ModId, property};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -40,7 +40,7 @@ struct Session {
     modules: ModuleRegistry<Value>,
     chunks: BTreeMap<(Owner, ModuleKey), Value>,
     owner_thread: std::thread::ThreadId,
-    statuses: BTreeMap<ModId, String>,
+    statuses: BTreeMap<ModId, RunState>,
     details: BTreeMap<ModId, ModDiagnostic>,
     startup_attempted: bool,
     start_depth: usize,
@@ -82,11 +82,82 @@ fn id() -> Option<u64> {
         .map(|s| s.id)
 }
 
+/// What became of a selected mod in this environment. The one record of it:
+/// the diagnostic report and the `LuaBuddy.mods` table are derived from it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RunState {
+    Loaded,
+    Disabled,
+    ServerLoaded,
+    RestartRequired(String),
+    Failed(String),
+}
+
+impl RunState {
+    /// The text other mods read from `LuaBuddy.mods`; it must not change.
+    pub fn lua(&self) -> String {
+        match self {
+            Self::Loaded => "loaded".into(),
+            Self::Disabled => "disabled".into(),
+            Self::ServerLoaded => "server-loaded".into(),
+            Self::RestartRequired(reason) => format!("restart-required: {reason}"),
+            Self::Failed(error) => format!("failed: {error}"),
+        }
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        *self == Self::Loaded
+    }
+
+    /// A selected mod that could not run here.
+    pub fn is_problem(&self) -> bool {
+        matches!(self, Self::RestartRequired(_) | Self::Failed(_))
+    }
+
+    fn report(&self) -> ModStatus {
+        match self {
+            Self::Loaded => ModStatus::Loaded,
+            Self::Disabled => ModStatus::Disabled,
+            Self::ServerLoaded => ModStatus::ServerLoaded,
+            Self::RestartRequired(_) => ModStatus::RestartRequired,
+            Self::Failed(_) => ModStatus::Failed,
+        }
+    }
+
+    /// Fills the mod's diagnostic record for this state.
+    fn describe(&self, detail: &mut ModDiagnostic) {
+        detail.status = self.report();
+        match self {
+            Self::Loaded | Self::Disabled | Self::ServerLoaded => {
+                detail.error = None;
+                detail.traceback = None;
+                detail.java_traceback = None;
+                detail.stage = match self {
+                    Self::Loaded => "complete".into(),
+                    other => other.lua(),
+                };
+            }
+            Self::RestartRequired(reason) => detail.error = Some(reason.clone()),
+            Self::Failed(error) => {
+                detail.error = Some(error.clone());
+                let java = error.split_once("\nJava traceback:\n");
+                if let Some((_, trace)) = error.split_once("\nLua traceback:\n") {
+                    let lua = trace.split("\nJava traceback:\n").next().unwrap_or(trace);
+                    detail.traceback = Some(lua.to_owned());
+                }
+                if let Some((_, trace)) = java {
+                    detail.java_traceback = Some(trace.to_owned());
+                }
+            }
+        }
+    }
+}
+
 /// The running state as the interface shows it.
 #[derive(Default)]
 pub struct Snapshot {
     pub ready: bool,
-    pub statuses: BTreeMap<ModId, String>,
+    pub statuses: BTreeMap<ModId, RunState>,
     pub reloadable: BTreeSet<ModId>,
     /// Code from these ran and failed, so only a new environment can retry them.
     pub spent: BTreeSet<ModId>,
@@ -123,7 +194,7 @@ pub fn problems() -> usize {
     snapshot()
         .statuses
         .values()
-        .filter(|status| status.starts_with("failed:") || status.starts_with("restart-required:"))
+        .filter(|state| state.is_problem())
         .count()
 }
 
@@ -180,25 +251,20 @@ pub fn event(env: &mut JNIEnv<'_>, name: &str, enter: bool) -> Result<()> {
         return Ok(());
     }
     let mut initialized_start = false;
-    if context.jni(|env| {
-        env.get_static_field("zombie/network/GameServer", "server", "Z")?
-            .z()
-    })? {
+    if game::server(&mut context)? {
         return Ok(());
     }
     if enter
         && (name == "OnMainMenuEnter"
             || name == "OnGameStart"
             || name == "OnCreateUI"
-                && game::property(&mut context, "luabuddy.earlyUI")?.as_deref() == Some("true"))
+                && game::property(&mut context, property::EARLY_UI)?.as_deref() == Some("true"))
     {
         let load = name != "OnMainMenuEnter" && game::client(&mut context)?;
-        let existing = id().and_then(|id| with(id, |s| Ok(s.environment.clone())).ok());
-        let same = existing
-            .as_ref()
-            .map(|value| context.same(value, &context.environment.clone()))
-            .transpose()?
-            .unwrap_or(false);
+        let same = match id() {
+            Some(id) => current_environment(&mut context, id)?,
+            None => false,
+        };
         if !same {
             start(&mut context, load, name == "OnGameStart")?;
             initialized_start = name == "OnGameStart";
@@ -226,8 +292,7 @@ pub fn event(env: &mut JNIEnv<'_>, name: &str, enter: bool) -> Result<()> {
         }
     }
     if let Some(id) = id() {
-        let environment = with(id, |s| Ok(s.environment.clone()))?;
-        if !context.same(&environment, &context.environment.clone())? {
+        if !current_environment(&mut context, id)? {
             return Ok(());
         }
         if name == "OnGameStart" {
@@ -322,7 +387,7 @@ fn start(context: &mut Context<'_, '_>, load: bool, start_entered: bool) -> Resu
         );
     }
     let session_id = NEXT.fetch_add(1, Ordering::Relaxed);
-    let debug = game::property(context, "luabuddy.debug")?.as_deref() == Some("true");
+    let debug = game::property(context, property::DEBUG)?.as_deref() == Some("true");
     if let Err(error) = log::attach(context, session_id, debug) {
         log::warn("journal.unavailable", error).write();
     }
@@ -330,9 +395,9 @@ fn start(context: &mut Context<'_, '_>, load: bool, start_entered: bool) -> Resu
         .with(json!({
             "version": env!("CARGO_PKG_VERSION"),
             "loadsNow": load,
-            "config": game::property(context, "luabuddy.config")?,
-            "templates": game::property(context, "luabuddy.templates")?,
-            "earlyUI": game::property(context, "luabuddy.earlyUI")?,
+            "config": game::property(context, property::CONFIG)?,
+            "templates": game::property(context, property::TEMPLATES)?,
+            "earlyUI": game::property(context, property::EARLY_UI)?,
             "world": observe::world(context),
         }))
         .write();
@@ -375,37 +440,19 @@ fn start(context: &mut Context<'_, '_>, load: bool, start_entered: bool) -> Resu
         .get_or_init(|| Mutex::new(None))
         .lock()
         .map_err(|_| "LuaBuddy session lock is poisoned")? = Some(session);
-    let require = Value(Some(callables::create(
-        context.env,
-        "LuaBuddy",
-        session_id,
-        session_id,
-        require_callback,
-    )?));
-    let refresh = Value(Some(callables::create(
-        context.env,
-        "LuaBuddy",
-        session_id,
-        session_id,
-        refresh_callback,
-    )?));
-    let reload = Value(Some(callables::create(
-        context.env,
-        "LuaBuddy",
-        session_id,
-        session_id,
-        reload_callback,
-    )?));
-    let retry_patches = Value(Some(callables::create(
-        context.env,
-        "LuaBuddy",
-        session_id,
-        session_id,
-        retry_patches_callback,
-    )?));
-    context.set(&state, "refresh", &refresh)?;
-    context.set(&state, "reload", &reload)?;
-    context.set(&state, "retryPatches", &retry_patches)?;
+    let callable = |context: &mut Context<'_, '_>, handler: callables::Handler| {
+        callables::create(context.env, "LuaBuddy", session_id, session_id, handler)
+            .map(|reference| Value(Some(reference)))
+    };
+    let require = callable(context, require_callback)?;
+    for (name, handler) in [
+        ("refresh", refresh_callback as callables::Handler),
+        ("reload", reload_callback),
+        ("retryPatches", retry_patches_callback),
+    ] {
+        let function = callable(context, handler)?;
+        context.set(&state, name, &function)?;
+    }
     let environment = context.environment.clone();
     context.set(&environment, "LuaBuddy", &state)?;
     context.set(&environment, "require", &require)?;
@@ -513,7 +560,7 @@ fn execute_step(
         RequireStep::Cached(value) => Ok(value),
         RequireStep::Delegate(function) => {
             let name = context.string(name)?;
-            hooks::first(context.call(&function, &[name])?)
+            Ok(crate::lua::first(context.call(&function, &[name])?))
         }
         RequireStep::Execute(owner, key, chunk) => {
             let result = context.call(&chunk, &[]).map(|mut values| {
@@ -541,9 +588,18 @@ fn execute_step(
     }
 }
 
+/// Whether the game is still running the Lua environment this session started in.
+fn current_environment(context: &mut Context<'_, '_>, session_id: u64) -> Result<bool> {
+    let ours = match with(session_id, |s| Ok(s.environment.clone())) {
+        Ok(environment) => environment,
+        Err(_) => return Ok(false),
+    };
+    let current = context.environment.clone();
+    context.same(&ours, &current)
+}
+
 fn validate_environment(context: &mut Context<'_, '_>, session_id: u64) -> Result<()> {
-    let environment = with(session_id, |s| Ok(s.environment.clone()))?;
-    if !context.same(&environment, &context.environment.clone())? {
+    if !current_environment(context, session_id)? {
         return Err("This LuaBuddy session is no longer active".into());
     }
     Ok(())
@@ -645,51 +701,23 @@ fn operation_callback<'vm>(
     context.frame_return(frame, &[ok, message])
 }
 
-fn status(context: &mut Context<'_, '_>, session_id: u64, id: &ModId, value: &str) -> Result<()> {
+/// Records what became of a mod, and publishes it to `LuaBuddy.mods`.
+fn status(
+    context: &mut Context<'_, '_>,
+    session_id: u64,
+    id: &ModId,
+    value: RunState,
+) -> Result<()> {
+    let text = value.lua();
     let state = with(session_id, |session| {
-        session.statuses.insert(id.clone(), value.to_owned());
         if let Some(detail) = session.details.get_mut(id) {
-            detail.status = match value {
-                "loaded" => ModStatus::Loaded,
-                "disabled" => ModStatus::Disabled,
-                "server-loaded" => ModStatus::ServerLoaded,
-                _ if value.starts_with("restart-required:") => ModStatus::RestartRequired,
-                _ => ModStatus::Failed,
-            };
-            if value == "loaded" {
-                detail.stage = "complete".into();
-            }
-            if matches!(value, "loaded" | "disabled" | "server-loaded") {
-                detail.error = None;
-                detail.traceback = None;
-                detail.java_traceback = None;
-                if value != "loaded" {
-                    detail.stage = value.to_owned();
-                }
-            }
-            if let Some(error) = value.strip_prefix("failed: ") {
-                detail.error = Some(error.to_owned());
-                if let Some((_, trace)) = error.split_once("\nLua traceback:\n") {
-                    detail.traceback = Some(
-                        trace
-                            .split("\nJava traceback:\n")
-                            .next()
-                            .unwrap_or(trace)
-                            .to_owned(),
-                    );
-                }
-                if let Some((_, trace)) = error.split_once("\nJava traceback:\n") {
-                    detail.java_traceback = Some(trace.to_owned());
-                }
-            }
-            if let Some(reason) = value.strip_prefix("restart-required: ") {
-                detail.error = Some(reason.to_owned());
-            }
+            value.describe(detail);
         }
+        session.statuses.insert(id.clone(), value);
         Ok(session.state.clone())
     })?;
     let statuses = context.get(&state, "mods")?;
-    let text = context.string(value)?;
+    let text = context.string(&text)?;
     context.set(&statuses, id.as_str(), &text)
 }
 
@@ -716,4 +744,79 @@ fn generation_live(session: &Session, owner: &Owner) -> bool {
         .running()
         .get(&owner.id)
         .is_some_and(|running| running.owner == *owner && running.state == GenerationState::Loaded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunState;
+    use luabuddy_core::diagnostics::{ModDiagnostic, ModStatus, ProfileDiagnostic};
+
+    fn detail() -> ModDiagnostic {
+        ModDiagnostic {
+            status: ModStatus::Prepared,
+            stage: "running client code".into(),
+            profile: Default::default(),
+            source: None,
+            error: Some("earlier".into()),
+            traceback: Some("earlier trace".into()),
+            java_traceback: Some("earlier java".into()),
+            source_count: 0,
+            generation: 0,
+            timings_ms: Default::default(),
+            configuration: ProfileDiagnostic::default(),
+        }
+    }
+
+    #[test]
+    fn other_mods_read_the_same_status_text() {
+        // The strings `LuaBuddy.mods` exposed before the state was typed.
+        let cases = [
+            (RunState::Loaded, "loaded"),
+            (RunState::Disabled, "disabled"),
+            (RunState::ServerLoaded, "server-loaded"),
+            (
+                RunState::RestartRequired("maps".into()),
+                "restart-required: maps",
+            ),
+            (RunState::Failed("boom".into()), "failed: boom"),
+        ];
+        for (state, text) in cases {
+            assert_eq!(state.lua(), text);
+        }
+        assert!(RunState::Failed(String::new()).is_problem());
+        assert!(RunState::RestartRequired(String::new()).is_problem());
+        assert!(!RunState::ServerLoaded.is_problem());
+    }
+
+    #[test]
+    fn a_failure_keeps_its_tracebacks_apart() {
+        let mut detail = detail();
+        RunState::Failed(
+            "bad\nLua traceback:\nat a.lua:1\nJava traceback:\nKahluaException".into(),
+        )
+        .describe(&mut detail);
+        assert_eq!(detail.status, ModStatus::Failed);
+        assert_eq!(detail.traceback.as_deref(), Some("at a.lua:1"));
+        assert_eq!(detail.java_traceback.as_deref(), Some("KahluaException"));
+        assert!(detail.error.unwrap().starts_with("bad\nLua traceback:"));
+    }
+
+    #[test]
+    fn running_or_skipped_clears_old_errors_and_names_the_stage() {
+        let mut loaded = detail();
+        RunState::Loaded.describe(&mut loaded);
+        assert_eq!(loaded.stage, "complete");
+        assert_eq!(
+            (loaded.error, loaded.traceback, loaded.java_traceback),
+            (None, None, None)
+        );
+        let mut skipped = detail();
+        RunState::ServerLoaded.describe(&mut skipped);
+        assert_eq!(skipped.stage, "server-loaded");
+        assert_eq!(skipped.status, ModStatus::ServerLoaded);
+        let mut restart = detail();
+        RunState::RestartRequired("tiles".into()).describe(&mut restart);
+        assert_eq!(restart.error.as_deref(), Some("tiles"));
+        assert_eq!(restart.status, ModStatus::RestartRequired);
+    }
 }

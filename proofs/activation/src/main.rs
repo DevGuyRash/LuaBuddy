@@ -1,5 +1,5 @@
-#![allow(dead_code)]
-#[path = "../../../crates/luabuddy-host/src/activation.rs"]
+#![allow(dead_code, unused_imports)]
+#[path = "../../../crates/luabuddy-host/src/activation/mod.rs"]
 mod activation;
 #[path = "../../../crates/luabuddy-host/src/game.rs"]
 mod game;

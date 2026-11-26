@@ -1,8 +1,9 @@
 use crate::game;
 use crate::lua::{Context, Result, Value};
 use luabuddy_core::ModId;
-use luabuddy_core::diagnostics::{DiagnosticReport, ModDiagnostic};
+use luabuddy_core::diagnostics::{self, DiagnosticReport, ModDiagnostic};
 use luabuddy_core::lifecycle::Operation;
+use luabuddy_core::property;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -22,19 +23,7 @@ impl OperationReport {
         config_directory: PathBuf,
         previous_mods: BTreeMap<ModId, ModDiagnostic>,
     ) -> Result<Self> {
-        let filesystem = game::instance(context)?;
-        let cache = context.jni(|env| {
-            let cache = env
-                .call_method(
-                    filesystem.object(),
-                    "getCacheDir",
-                    "()Ljava/lang/String;",
-                    &[],
-                )?
-                .l()?;
-            env.new_global_ref(cache).map(|value| Value(Some(value)))
-        })?;
-        let destination = PathBuf::from(context.text(&cache)?).join("LuaBuddy/diagnostics.json");
+        let destination = game::cache_directory(context)?.join(diagnostics::REPORT_PATH);
         let core = context.jni(|env| {
             let core = env
                 .call_static_method(
@@ -47,23 +36,22 @@ impl OperationReport {
             let version = env
                 .call_method(core, "getVersion", "()Ljava/lang/String;", &[])?
                 .l()?;
-            env.new_global_ref(version).map(|value| Value(Some(value)))
+            Value::retain(env, version)
         })?;
         let game_version = context.text(&core)?;
         let java_version = game::property(context, "java.version")?
             .ok_or("The host JVM has no java.version property")?;
-        let (operation, target) = match operation {
-            Operation::Startup => ("startup", None),
-            Operation::Refresh => ("refresh", None),
-            Operation::Reload(id) => ("reload", Some(id.clone())),
+        let target = match operation {
+            Operation::Reload(id) => Some(id.clone()),
+            Operation::Startup | Operation::Refresh => None,
         };
         let report = DiagnosticReport {
-            schema_version: 1,
-            kind: "loader-initialization".into(),
+            schema_version: diagnostics::SCHEMA_VERSION,
+            kind: diagnostics::KIND.into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            debug: game::property(context, "luabuddy.debug")?.as_deref() == Some("true"),
+            debug: game::property(context, property::DEBUG)?.as_deref() == Some("true"),
             session: session_identity(context, session)?,
-            operation: operation.into(),
+            operation: operation.name().into(),
             target,
             game_version,
             java_version,
@@ -112,7 +100,7 @@ pub fn session_identity(context: &mut Context<'_, '_>, session: u64) -> Result<S
             let uuid = env
                 .call_static_method("java/util/UUID", "randomUUID", "()Ljava/util/UUID;", &[])?
                 .l()?;
-            env.new_global_ref(uuid).map(|value| Value(Some(value)))
+            Value::retain(env, uuid)
         })?;
         let _ = PROCESS.set(context.text(&uuid)?);
     }
@@ -127,7 +115,7 @@ pub fn timestamp(context: &mut Context<'_, '_>) -> Result<String> {
         let instant = env
             .call_static_method("java/time/Instant", "now", "()Ljava/time/Instant;", &[])?
             .l()?;
-        env.new_global_ref(instant).map(|value| Value(Some(value)))
+        Value::retain(env, instant)
     })?;
     context.text(&instant)
 }

@@ -12,6 +12,7 @@ mod game;
 #[path = "../../../profiles/hooks.rs"]
 mod hooks;
 mod jvmti;
+mod layout;
 mod log;
 mod lua;
 mod observe;

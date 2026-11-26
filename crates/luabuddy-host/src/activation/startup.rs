@@ -1,9 +1,14 @@
-use crate::lua::{Context, Result, Value};
+//! Reads and edits the game's own mod list for the next launch.
+
+use crate::{
+    game,
+    lua::{Context, Result, Value},
+};
 use jni::{
     JNIEnv,
     objects::{JObject, JString, JValue},
 };
-use luabuddy_core::{ModId, Profile, profile::LivePolicy};
+use luabuddy_core::ModId;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
@@ -11,255 +16,6 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
-pub enum StartupComponent {
-    Definitions,
-    Maps,
-    Animations,
-    TexturePacks,
-    TileDefinitions,
-    ServerLua,
-    Clothing,
-    SandboxOptions,
-}
-
-impl StartupComponent {
-    fn description(self) -> &'static str {
-        match self {
-            Self::Definitions => "native definitions",
-            Self::Maps => "maps",
-            Self::Animations => "animation assets",
-            Self::TexturePacks => "texture packs",
-            Self::TileDefinitions => "tile definitions",
-            Self::ServerLua => "server Lua",
-            Self::Clothing => "clothing",
-            Self::SandboxOptions => "sandbox settings",
-        }
-    }
-
-    /// Whether loading only its Lua would leave the mod without its substance.
-    /// Sandbox settings have script defaults, so their absence is only a limit.
-    fn essential(self) -> bool {
-        self != Self::SandboxOptions
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum Eligibility {
-    Live { limitations: Vec<StartupComponent> },
-    RestartRequired { reason: String },
-}
-
-impl Eligibility {
-    pub fn explanation(&self) -> String {
-        match self {
-            Self::Live { limitations } if limitations.is_empty() => {
-                "Its client and shared Lua can be loaded late.".into()
-            }
-            Self::Live { limitations } => format!(
-                "Only its client and shared Lua is loaded. Its {} need the game's normal startup or the server.",
-                descriptions(limitations)
-            ),
-            Self::RestartRequired { reason } => reason.clone(),
-        }
-    }
-}
-
-pub fn descriptions(components: &[StartupComponent]) -> String {
-    let names = components
-        .iter()
-        .map(|component| component.description())
-        .collect::<Vec<_>>();
-    match names.split_last() {
-        Some((last, [])) => (*last).to_owned(),
-        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-        None => String::new(),
-    }
-}
-
-pub fn assess(profile: &Profile, roots: &[PathBuf], templates: &[Profile]) -> Result<Eligibility> {
-    let policy = profile
-        .live
-        .or_else(|| {
-            templates
-                .iter()
-                .find(|template| template.id == profile.id)
-                .and_then(|template| template.live)
-        })
-        .unwrap_or(LivePolicy::Auto);
-    let mut components = BTreeSet::new();
-    for root in roots {
-        for media in resource_paths(root, "media")? {
-            if contains_tile_definitions(&media)? {
-                components.insert(StartupComponent::TileDefinitions);
-                break;
-            }
-        }
-        // Mods ship placeholder text files in some of these only to silence the game.
-        let any: &[&str] = &[];
-        let animation: &[&str] = &["xml", "x", "fbx", "glb", "gltf"];
-        for (relative, kinds, component) in [
-            ("media/scripts", any, StartupComponent::Definitions),
-            ("media/maps", any, StartupComponent::Maps),
-            ("media/animations", animation, StartupComponent::Animations),
-            ("media/animsets", animation, StartupComponent::Animations),
-            ("media/anims_X", animation, StartupComponent::Animations),
-            ("media/texturepacks", any, StartupComponent::TexturePacks),
-            ("media/lua/server", any, StartupComponent::ServerLua),
-            ("media/clothing", any, StartupComponent::Clothing),
-            (
-                "media/sandbox-options.txt",
-                any,
-                StartupComponent::SandboxOptions,
-            ),
-        ] {
-            for candidate in resource_paths(root, relative)? {
-                if contains_file(&candidate, kinds, &mut BTreeSet::new())? {
-                    components.insert(component);
-                    break;
-                }
-            }
-        }
-    }
-    let components: Vec<_> = components.into_iter().collect();
-    if policy == LivePolicy::Startup {
-        return Ok(Eligibility::RestartRequired {
-            reason: "Its profile says it has to start with the game.".into(),
-        });
-    }
-    if policy == LivePolicy::Auto && components.iter().any(|component| component.essential()) {
-        return Ok(Eligibility::RestartRequired {
-            reason: format!(
-                "It has {}, which only load when it starts with the game. Server code also needs the server to run it.",
-                descriptions(&components)
-            ),
-        });
-    }
-    Ok(Eligibility::Live {
-        limitations: components,
-    })
-}
-
-fn contains_tile_definitions(root: &Path) -> Result<bool> {
-    let mut pending = vec![root.to_owned()];
-    let mut visited = BTreeSet::new();
-    while let Some(path) = pending.pop() {
-        if !path.exists() {
-            continue;
-        }
-        if path.is_file() {
-            if path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("tiles"))
-            {
-                return Ok(true);
-            }
-            continue;
-        }
-        let canonical = path
-            .canonicalize()
-            .map_err(|error| format!("Inspect tile definitions {}: {error}", path.display()))?;
-        if !visited.insert(canonical) {
-            continue;
-        }
-        for entry in fs::read_dir(&path)
-            .map_err(|error| format!("Inspect tile definitions {}: {error}", path.display()))?
-        {
-            pending.push(
-                entry
-                    .map_err(|error| {
-                        format!("Inspect tile definitions {}: {error}", path.display())
-                    })?
-                    .path(),
-            );
-        }
-    }
-    Ok(false)
-}
-
-fn resource_paths(root: &Path, relative: &str) -> Result<Vec<PathBuf>> {
-    let mut candidates = vec![root.to_owned()];
-    for segment in relative.split('/') {
-        let mut matching = Vec::new();
-        for directory in candidates {
-            match fs::metadata(&directory) {
-                Ok(_) => (),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(format!(
-                        "Inspect startup resource directory {}: {error}",
-                        directory.display()
-                    ));
-                }
-            }
-            for entry in fs::read_dir(&directory).map_err(|error| {
-                format!(
-                    "Inspect startup resource directory {}: {error}",
-                    directory.display()
-                )
-            })? {
-                let entry = entry.map_err(|error| {
-                    format!(
-                        "Inspect startup resource directory {}: {error}",
-                        directory.display()
-                    )
-                })?;
-                if entry
-                    .file_name()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(segment)
-                {
-                    matching.push(entry.path());
-                }
-            }
-        }
-        candidates = matching;
-    }
-    Ok(candidates)
-}
-
-/// Whether a file is below the path, of one of the kinds when any are named.
-fn contains_file(path: &Path, kinds: &[&str], visited: &mut BTreeSet<PathBuf>) -> Result<bool> {
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(format!(
-                "Inspect startup assets {}: {error}",
-                path.display()
-            ));
-        }
-    };
-    if metadata.is_file() {
-        return Ok(kinds.is_empty()
-            || path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| {
-                    kinds
-                        .iter()
-                        .any(|kind| extension.eq_ignore_ascii_case(kind))
-                }));
-    }
-    let identity = path
-        .canonicalize()
-        .map_err(|error| format!("Inspect startup assets {}: {error}", path.display()))?;
-    if !visited.insert(identity) {
-        return Ok(false);
-    }
-    for entry in fs::read_dir(path)
-        .map_err(|error| format!("Inspect startup assets {}: {error}", path.display()))?
-    {
-        let entry =
-            entry.map_err(|error| format!("Inspect startup assets {}: {error}", path.display()))?;
-        if contains_file(&entry.path(), kinds, visited)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct StartupSelection {
@@ -283,10 +39,7 @@ pub fn select_next_startup(
     ids: &[ModId],
     enabled: bool,
 ) -> Result<StartupSelection> {
-    if context.jni(|env| {
-        env.get_static_field("zombie/network/GameServer", "server", "Z")?
-            .z()
-    })? {
+    if game::server(context)? {
         return Err(
             "Native player startup preferences are unavailable in a dedicated server".into(),
         );
@@ -327,8 +80,9 @@ pub fn select_next_startup(
             if removing.contains(&id) {
                 continue;
             }
-            if let Some(info) = native_info(context, &id)? {
-                let required = required_ids(context, &info)?;
+            let info = game::native_info(context, &id)?;
+            if !info.is_nil() {
+                let required = game::requirements(context, &info)?;
                 if let Some(required) = required
                     .iter()
                     .find(|required| removing.contains(*required))
@@ -512,9 +266,11 @@ fn dependency_order(
             return Err(format!("Native startup dependency cycle at {id}"));
         }
         if !metadata.contains_key(&id) {
-            let info = native_info(context, &id)
-                .map_err(|error| format!("Resolve native startup metadata for {id}: {error}"))?
-                .ok_or_else(|| format!("Native startup mod is not installed: {id}"))?;
+            let info = game::native_info(context, &id)
+                .map_err(|error| format!("Resolve native startup metadata for {id}: {error}"))?;
+            if info.is_nil() {
+                return Err(format!("Native startup mod is not installed: {id}"));
+            }
             let actual = context.jni(|env| {
                 env.with_local_frame(8, |env| {
                     let value = env
@@ -540,7 +296,7 @@ fn dependency_order(
             }
             metadata.insert(
                 id.clone(),
-                required_ids(context, &info).map_err(|error| {
+                game::requirements(context, &info).map_err(|error| {
                     format!("Read native startup dependencies for {id}: {error}")
                 })?,
             );
@@ -551,44 +307,6 @@ fn dependency_order(
         }
     }
     Ok(())
-}
-
-fn native_info(context: &mut Context<'_, '_>, id: &ModId) -> Result<Option<Value>> {
-    context.jni(|env| {
-        env.with_local_frame(16, |env| {
-            let id = env.new_string(id.as_str())?;
-            let value = env
-                .call_static_method(
-                    "zombie/gameStates/ChooseGameInfo",
-                    "getModDetails",
-                    "(Ljava/lang/String;)Lzombie/gameStates/ChooseGameInfo$Mod;",
-                    &[JValue::Object(&id)],
-                )?
-                .l()?;
-            if value.is_null() {
-                Ok(None)
-            } else {
-                env.new_global_ref(value)
-                    .map(|value| Some(Value(Some(value))))
-            }
-        })
-    })
-}
-
-fn required_ids(context: &mut Context<'_, '_>, info: &Value) -> Result<Vec<ModId>> {
-    let required = context.jni(|env| {
-        env.with_local_frame(16, |env| {
-            let list = env
-                .call_method(info.object(), "getRequire", "()Ljava/util/ArrayList;", &[])?
-                .l()?;
-            java_strings(env, &list)
-        })
-    })?;
-    required
-        .into_iter()
-        .map(ModId::new)
-        .collect::<std::result::Result<_, _>>()
-        .map_err(|error| error.to_string())
 }
 
 fn default_selection(context: &mut Context<'_, '_>) -> Result<Value> {
@@ -606,7 +324,7 @@ fn named_selection(context: &mut Context<'_, '_>, name: &str) -> Result<Value> {
                 &[JValue::Object(&name)],
             )?
             .l()?;
-        env.new_global_ref(value).map(|value| Value(Some(value)))
+        Value::retain(env, value)
     })
 }
 
@@ -618,7 +336,7 @@ fn empty_selection(context: &mut Context<'_, '_>) -> Result<Value> {
             "(Ljava/lang/String;)V",
             &[JValue::Object(&name)],
         )?;
-        env.new_global_ref(value).map(|value| Value(Some(value)))
+        Value::retain(env, value)
     })
 }
 
@@ -702,7 +420,7 @@ fn native_destination(context: &mut Context<'_, '_>) -> Result<PathBuf> {
                 &[],
             )?
             .l()?;
-        env.new_global_ref(value).map(|value| Value(Some(value)))
+        Value::retain(env, value)
     })?;
     Ok(PathBuf::from(context.text(&folder)?).join("mods/default.txt"))
 }

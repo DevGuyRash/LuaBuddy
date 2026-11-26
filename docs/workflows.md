@@ -19,7 +19,7 @@ luabuddy select --mod Example --path /path/to/Example
 luabuddy profiles
 ```
 
-Choose **Load now** for it, or **Tools > Load waiting mods**, in a ready multiplayer client. To disable that future selection through the CLI, run the following command.
+Choose **Load now** for it, or **Tools > Load N waiting mods**, in a ready multiplayer client. To disable that future selection through the CLI, run the following command.
 
 ```sh
 luabuddy deselect --mod Example
