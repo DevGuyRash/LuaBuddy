@@ -1,8 +1,9 @@
 use crate::game;
 use crate::lua::{Context, Result, Value};
 use luabuddy_core::ModId;
-use luabuddy_core::diagnostics::{DiagnosticReport, ModDiagnostic};
+use luabuddy_core::diagnostics::{self, DiagnosticReport, ModDiagnostic};
 use luabuddy_core::lifecycle::Operation;
+use luabuddy_core::property;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -22,7 +23,7 @@ impl OperationReport {
         config_directory: PathBuf,
         previous_mods: BTreeMap<ModId, ModDiagnostic>,
     ) -> Result<Self> {
-        let destination = game::cache_directory(context)?.join("LuaBuddy/diagnostics.json");
+        let destination = game::cache_directory(context)?.join(diagnostics::REPORT_PATH);
         let core = context.jni(|env| {
             let core = env
                 .call_static_method(
@@ -40,18 +41,17 @@ impl OperationReport {
         let game_version = context.text(&core)?;
         let java_version = game::property(context, "java.version")?
             .ok_or("The host JVM has no java.version property")?;
-        let (operation, target) = match operation {
-            Operation::Startup => ("startup", None),
-            Operation::Refresh => ("refresh", None),
-            Operation::Reload(id) => ("reload", Some(id.clone())),
+        let target = match operation {
+            Operation::Reload(id) => Some(id.clone()),
+            Operation::Startup | Operation::Refresh => None,
         };
         let report = DiagnosticReport {
-            schema_version: 1,
-            kind: "loader-initialization".into(),
+            schema_version: diagnostics::SCHEMA_VERSION,
+            kind: diagnostics::KIND.into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            debug: game::property(context, "luabuddy.debug")?.as_deref() == Some("true"),
+            debug: game::property(context, property::DEBUG)?.as_deref() == Some("true"),
             session: session_identity(context, session)?,
-            operation: operation.into(),
+            operation: operation.name().into(),
             target,
             game_version,
             java_version,

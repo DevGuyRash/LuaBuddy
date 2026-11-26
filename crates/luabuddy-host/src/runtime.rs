@@ -4,10 +4,10 @@ use crate::{
     observe,
 };
 use jni::{JNIEnv, objects::JObject};
-use luabuddy_core::ModId;
 use luabuddy_core::diagnostics::{ModDiagnostic, ModStatus};
 use luabuddy_core::lifecycle::{GenerationState, Operation, Session as Policy};
 use luabuddy_core::source::{ModuleKey, ModuleRegistry, Owner, Require};
+use luabuddy_core::{ModId, property};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -258,7 +258,7 @@ pub fn event(env: &mut JNIEnv<'_>, name: &str, enter: bool) -> Result<()> {
         && (name == "OnMainMenuEnter"
             || name == "OnGameStart"
             || name == "OnCreateUI"
-                && game::property(&mut context, "luabuddy.earlyUI")?.as_deref() == Some("true"))
+                && game::property(&mut context, property::EARLY_UI)?.as_deref() == Some("true"))
     {
         let load = name != "OnMainMenuEnter" && game::client(&mut context)?;
         let same = match id() {
@@ -387,7 +387,7 @@ fn start(context: &mut Context<'_, '_>, load: bool, start_entered: bool) -> Resu
         );
     }
     let session_id = NEXT.fetch_add(1, Ordering::Relaxed);
-    let debug = game::property(context, "luabuddy.debug")?.as_deref() == Some("true");
+    let debug = game::property(context, property::DEBUG)?.as_deref() == Some("true");
     if let Err(error) = log::attach(context, session_id, debug) {
         log::warn("journal.unavailable", error).write();
     }
@@ -395,9 +395,9 @@ fn start(context: &mut Context<'_, '_>, load: bool, start_entered: bool) -> Resu
         .with(json!({
             "version": env!("CARGO_PKG_VERSION"),
             "loadsNow": load,
-            "config": game::property(context, "luabuddy.config")?,
-            "templates": game::property(context, "luabuddy.templates")?,
-            "earlyUI": game::property(context, "luabuddy.earlyUI")?,
+            "config": game::property(context, property::CONFIG)?,
+            "templates": game::property(context, property::TEMPLATES)?,
+            "earlyUI": game::property(context, property::EARLY_UI)?,
             "world": observe::world(context),
         }))
         .write();

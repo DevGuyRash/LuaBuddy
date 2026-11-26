@@ -43,14 +43,6 @@ const SLOW_FILE: Duration = Duration::from_millis(20);
 /// Threads that read mod files. They wait far more than they compute.
 const READERS: usize = 16;
 
-fn name(operation: &Operation) -> &'static str {
-    match operation {
-        Operation::Startup => "startup",
-        Operation::Refresh => "refresh",
-        Operation::Reload(_) => "reload",
-    }
-}
-
 pub fn apply(
     context: &mut Context<'_, '_>,
     session_id: u64,
@@ -69,7 +61,7 @@ pub fn apply(
             Operation::Reload(id) => format!("Replace the running {id} with its current files"),
         },
         target.as_ref(),
-        json!({ "operation": name(&operation), "world": observe::world(context) }),
+        json!({ "operation": operation.name(), "world": observe::world(context) }),
     );
     let cpu = observe::thread_cpu(context);
     let result = begin(context, session_id, &operation);
@@ -761,7 +753,7 @@ impl Run<'_> {
         for (key, value) in [
             ("id", context.string(owner.id.as_str())?),
             ("runtime", context.boolean(!self.startup())?),
-            ("operation", context.string(name(self.operation))?),
+            ("operation", context.string(self.operation.name())?),
             ("state", state),
             ("active", active_table.clone()),
         ] {

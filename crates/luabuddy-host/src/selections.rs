@@ -16,7 +16,8 @@ static CLAIMS: OnceLock<Mutex<Claims>> = OnceLock::new();
 /// Where selections are kept, with links in the player's own path resolved.
 pub fn directory(context: &mut Context<'_, '_>) -> Result<PathBuf> {
     let path = PathBuf::from(
-        game::property(context, "luabuddy.config")?.ok_or("Missing LuaBuddy profile directory")?,
+        game::property(context, luabuddy_core::property::CONFIG)?
+            .ok_or("Missing LuaBuddy profile directory")?,
     );
     path.canonicalize()
         .map_err(|e| format!("Profile directory {}: {e}", path.display()))
@@ -75,10 +76,6 @@ pub fn temporary_ids(context: &mut Context<'_, '_>) -> Result<std::collections::
         .into_iter()
         .map(|profile| profile.id)
         .collect())
-}
-
-pub fn temporary(context: &mut Context<'_, '_>, id: &ModId) -> Result<bool> {
-    Ok(claimed(context)?.iter().any(|profile| profile.id == *id))
 }
 
 pub fn queued(context: &mut Context<'_, '_>) -> Result<Vec<Profile>> {
