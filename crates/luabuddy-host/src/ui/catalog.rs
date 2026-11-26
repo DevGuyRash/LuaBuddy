@@ -99,21 +99,7 @@ impl Catalog {
         let mut changed = false;
         while let Some((directory, native)) = self.queue.pop_front() {
             changed = true;
-            // Each folder's references are released before the next one is read.
-            let read = context
-                .jni(|env| env.push_local_frame(64))
-                .and_then(|()| {
-                    let found = read(context, &directory, native);
-                    context
-                        .jni(|env| {
-                            // SAFETY: The frame was pushed just above and nothing read
-                            // in it escapes as a local reference; values are global.
-                            unsafe { env.pop_local_frame(&jni::objects::JObject::null()) }.map(drop)
-                        })
-                        .map(|()| found)
-                })
-                .and_then(|found| found);
-            match read {
+            match read(context, &directory, native) {
                 Ok(Some(found)) => {
                     self.mods
                         .entry(found.id.clone())

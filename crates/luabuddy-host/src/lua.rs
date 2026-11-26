@@ -64,11 +64,14 @@ impl<'a, 'vm> Context<'a, 'vm> {
         }
     }
 
+    /// Runs JNI work in its own local frame. Every `Value` is a global
+    /// reference, so whatever the work created locally is released when it
+    /// returns, however long the surrounding native call lasts.
     pub fn jni<T>(
         &mut self,
-        action: impl FnOnce(&mut JNIEnv<'vm>) -> jni::errors::Result<T>,
+        action: impl FnOnce(&mut JNIEnv<'_>) -> jni::errors::Result<T>,
     ) -> Result<T> {
-        match action(self.env) {
+        match self.env.with_local_frame(16, action) {
             Ok(value) => Ok(value),
             Err(error) => {
                 let mut detail = error.to_string();
@@ -386,6 +389,7 @@ impl<'a, 'vm> Context<'a, 'vm> {
                     "(Ljava/lang/Object;)I",
                     &[JValue::Object(value.object())],
                 )
+                .map(drop)
             })?;
         }
         Ok(values.len() as i32)

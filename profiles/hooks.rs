@@ -347,7 +347,10 @@ fn restore_favorites(context: &mut Context<'_, '_>, player: &Value, keys: &[Stri
         }
     }
     if restored > 0 {
-        context.jni(|env| env.call_method(player.object(), "transmitModData", "()V", &[]))?;
+        context.jni(|env| {
+            env.call_method(player.object(), "transmitModData", "()V", &[])
+                .map(drop)
+        })?;
         log::info(
             "favorites.restored",
             format!("Put back {restored} handcraft favorites after startup cleanup"),

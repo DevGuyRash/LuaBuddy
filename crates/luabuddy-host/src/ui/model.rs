@@ -3,7 +3,7 @@
 //! Everything here is a pure function of observed state, so the action button,
 //! the right-click menu and the tests all read the same answer.
 
-use crate::{activation::Eligibility, observe::Place, steam::ItemState};
+use crate::{activation::Eligibility, observe::Place, runtime::RunState, steam::ItemState};
 use luabuddy_core::ModId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,15 +26,13 @@ pub enum Runtime {
 }
 
 impl Runtime {
-    pub fn read(status: &str) -> Self {
-        if status == "loaded" {
-            Self::Loaded
-        } else if let Some(reason) = status.strip_prefix("failed: ") {
-            Self::Failed(reason.to_owned())
-        } else if let Some(reason) = status.strip_prefix("restart-required: ") {
-            Self::NeedsGameStart(reason.to_owned())
-        } else {
-            Self::NotLoaded
+    /// What the interface needs from a mod's run state, if it has one.
+    pub fn of(state: Option<&RunState>) -> Self {
+        match state {
+            Some(RunState::Loaded) => Self::Loaded,
+            Some(RunState::Failed(reason)) => Self::Failed(reason.clone()),
+            Some(RunState::RestartRequired(reason)) => Self::NeedsGameStart(reason.clone()),
+            Some(RunState::Disabled | RunState::ServerLoaded) | None => Self::NotLoaded,
         }
     }
 }

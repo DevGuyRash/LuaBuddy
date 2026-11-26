@@ -454,23 +454,6 @@ pub fn publish(context: &mut Context<'_, '_>, state: &Value) -> Result<()> {
 }
 
 fn lua_value(context: &mut Context<'_, '_>, json: Json) -> Result<Value> {
-    context.jni(|env| env.push_local_frame(64))?;
-    let result = lua_value_inner(context, json);
-    let popped = context.jni(|env| {
-        // SAFETY: The matching frame was pushed above. Every returned Value owns
-        // a GlobalRef or null, so no callback-local handle escapes this frame.
-        unsafe { env.pop_local_frame(&jni::objects::JObject::null()) }.map(|_| ())
-    });
-    match result {
-        Ok(value) => {
-            popped?;
-            Ok(value)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn lua_value_inner(context: &mut Context<'_, '_>, json: Json) -> Result<Value> {
     match json {
         Json::Null => Ok(Value::default()),
         Json::Bool(value) => context.boolean(value),
@@ -502,6 +485,7 @@ fn lua_value_inner(context: &mut Context<'_, '_>, json: Json) -> Result<Value> {
                             jni::objects::JValue::Object(value.object()),
                         ],
                     )
+                    .map(drop)
                 })?;
             }
             Ok(table)

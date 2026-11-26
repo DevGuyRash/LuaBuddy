@@ -40,7 +40,7 @@ struct Session {
     modules: ModuleRegistry<Value>,
     chunks: BTreeMap<(Owner, ModuleKey), Value>,
     owner_thread: std::thread::ThreadId,
-    statuses: BTreeMap<ModId, String>,
+    statuses: BTreeMap<ModId, RunState>,
     details: BTreeMap<ModId, ModDiagnostic>,
     startup_attempted: bool,
     start_depth: usize,
@@ -82,11 +82,82 @@ fn id() -> Option<u64> {
         .map(|s| s.id)
 }
 
+/// What became of a selected mod in this environment. The one record of it:
+/// the diagnostic report and the `LuaBuddy.mods` table are derived from it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RunState {
+    Loaded,
+    Disabled,
+    ServerLoaded,
+    RestartRequired(String),
+    Failed(String),
+}
+
+impl RunState {
+    /// The text other mods read from `LuaBuddy.mods`; it must not change.
+    pub fn lua(&self) -> String {
+        match self {
+            Self::Loaded => "loaded".into(),
+            Self::Disabled => "disabled".into(),
+            Self::ServerLoaded => "server-loaded".into(),
+            Self::RestartRequired(reason) => format!("restart-required: {reason}"),
+            Self::Failed(error) => format!("failed: {error}"),
+        }
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        *self == Self::Loaded
+    }
+
+    /// A selected mod that could not run here.
+    pub fn is_problem(&self) -> bool {
+        matches!(self, Self::RestartRequired(_) | Self::Failed(_))
+    }
+
+    fn report(&self) -> ModStatus {
+        match self {
+            Self::Loaded => ModStatus::Loaded,
+            Self::Disabled => ModStatus::Disabled,
+            Self::ServerLoaded => ModStatus::ServerLoaded,
+            Self::RestartRequired(_) => ModStatus::RestartRequired,
+            Self::Failed(_) => ModStatus::Failed,
+        }
+    }
+
+    /// Fills the mod's diagnostic record for this state.
+    fn describe(&self, detail: &mut ModDiagnostic) {
+        detail.status = self.report();
+        match self {
+            Self::Loaded | Self::Disabled | Self::ServerLoaded => {
+                detail.error = None;
+                detail.traceback = None;
+                detail.java_traceback = None;
+                detail.stage = match self {
+                    Self::Loaded => "complete".into(),
+                    other => other.lua(),
+                };
+            }
+            Self::RestartRequired(reason) => detail.error = Some(reason.clone()),
+            Self::Failed(error) => {
+                detail.error = Some(error.clone());
+                let java = error.split_once("\nJava traceback:\n");
+                if let Some((_, trace)) = error.split_once("\nLua traceback:\n") {
+                    let lua = trace.split("\nJava traceback:\n").next().unwrap_or(trace);
+                    detail.traceback = Some(lua.to_owned());
+                }
+                if let Some((_, trace)) = java {
+                    detail.java_traceback = Some(trace.to_owned());
+                }
+            }
+        }
+    }
+}
+
 /// The running state as the interface shows it.
 #[derive(Default)]
 pub struct Snapshot {
     pub ready: bool,
-    pub statuses: BTreeMap<ModId, String>,
+    pub statuses: BTreeMap<ModId, RunState>,
     pub reloadable: BTreeSet<ModId>,
     /// Code from these ran and failed, so only a new environment can retry them.
     pub spent: BTreeSet<ModId>,
@@ -123,7 +194,7 @@ pub fn problems() -> usize {
     snapshot()
         .statuses
         .values()
-        .filter(|status| status.starts_with("failed:") || status.starts_with("restart-required:"))
+        .filter(|state| state.is_problem())
         .count()
 }
 
@@ -645,51 +716,23 @@ fn operation_callback<'vm>(
     context.frame_return(frame, &[ok, message])
 }
 
-fn status(context: &mut Context<'_, '_>, session_id: u64, id: &ModId, value: &str) -> Result<()> {
+/// Records what became of a mod, and publishes it to `LuaBuddy.mods`.
+fn status(
+    context: &mut Context<'_, '_>,
+    session_id: u64,
+    id: &ModId,
+    value: RunState,
+) -> Result<()> {
+    let text = value.lua();
     let state = with(session_id, |session| {
-        session.statuses.insert(id.clone(), value.to_owned());
         if let Some(detail) = session.details.get_mut(id) {
-            detail.status = match value {
-                "loaded" => ModStatus::Loaded,
-                "disabled" => ModStatus::Disabled,
-                "server-loaded" => ModStatus::ServerLoaded,
-                _ if value.starts_with("restart-required:") => ModStatus::RestartRequired,
-                _ => ModStatus::Failed,
-            };
-            if value == "loaded" {
-                detail.stage = "complete".into();
-            }
-            if matches!(value, "loaded" | "disabled" | "server-loaded") {
-                detail.error = None;
-                detail.traceback = None;
-                detail.java_traceback = None;
-                if value != "loaded" {
-                    detail.stage = value.to_owned();
-                }
-            }
-            if let Some(error) = value.strip_prefix("failed: ") {
-                detail.error = Some(error.to_owned());
-                if let Some((_, trace)) = error.split_once("\nLua traceback:\n") {
-                    detail.traceback = Some(
-                        trace
-                            .split("\nJava traceback:\n")
-                            .next()
-                            .unwrap_or(trace)
-                            .to_owned(),
-                    );
-                }
-                if let Some((_, trace)) = error.split_once("\nJava traceback:\n") {
-                    detail.java_traceback = Some(trace.to_owned());
-                }
-            }
-            if let Some(reason) = value.strip_prefix("restart-required: ") {
-                detail.error = Some(reason.to_owned());
-            }
+            value.describe(detail);
         }
+        session.statuses.insert(id.clone(), value);
         Ok(session.state.clone())
     })?;
     let statuses = context.get(&state, "mods")?;
-    let text = context.string(value)?;
+    let text = context.string(&text)?;
     context.set(&statuses, id.as_str(), &text)
 }
 

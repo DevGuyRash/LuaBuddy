@@ -17,7 +17,8 @@ use crate::{
     log::{self, Operation as Intent},
     lua::{Context, Result, Value},
     observe::{self, Place},
-    profile_store, runtime,
+    profile_store,
+    runtime::{self, RunState},
 };
 use kit::Font;
 use luabuddy_core::{
@@ -75,7 +76,7 @@ struct Live {
     /// is what turning a mod on would use.
     effective: Vec<Profile>,
     templates: Vec<Profile>,
-    statuses: BTreeMap<ModId, String>,
+    statuses: BTreeMap<ModId, RunState>,
     reloadable: BTreeSet<ModId>,
     spent: BTreeSet<ModId>,
     active: BTreeSet<ModId>,
@@ -434,7 +435,7 @@ impl Screen {
                 self.live
                     .statuses
                     .get(*dependent)
-                    .is_some_and(|status| status == "loaded")
+                    .is_some_and(RunState::is_loaded)
             })
             .map(|dependent| self.catalog.title(dependent))
             .collect();
@@ -478,12 +479,7 @@ impl Screen {
             queued: self.live.queued.contains(id),
             next_startup: self.live.startup.contains(id),
             native_active: self.live.active.contains(id),
-            runtime: self
-                .live
-                .statuses
-                .get(id)
-                .map(|status| Runtime::read(status))
-                .unwrap_or_default(),
+            runtime: Runtime::of(self.live.statuses.get(id)),
             spent: self.live.spent.contains(id),
             can_reload: self.live.reloadable.contains(id),
             eligibility,
@@ -1192,7 +1188,7 @@ impl Screen {
         self.live
             .statuses
             .iter()
-            .filter(|(_, status)| status.as_str() == "loaded")
+            .filter(|(_, state)| state.is_loaded())
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -1460,7 +1456,7 @@ impl Screen {
             "startsWithGame": view.next_startup,
             "nativeActive": view.native_active,
             "installed": view.installed,
-            "runtime": self.live.statuses.get(id).map(|status| first_line(status)),
+            "runtime": self.live.statuses.get(id).map(|state| first_line(&state.lua()).to_owned()),
         })
     }
 
@@ -1541,7 +1537,7 @@ impl Screen {
                 record_changes(&changes, false);
                 let running = ids
                     .iter()
-                    .any(|id| self.live.statuses.get(id).is_some_and(|s| s == "loaded"));
+                    .any(|id| self.live.statuses.get(id).is_some_and(RunState::is_loaded));
                 let title = self.catalog.title(&ids[0]);
                 Ok((
                     Tone::Normal,

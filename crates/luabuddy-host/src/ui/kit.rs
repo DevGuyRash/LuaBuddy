@@ -218,26 +218,24 @@ pub fn width(context: &mut Context<'_, '_>, font: Font, text: &str) -> Result<f6
     }
     let measured = with_native(|native| {
         context.jni(|env| {
-            env.with_local_frame(4, |env| -> jni::errors::Result<f64> {
-                let text = env.new_string(text)?;
-                // SAFETY: The method ID was resolved on TextManager with this exact
-                // descriptor, its class is held by a global reference, and both
-                // arguments are live references of the declared types.
-                let width = unsafe {
-                    env.call_method_unchecked(
-                        &native.manager,
-                        native.measure,
-                        ReturnType::Primitive(Primitive::Int),
-                        &[
-                            jvalue {
-                                l: native.fonts[font as usize].as_raw(),
-                            },
-                            jvalue { l: text.as_raw() },
-                        ],
-                    )?
-                };
-                Ok(f64::from(width.i()?))
-            })
+            let text = env.new_string(text)?;
+            // SAFETY: The method ID was resolved on TextManager with this exact
+            // descriptor, its class is held by a global reference, and both
+            // arguments are live references of the declared types.
+            let width = unsafe {
+                env.call_method_unchecked(
+                    &native.manager,
+                    native.measure,
+                    ReturnType::Primitive(Primitive::Int),
+                    &[
+                        jvalue {
+                            l: native.fonts[font as usize].as_raw(),
+                        },
+                        jvalue { l: text.as_raw() },
+                    ],
+                )?
+            };
+            Ok(f64::from(width.i()?))
         })
     })?;
     CACHE.with_borrow_mut(|cache| {
@@ -424,31 +422,29 @@ impl<'c, 'a, 'vm> Painter<'c, 'a, 'vm> {
         let element = self.element.clone();
         with_native(|native| {
             self.context.jni(|env| {
-                env.with_local_frame(4, |env| -> jni::errors::Result<()> {
-                    let text = env.new_string(text)?;
-                    // SAFETY: The method ID was resolved on UIElement with this exact
-                    // descriptor and the element is a live UIElement.
-                    unsafe {
-                        env.call_method_unchecked(
-                            element.object(),
-                            native.text,
-                            ReturnType::Primitive(Primitive::Void),
-                            &[
-                                jvalue {
-                                    l: native.fonts[font as usize].as_raw(),
-                                },
-                                jvalue { l: text.as_raw() },
-                                jvalue { d: x.floor() },
-                                jvalue { d: y.floor() },
-                                jvalue { d: r },
-                                jvalue { d: g },
-                                jvalue { d: b },
-                                jvalue { d: a },
-                            ],
-                        )?;
-                    }
-                    Ok(())
-                })
+                let text = env.new_string(text)?;
+                // SAFETY: The method ID was resolved on UIElement with this exact
+                // descriptor and the element is a live UIElement.
+                unsafe {
+                    env.call_method_unchecked(
+                        element.object(),
+                        native.text,
+                        ReturnType::Primitive(Primitive::Void),
+                        &[
+                            jvalue {
+                                l: native.fonts[font as usize].as_raw(),
+                            },
+                            jvalue { l: text.as_raw() },
+                            jvalue { d: x.floor() },
+                            jvalue { d: y.floor() },
+                            jvalue { d: r },
+                            jvalue { d: g },
+                            jvalue { d: b },
+                            jvalue { d: a },
+                        ],
+                    )?;
+                }
+                Ok(())
             })
         })
     }

@@ -1,7 +1,7 @@
 //! Carries out one loading operation, recording each decision as it is made.
 
 use super::{
-    CooperativeCleanup, execute_owned, generation_live, require_value, stage, status,
+    CooperativeCleanup, RunState, execute_owned, generation_live, require_value, stage, status,
     validate_session, with,
 };
 use crate::{
@@ -178,19 +178,15 @@ fn restore_retained(
     owner: Owner,
     detail: ModDiagnostic,
 ) -> Result<()> {
-    let state = with(session_id, |s| {
-        if generation_live(s, &owner) {
+    let live = with(session_id, |s| {
+        let live = generation_live(s, &owner);
+        if live {
             s.details.insert(owner.id.clone(), detail);
-            s.statuses.insert(owner.id.clone(), "loaded".to_owned());
-            Ok(Some(s.state.clone()))
-        } else {
-            Ok(None)
         }
+        Ok(live)
     })?;
-    if let Some(state) = state {
-        let mods = context.get(&state, "mods")?;
-        let loaded = context.string("loaded")?;
-        context.set(&mods, owner.id.as_str(), &loaded)?;
+    if live {
+        status(context, session_id, &owner.id, RunState::Loaded)?;
     }
     Ok(())
 }
@@ -246,10 +242,7 @@ impl Run<'_> {
         })?;
         // A failure seen before is retried with every load; saying so again is noise.
         let repeated = with(self.session_id, |s| {
-            Ok(s.statuses
-                .get(id)
-                .and_then(|status| status.strip_prefix("failed: "))
-                == Some(error.as_str()))
+            Ok(matches!(s.statuses.get(id), Some(RunState::Failed(before)) if *before == error))
         })?;
         let (level, message) = if repeated {
             (Level::Debug, format!("Still failing: {error}"))
@@ -263,7 +256,12 @@ impl Run<'_> {
         if repeated {
             self.unchanged.push(id.clone());
         }
-        status(context, self.session_id, id, &format!("failed: {error}"))?;
+        status(
+            context,
+            self.session_id,
+            id,
+            RunState::Failed(error.clone()),
+        )?;
         self.failures.insert(id.clone(), error);
         Ok(())
     }
@@ -353,7 +351,7 @@ impl Run<'_> {
             .map(|profile| profile.id.clone())
             .collect();
         profiles.retain(|profile| !spent.contains(&profile.id));
-        let loaded = |id: &ModId| existing.get(id).is_some_and(|status| status == "loaded");
+        let loaded = |id: &ModId| existing.get(id).is_some_and(RunState::is_loaded);
         let mut available = active.clone();
         available.extend(existing.keys().filter(|id| loaded(id)).cloned());
         if let Operation::Reload(target) = self.operation {
@@ -374,7 +372,7 @@ impl Run<'_> {
                     SkipReason::Disabled => "disabled",
                     SkipReason::NativeLoaded => "already loaded by the game or server",
                 })).collect::<BTreeMap<_, _>>(),
-                "alreadyRunning": existing.iter().filter(|(_, status)| status.as_str() == "loaded").map(|(id, _)| id.to_string()).collect::<Vec<_>>(),
+                "alreadyRunning": existing.iter().filter(|(_, state)| state.is_loaded()).map(|(id, _)| id.to_string()).collect::<Vec<_>>(),
                 "needReconnect": spent.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "nativeMods": active.len(),
             }))
@@ -383,11 +381,11 @@ impl Run<'_> {
         if self.target().is_none() {
             for (id, reason) in &resolution.skipped {
                 if !loaded(id) {
-                    let text = match reason {
-                        SkipReason::Disabled => "disabled",
-                        SkipReason::NativeLoaded => "server-loaded",
+                    let state = match reason {
+                        SkipReason::Disabled => RunState::Disabled,
+                        SkipReason::NativeLoaded => RunState::ServerLoaded,
                     };
-                    status(context, self.session_id, id, text)?;
+                    status(context, self.session_id, id, state)?;
                 }
             }
         }
@@ -461,7 +459,7 @@ impl Run<'_> {
                 context,
                 self.session_id,
                 id,
-                &format!("restart-required: {reason}"),
+                RunState::RestartRequired(reason.clone()),
             )?;
             self.restart.push(id.clone());
             return Ok(None);
@@ -820,6 +818,8 @@ impl Run<'_> {
                     }
                     None => self.run_client(context, permit, cleanup, &mut steps),
                 };
+                // The mod's own time, before LuaBuddy looks at what it changed.
+                let took = started.elapsed();
                 timings.entry(id.clone()).or_default().extend(
                     steps
                         .timings
@@ -828,7 +828,7 @@ impl Run<'_> {
                 );
                 let after = observe::footprint(context);
                 let changed = after.since(&footprint, context);
-                self.record_phase(permit, phase, started, &steps, &result, changed);
+                self.record_phase(permit, phase, took, &steps, &result, changed);
                 footprint = after;
                 match &result {
                     Ok(()) if phase == "client" => {
@@ -863,7 +863,7 @@ impl Run<'_> {
         &self,
         permit: &Permit,
         phase: &str,
-        started: Instant,
+        took: Duration,
         steps: &Steps,
         result: &Result<()>,
         changed: serde_json::Value,
@@ -875,7 +875,7 @@ impl Run<'_> {
         };
         log::record(level, &format!("mod.{phase}"), text)
             .about(id)
-            .took(started.elapsed())
+            .took(took)
             .with(json!({
                 "generation": permit.owner().generation.0,
                 "timingsMs": steps.timings,
@@ -1104,7 +1104,7 @@ impl Run<'_> {
                 .unwrap_or_else(|| Err("No activation outcome".into()));
             match &result {
                 Ok(()) => {
-                    status(context, self.session_id, &owner.id, "loaded")?;
+                    status(context, self.session_id, &owner.id, RunState::Loaded)?;
                     log::info("mod.loaded", "Running").about(&owner.id).write();
                     self.loaded.push(owner.id.clone());
                 }
