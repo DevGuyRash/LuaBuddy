@@ -1046,6 +1046,10 @@ impl Screen {
                 let seen = self.press_meaning();
                 self.refresh(context)?;
                 if self.press_meaning() != seen {
+                    self.say(
+                        Tone::Muted,
+                        "This changed just now. Look again, then press.",
+                    );
                     return Ok(());
                 }
                 match (self.list.selected.clone(), self.primary.clone()) {

@@ -113,8 +113,12 @@ fn tracked(
     // the configured path as given when that folder can't be resolved.
     let directory = match crate::selections::directory(context) {
         Ok(directory) => directory,
+        // The report must still be written, so a second failure costs only the path.
         Err(_) => PathBuf::from(
-            game::property(context, luabuddy_core::property::CONFIG)?.unwrap_or_default(),
+            game::property(context, luabuddy_core::property::CONFIG)
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
         ),
     };
     let previous = with(session_id, |s| Ok(s.details.clone()))?;

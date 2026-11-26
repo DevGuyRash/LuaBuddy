@@ -778,11 +778,13 @@ fn listing_the_queue_survives_an_unreadable_persistent_profile() {
         "id=Broken\nunknown=true\n",
     )
     .unwrap();
-    // The window and `luabuddy profiles` still see what is queued.
+    // The listing still works, and says what a claim would do: hold the entry.
     let (usable, skipped) = selection::queue(&root.0).unwrap();
-    assert_eq!(usable.len(), 1);
-    assert_eq!(usable[0].id, id("Temporary"));
-    assert!(skipped.is_empty());
+    assert!(usable.is_empty());
+    assert_eq!(skipped.len(), 1);
+    assert!(skipped[0].message.contains("Temporary"));
+    assert!(skipped[0].message.contains("Broken.properties"));
+    assert!(selection::claim(&root.0).is_err());
 }
 
 #[cfg(unix)]

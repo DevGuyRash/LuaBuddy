@@ -269,11 +269,13 @@ fn execute(args: &Arguments) -> Result<Value, String> {
         "profiles" => {
             args.allow(&["--game-dir", "--profiles-dir"], &[], false)?;
             let directory = profiles()?;
-            let profiles = luabuddy_core::read_profiles(&directory).map_err(|e| e.to_string())?;
+            // One unreadable file is reported beside the others, not instead of them.
+            let (profiles, unreadable) =
+                luabuddy_core::profile::read_each_profile(&directory).map_err(|e| e.to_string())?;
             let (queued, skipped) =
                 luabuddy_core::selection::queue(&directory).map_err(|e| e.to_string())?;
             Ok(
-                json!({"ok":true, "profiles":profiles,"queuedForNextLaunch":queued,"skippedAtNextLaunch":skipped}),
+                json!({"ok":unreadable.is_empty(), "profiles":profiles,"unreadable":unreadable,"queuedForNextLaunch":queued,"skippedAtNextLaunch":skipped}),
             )
         }
         "diagnostics" => {

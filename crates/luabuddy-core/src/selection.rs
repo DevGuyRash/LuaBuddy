@@ -166,9 +166,26 @@ fn pending_directory(directory: &Path) -> PathBuf {
 /// is in exactly one of the two lists.
 pub fn queue(directory: &Path) -> Result<(Vec<Profile>, Vec<CoreError>), CoreError> {
     let (profiles, mut skipped) = read_queue(directory)?;
-    // Listing tolerates a persistent file that can't be read: it shadows
-    // nothing it can be seen to name, and costs only itself. Claiming does not.
-    let (persistent, _) = crate::profile::read_each_profile(directory)?;
+    // A persistent file that can't be read might shadow any queued entry, so a
+    // claim keeps the whole queue until it can be read. Listing says the same,
+    // rather than failing as a claim does.
+    let (persistent, unreadable) = crate::profile::read_each_profile(directory)?;
+    if let Some(blocker) = unreadable.first() {
+        let blocker = blocker.path.as_deref().map_or_else(
+            || blocker.message.clone(),
+            |path| path.display().to_string(),
+        );
+        skipped.extend(profiles.iter().map(|profile| {
+            error(
+                &profile.file,
+                format!(
+                    "One-launch selection {} is held until {blocker} can be read",
+                    profile.id
+                ),
+            )
+        }));
+        return Ok((Vec::new(), skipped));
+    }
     let (usable, conflicts) = split_conflicts(&persistent, profiles);
     skipped.extend(conflicts);
     Ok((usable, skipped))
