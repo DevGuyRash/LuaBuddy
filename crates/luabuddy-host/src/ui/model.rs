@@ -698,12 +698,22 @@ fn turn_off(view: &ModView, world: World) -> Option<Node> {
     } else {
         "Won't load any more. Files and saved settings are kept."
     };
+    // A one-launch queue entry would load it once more anyway; only the
+    // command line that queued it can cancel it.
+    let blocked = world.change_blocked().or_else(|| {
+        view.queued.then(|| {
+            format!(
+                "It is also queued for one future launch. Cancel that first with: luabuddy deselect --mod {} --once",
+                view.id
+            )
+        })
+    });
     let mut ids = vec![view.id.clone()];
     if view.dependents.is_empty() {
         return Some(
             Node::act("Turn off", Act::TurnOff(ids))
                 .hint(hint)
-                .blocked(world.change_blocked()),
+                .blocked(blocked),
         );
     }
     ids.extend(view.dependents.iter().map(|(id, _)| id.clone()));
@@ -729,7 +739,7 @@ fn turn_off(view: &ModView, world: World) -> Option<Node> {
                 .collect::<Vec<_>>()
                 .join(", ")
         ))
-        .blocked(world.change_blocked()),
+        .blocked(blocked),
     )
 }
 

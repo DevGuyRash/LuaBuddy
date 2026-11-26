@@ -67,7 +67,7 @@ The first returned value is cached, including nil and false. Tables and closures
 
 ## Refresh and reload
 
-**Load now** and **Load waiting mods** validate the selected configuration, discovers native metadata, and compiles candidate sources before publishing mappings. Existing loaded generations, resolver identity, and cached values remain intact. Removing or disabling a running profile changes the next session's selection and does not claim an arbitrary unload.
+**Load now** and **Load N waiting mods** validate the selected configuration, discover native metadata, and compile candidate sources before publishing mappings. Existing loaded generations, resolver identity, and cached values remain intact. Removing or disabling a running profile changes the next session's selection and does not claim an arbitrary unload.
 
 A runtime addition cannot replace a running logical path or an effective import provider. It cannot require code to precede an already loaded native or local profile. Those cases require a compatible new connection or native startup.
 

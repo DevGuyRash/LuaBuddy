@@ -499,8 +499,6 @@ impl Screen {
             })
             .collect();
         let native_startup = found.as_ref().is_some_and(|found| found.native_startup);
-        // A selection for this game only, or queued by the command line, can't be
-        // turned off here, so it isn't offered as part of turning this one off.
         let enabled_dependents = if detailed {
             self.catalog.enabled_dependents(id, &self.live.profiles)
         } else {
@@ -1489,7 +1487,7 @@ impl Screen {
                     format!(
                         "{} is on{}. {}",
                         self.catalog.title(&id),
-                        with_others(changed, &id),
+                        with_others(changed),
                         if self.live.world.place == Place::Server {
                             "It loads the next time you join."
                         } else {
@@ -1588,7 +1586,7 @@ impl Screen {
                     format!(
                         "{} starts with the game next launch{}.",
                         self.catalog.title(&id),
-                        with_others(selection.changed.len(), &id)
+                        with_others(selection.changed.len())
                     ),
                 ))
             }
@@ -1850,7 +1848,7 @@ fn subject(act: &Act) -> Option<ModId> {
     }
 }
 
-fn with_others(changed: usize, _: &ModId) -> String {
+fn with_others(changed: usize) -> String {
     match changed.saturating_sub(1) {
         0 => String::new(),
         others => format!(
@@ -2127,7 +2125,7 @@ fn build(
         x += kit::ask_number(context, &button, "getWidth")? + ROW_GAP;
         sources.push((source, button));
     }
-    let list = surface(context, session, &frame)?;
+    let list = surface(context, &frame)?;
     for (method, event) in [
         ("prerender", Event::ListDraw),
         ("onMouseDown", Event::ListPress),
@@ -2139,7 +2137,7 @@ fn build(
     ] {
         set_callback(context, session, &list, method, event)?;
     }
-    let page = surface(context, session, &frame)?;
+    let page = surface(context, &frame)?;
     for (method, event) in [
         ("prerender", Event::PageDraw),
         ("onMouseWheel", Event::PageWheel),
@@ -2171,7 +2169,7 @@ fn panel(context: &mut Context<'_, '_>, bounds: [f64; 4]) -> Result<Value> {
     Ok(panel)
 }
 
-fn surface(context: &mut Context<'_, '_>, _session: u64, frame: &Value) -> Result<Value> {
+fn surface(context: &mut Context<'_, '_>, frame: &Value) -> Result<Value> {
     let surface = panel(context, [0.0, 0.0, 100.0, 100.0])?;
     kit::add(context, frame, &surface)?;
     context.invoke(&surface, "addScrollBars", &[])?;
