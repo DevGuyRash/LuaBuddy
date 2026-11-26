@@ -94,9 +94,7 @@ pub fn active(context: &mut Context<'_, '_>) -> Result<BTreeSet<ModId>> {
     let mut ids = BTreeSet::new();
     for value in java_list(context, &list)? {
         let id = context.text(&value)?;
-        if !id.trim().is_empty() {
-            ids.insert(ModId::new(id).map_err(|e| e.to_string())?);
-        }
+        ids.extend(usable_id(id));
     }
     Ok(ids)
 }
@@ -134,12 +132,23 @@ fn strings(context: &mut Context<'_, '_>, object: &Value, method: &str) -> Resul
     let mut ids = Vec::new();
     for value in java_list(context, &list)? {
         let id = context.text(&value)?;
-        // A blank metadata line reaches here as one empty entry.
-        if !id.trim().is_empty() {
-            ids.push(ModId::new(id).map_err(|e| e.to_string())?);
-        }
+        ids.extend(usable_id(id));
     }
     Ok(ids)
+}
+
+/// A mod ID as LuaBuddy can name it. A blank metadata line arrives as an empty
+/// entry; an ID no profile could hold names nothing LuaBuddy loads, so neither
+/// stops the rest from being read.
+fn usable_id(id: String) -> Option<ModId> {
+    if id.trim().is_empty() {
+        return None;
+    }
+    ModId::new(id.as_str())
+        .inspect_err(|_| {
+            eprintln!("[LuaBuddy] Ignoring a mod ID LuaBuddy can't name: {id:?}");
+        })
+        .ok()
 }
 
 pub struct Discovered {
