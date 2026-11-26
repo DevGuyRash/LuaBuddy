@@ -18,6 +18,48 @@ pub const MAX_ARGUMENTS: usize = 32;
 pub const CONTINUE: i32 = 0;
 pub const RETURN: i32 = 1;
 
+/// The extension store's directory under the profile directory.
+pub const STORE_DIRECTORY: &str = "extensions";
+/// The store's own state directory, which no extension may use as its ID.
+pub const RESERVED_DIRECTORY: &str = ".luabuddy";
+/// Each extension directory's current approval.
+pub const APPROVAL_FILE: &str = "approval.json";
+/// Each immutable generation's manifest.
+pub const MANIFEST_FILE: &str = "manifest.json";
+/// The largest approval or manifest file.
+pub const METADATA_LIMIT: u64 = 1024 * 1024;
+/// The largest native artifact.
+pub const ARTIFACT_LIMIT: u64 = 256 * 1024 * 1024;
+
+/// An immutable generation's artifact filename on this operating system.
+pub const fn artifact_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "artifact.dll"
+    } else if cfg!(target_os = "macos") {
+        "artifact.dylib"
+    } else {
+        "artifact.so"
+    }
+}
+
+/// An ID that fits the ABI identity field and names one portable directory.
+pub fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() < 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        && !matches!(id, "." | ".." | RESERVED_DIRECTORY)
+}
+
+/// A SHA256 digest as `{:x}` writes it: 64 lowercase hexadecimal digits.
+pub fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// An opaque object token is valid only for this callback and is not a JNI pointer.
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
@@ -156,13 +198,7 @@ pub struct ApprovalRecordV1 {
 
 impl ApprovalRecordV1 {
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != 1
-            || self.manifest_sha256.len() != 64
-            || !self
-                .manifest_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
+        if self.schema_version != 1 || !is_sha256_hex(&self.manifest_sha256) {
             return Err(Error::Permission(
                 "Native approval must bind one exact manifest SHA256 under schema v1".into(),
             ));
@@ -194,13 +230,7 @@ pub fn verify(
             "Unsupported extension manifest or ABI version".into(),
         ));
     }
-    if manifest.id.is_empty()
-        || manifest.id.len() >= 64
-        || manifest
-            .id
-            .bytes()
-            .any(|byte| !byte.is_ascii_alphanumeric() && !b"._-".contains(&byte))
-    {
+    if !valid_id(&manifest.id) {
         return Err(Error::Invalid(
             "Extension ID must fit the ABI identity field".into(),
         ));

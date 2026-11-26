@@ -4,6 +4,7 @@ pub mod diagnostics;
 pub mod journal;
 pub mod lifecycle;
 pub mod profile;
+pub mod property;
 pub mod resolve;
 pub mod selection;
 pub mod source;

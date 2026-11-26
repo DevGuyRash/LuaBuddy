@@ -6,6 +6,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// The `schemaVersion` of the diagnostics report, independent of the package schema.
+pub const SCHEMA_VERSION: u32 = 1;
+/// The report's `kind` while the loader initializes.
+pub const KIND: &str = "loader-initialization";
+/// Where the report lives, relative to the game's cache directory.
+pub const REPORT_PATH: &str = "LuaBuddy/diagnostics.json";
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ModStatus {
