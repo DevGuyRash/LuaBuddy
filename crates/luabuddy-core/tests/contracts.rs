@@ -768,6 +768,23 @@ fn one_launch_keeps_the_queue_when_a_persistent_profile_is_unreadable() {
     assert!(!root.0.join(".launch-once/pending").exists());
 }
 
+#[test]
+fn listing_the_queue_survives_an_unreadable_persistent_profile() {
+    use luabuddy_core::selection::{self, Lifetime};
+    let root = Directory::new();
+    selection::select(&root.0, &id("Temporary"), None, Lifetime::Once, None).unwrap();
+    fs::write(
+        root.0.join("Broken.properties"),
+        "id=Broken\nunknown=true\n",
+    )
+    .unwrap();
+    // The window and `luabuddy profiles` still see what is queued.
+    let (usable, skipped) = selection::queue(&root.0).unwrap();
+    assert_eq!(usable.len(), 1);
+    assert_eq!(usable[0].id, id("Temporary"));
+    assert!(skipped.is_empty());
+}
+
 #[cfg(unix)]
 #[test]
 fn selections_follow_a_linked_parent_but_not_a_linked_store() {
