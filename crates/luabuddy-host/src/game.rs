@@ -4,15 +4,21 @@ use luabuddy_core::{ModId, NativeMetadata, Profile};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-pub fn client(context: &mut Context<'_, '_>) -> Result<bool> {
+/// Whether this process is the dedicated server.
+pub fn server(context: &mut Context<'_, '_>) -> Result<bool> {
     context.jni(|env| {
-        Ok(env
-            .get_static_field("zombie/network/GameClient", "client", "Z")?
-            .z()?
-            && !env
-                .get_static_field("zombie/network/GameServer", "server", "Z")?
-                .z()?)
+        env.get_static_field("zombie/network/GameServer", "server", "Z")?
+            .z()
     })
+}
+
+/// Whether this process is a client connected to a server.
+pub fn client(context: &mut Context<'_, '_>) -> Result<bool> {
+    let connected = context.jni(|env| {
+        env.get_static_field("zombie/network/GameClient", "client", "Z")?
+            .z()
+    })?;
+    Ok(connected && !server(context)?)
 }
 
 pub fn property(context: &mut Context<'_, '_>, key: &str) -> Result<Option<String>> {
@@ -118,6 +124,11 @@ fn object_method(
     })
 }
 
+/// The mods a mod's own metadata says it requires.
+pub fn requirements(context: &mut Context<'_, '_>, info: &Value) -> Result<Vec<ModId>> {
+    strings(context, info, "getRequire")
+}
+
 fn strings(context: &mut Context<'_, '_>, object: &Value, method: &str) -> Result<Vec<ModId>> {
     let list = object_method(context, object, method, "()Ljava/util/ArrayList;")?;
     let mut ids = Vec::new();
@@ -185,7 +196,8 @@ pub fn discover(
     Ok(result)
 }
 
-fn native_info(context: &mut Context<'_, '_>, id: &ModId) -> Result<Value> {
+/// The game's record of an installed mod; nil when it isn't installed.
+pub fn native_info(context: &mut Context<'_, '_>, id: &ModId) -> Result<Value> {
     context.jni(|env| {
         let id = env.new_string(id.as_str())?;
         let value = env

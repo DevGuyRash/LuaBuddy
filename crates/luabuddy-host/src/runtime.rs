@@ -251,10 +251,7 @@ pub fn event(env: &mut JNIEnv<'_>, name: &str, enter: bool) -> Result<()> {
         return Ok(());
     }
     let mut initialized_start = false;
-    if context.jni(|env| {
-        env.get_static_field("zombie/network/GameServer", "server", "Z")?
-            .z()
-    })? {
+    if game::server(&mut context)? {
         return Ok(());
     }
     if enter
@@ -264,12 +261,10 @@ pub fn event(env: &mut JNIEnv<'_>, name: &str, enter: bool) -> Result<()> {
                 && game::property(&mut context, "luabuddy.earlyUI")?.as_deref() == Some("true"))
     {
         let load = name != "OnMainMenuEnter" && game::client(&mut context)?;
-        let existing = id().and_then(|id| with(id, |s| Ok(s.environment.clone())).ok());
-        let same = existing
-            .as_ref()
-            .map(|value| context.same(value, &context.environment.clone()))
-            .transpose()?
-            .unwrap_or(false);
+        let same = match id() {
+            Some(id) => current_environment(&mut context, id)?,
+            None => false,
+        };
         if !same {
             start(&mut context, load, name == "OnGameStart")?;
             initialized_start = name == "OnGameStart";
@@ -297,8 +292,7 @@ pub fn event(env: &mut JNIEnv<'_>, name: &str, enter: bool) -> Result<()> {
         }
     }
     if let Some(id) = id() {
-        let environment = with(id, |s| Ok(s.environment.clone()))?;
-        if !context.same(&environment, &context.environment.clone())? {
+        if !current_environment(&mut context, id)? {
             return Ok(());
         }
         if name == "OnGameStart" {
@@ -446,37 +440,19 @@ fn start(context: &mut Context<'_, '_>, load: bool, start_entered: bool) -> Resu
         .get_or_init(|| Mutex::new(None))
         .lock()
         .map_err(|_| "LuaBuddy session lock is poisoned")? = Some(session);
-    let require = Value(Some(callables::create(
-        context.env,
-        "LuaBuddy",
-        session_id,
-        session_id,
-        require_callback,
-    )?));
-    let refresh = Value(Some(callables::create(
-        context.env,
-        "LuaBuddy",
-        session_id,
-        session_id,
-        refresh_callback,
-    )?));
-    let reload = Value(Some(callables::create(
-        context.env,
-        "LuaBuddy",
-        session_id,
-        session_id,
-        reload_callback,
-    )?));
-    let retry_patches = Value(Some(callables::create(
-        context.env,
-        "LuaBuddy",
-        session_id,
-        session_id,
-        retry_patches_callback,
-    )?));
-    context.set(&state, "refresh", &refresh)?;
-    context.set(&state, "reload", &reload)?;
-    context.set(&state, "retryPatches", &retry_patches)?;
+    let callable = |context: &mut Context<'_, '_>, handler: callables::Handler| {
+        callables::create(context.env, "LuaBuddy", session_id, session_id, handler)
+            .map(|reference| Value(Some(reference)))
+    };
+    let require = callable(context, require_callback)?;
+    for (name, handler) in [
+        ("refresh", refresh_callback as callables::Handler),
+        ("reload", reload_callback),
+        ("retryPatches", retry_patches_callback),
+    ] {
+        let function = callable(context, handler)?;
+        context.set(&state, name, &function)?;
+    }
     let environment = context.environment.clone();
     context.set(&environment, "LuaBuddy", &state)?;
     context.set(&environment, "require", &require)?;
@@ -612,9 +588,18 @@ fn execute_step(
     }
 }
 
+/// Whether the game is still running the Lua environment this session started in.
+fn current_environment(context: &mut Context<'_, '_>, session_id: u64) -> Result<bool> {
+    let ours = match with(session_id, |s| Ok(s.environment.clone())) {
+        Ok(environment) => environment,
+        Err(_) => return Ok(false),
+    };
+    let current = context.environment.clone();
+    context.same(&ours, &current)
+}
+
 fn validate_environment(context: &mut Context<'_, '_>, session_id: u64) -> Result<()> {
-    let environment = with(session_id, |s| Ok(s.environment.clone()))?;
-    if !context.same(&environment, &context.environment.clone())? {
+    if !current_environment(context, session_id)? {
         return Err("This LuaBuddy session is no longer active".into());
     }
     Ok(())

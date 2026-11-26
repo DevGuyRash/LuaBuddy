@@ -75,7 +75,7 @@ pub fn apply(
     let result = begin(context, session_id, &operation);
     let cpu = cpu
         .zip(observe::thread_cpu(context))
-        .map(|(before, after)| ((after - before).as_secs_f64() * 1000.0).round());
+        .map(|(before, after)| ms(after - before));
     let data = json!({ "cpuMs": cpu, "world": observe::world(context) });
     match &result {
         Ok(summary) => intent.finish(Level::Info, summary.clone(), data),
@@ -562,11 +562,7 @@ impl Run<'_> {
                 return Ok(());
             }
             for (id, needed) in &unmet {
-                self.fail(
-                    context,
-                    id,
-                    format!("It needs {needed}, which did not load"),
-                )?;
+                self.fail(context, id, unmet_requirement(needed))?;
             }
             candidates.retain(|candidate| {
                 !unmet
@@ -636,10 +632,7 @@ impl Run<'_> {
             CleanupDecision::Retained(error) => Err(format!("{id}: {error}")),
             CleanupDecision::Quarantined(error) => {
                 if let Some(owner) = previous {
-                    with(self.session_id, |s| {
-                        s.modules.fail_owner(&owner, &error.to_string());
-                        Ok(())
-                    })?;
+                    self.abandon(&owner, &error.to_string())?;
                 }
                 self.fail(context, &id, error.to_string())?;
                 Err(format!("{id}: {error}"))
@@ -813,7 +806,7 @@ impl Run<'_> {
                             .is_some_and(|result| result.is_err())
                 });
                 let result = match unmet {
-                    Some(required) => Err(format!("It needs {required}, which did not load")),
+                    Some(required) => Err(unmet_requirement(required)),
                     None if phase == "shared" => {
                         self.run_shared(context, permit, inputs, &mut steps)
                     }
@@ -838,10 +831,7 @@ impl Run<'_> {
                     }
                     Ok(()) => (),
                     Err(error) => {
-                        with(self.session_id, |s| {
-                            s.modules.fail_owner(permit.owner(), error);
-                            Ok(())
-                        })?;
+                        self.abandon(permit.owner(), error)?;
                         context.set(&active_table, id.as_str(), &Value::default())?;
                     }
                 }
@@ -860,6 +850,14 @@ impl Run<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Drops the modules this generation registered, so `require` can't return them.
+    fn abandon(&self, owner: &Owner, error: &str) -> Result<()> {
+        with(self.session_id, |s| {
+            s.modules.fail_owner(owner, error);
+            Ok(())
+        })
+    }
+
     fn record_phase(
         &self,
         permit: &Permit,
@@ -1068,10 +1066,7 @@ impl Run<'_> {
                     }
                 };
                 if let Err(error) = result {
-                    with(self.session_id, |s| {
-                        s.modules.fail_owner(owner, &error);
-                        Ok(())
-                    })?;
+                    self.abandon(owner, &error)?;
                     outcomes.insert(owner.id.clone(), Err(error));
                 }
             }
@@ -1095,10 +1090,7 @@ impl Run<'_> {
                 .iter()
                 .find(|required| self.failures.contains_key(*required))
             {
-                outcomes.insert(
-                    owner.id.clone(),
-                    Err(format!("It needs {required}, which did not load")),
-                );
+                outcomes.insert(owner.id.clone(), Err(unmet_requirement(required)));
             }
             let result = outcomes
                 .remove(&owner.id)
@@ -1110,10 +1102,7 @@ impl Run<'_> {
                     self.loaded.push(owner.id.clone());
                 }
                 Err(error) => {
-                    with(self.session_id, |s| {
-                        s.modules.fail_owner(&owner, error);
-                        Ok(())
-                    })?;
+                    self.abandon(&owner, error)?;
                     self.fail(context, &owner.id, error.clone())?;
                 }
             }
@@ -1257,6 +1246,11 @@ impl Steps {
     fn note(&mut self, name: &str, value: serde_json::Value) {
         self.notes.insert(name.to_owned(), value);
     }
+}
+
+/// Why a mod can't run when something it requires didn't load.
+fn unmet_requirement(required: &ModId) -> String {
+    format!("It needs {required}, which did not load")
 }
 
 fn ms(elapsed: Duration) -> f64 {
