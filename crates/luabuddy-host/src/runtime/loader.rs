@@ -117,7 +117,8 @@ fn tracked(
     token: &OperationToken,
     operation: &Operation,
 ) -> Result<String> {
-    let directory = PathBuf::from(game::property(context, "luabuddy.config")?.unwrap_or_default());
+    // The report names the same canonical folder selections are read from.
+    let directory = crate::selections::directory(context).unwrap_or_default();
     let previous = with(session_id, |s| Ok(s.details.clone()))?;
     let retained = match operation {
         Operation::Reload(target) => with(session_id, |s| {

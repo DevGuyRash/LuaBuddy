@@ -22,19 +22,7 @@ impl OperationReport {
         config_directory: PathBuf,
         previous_mods: BTreeMap<ModId, ModDiagnostic>,
     ) -> Result<Self> {
-        let filesystem = game::instance(context)?;
-        let cache = context.jni(|env| {
-            let cache = env
-                .call_method(
-                    filesystem.object(),
-                    "getCacheDir",
-                    "()Ljava/lang/String;",
-                    &[],
-                )?
-                .l()?;
-            env.new_global_ref(cache).map(|value| Value(Some(value)))
-        })?;
-        let destination = PathBuf::from(context.text(&cache)?).join("LuaBuddy/diagnostics.json");
+        let destination = game::cache_directory(context)?.join("LuaBuddy/diagnostics.json");
         let core = context.jni(|env| {
             let core = env
                 .call_static_method(
@@ -47,7 +35,7 @@ impl OperationReport {
             let version = env
                 .call_method(core, "getVersion", "()Ljava/lang/String;", &[])?
                 .l()?;
-            env.new_global_ref(version).map(|value| Value(Some(value)))
+            Value::retain(env, version)
         })?;
         let game_version = context.text(&core)?;
         let java_version = game::property(context, "java.version")?
@@ -112,7 +100,7 @@ pub fn session_identity(context: &mut Context<'_, '_>, session: u64) -> Result<S
             let uuid = env
                 .call_static_method("java/util/UUID", "randomUUID", "()Ljava/util/UUID;", &[])?
                 .l()?;
-            env.new_global_ref(uuid).map(|value| Value(Some(value)))
+            Value::retain(env, uuid)
         })?;
         let _ = PROCESS.set(context.text(&uuid)?);
     }
@@ -127,7 +115,7 @@ pub fn timestamp(context: &mut Context<'_, '_>) -> Result<String> {
         let instant = env
             .call_static_method("java/time/Instant", "now", "()Ljava/time/Instant;", &[])?
             .l()?;
-        env.new_global_ref(instant).map(|value| Value(Some(value)))
+        Value::retain(env, instant)
     })?;
     context.text(&instant)
 }

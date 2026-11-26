@@ -8,10 +8,29 @@ static NIL: LazyLock<JObject<'static>> = LazyLock::new(JObject::null);
 
 pub type Result<T> = std::result::Result<T, String>;
 
+/// The first value a Lua call returned, or nil.
+pub fn first(values: Vec<Value>) -> Value {
+    values.into_iter().next().unwrap_or_default()
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Value(pub Option<GlobalRef>);
 
 impl Value {
+    /// Keeps a Java object beyond the current JNI frame. Null is nil.
+    pub fn retain<'local>(
+        env: &JNIEnv<'_>,
+        object: impl AsRef<JObject<'local>>,
+    ) -> jni::errors::Result<Self> {
+        let object = object.as_ref();
+        if object.is_null() {
+            Ok(Self::default())
+        } else {
+            env.new_global_ref(object)
+                .map(|reference| Self(Some(reference)))
+        }
+    }
+
     pub fn is_nil(&self) -> bool {
         self.0.is_none()
     }
@@ -55,13 +74,7 @@ impl<'a, 'vm> Context<'a, 'vm> {
     }
 
     pub fn retain(env: &mut JNIEnv<'vm>, object: &JObject<'_>) -> Result<Value> {
-        if object.is_null() {
-            Ok(Value::default())
-        } else {
-            env.new_global_ref(object)
-                .map(|v| Value(Some(v)))
-                .map_err(|e| e.to_string())
-        }
+        Value::retain(env, object).map_err(|e| e.to_string())
     }
 
     /// Runs JNI work in its own local frame. Every `Value` is a global
@@ -102,7 +115,7 @@ impl<'a, 'vm> Context<'a, 'vm> {
     pub fn string(&mut self, text: &str) -> Result<Value> {
         self.jni(|env| {
             let value = env.new_string(text)?;
-            env.new_global_ref(value).map(|v| Value(Some(v)))
+            Value::retain(env, value)
         })
     }
 
@@ -116,7 +129,7 @@ impl<'a, 'vm> Context<'a, 'vm> {
                     &[JValue::Bool(value.into())],
                 )?
                 .l()?;
-            env.new_global_ref(value).map(|v| Value(Some(v)))
+            Value::retain(env, value)
         })
     }
 
@@ -130,7 +143,7 @@ impl<'a, 'vm> Context<'a, 'vm> {
                     &[JValue::Double(value)],
                 )?
                 .l()?;
-            env.new_global_ref(value).map(|v| Value(Some(v)))
+            Value::retain(env, value)
         })
     }
 
@@ -142,7 +155,7 @@ impl<'a, 'vm> Context<'a, 'vm> {
                 "(Ljava/util/Map;)V",
                 &[JValue::Object(&map)],
             )?;
-            env.new_global_ref(value).map(|v| Value(Some(v)))
+            Value::retain(env, value)
         })
     }
 
@@ -206,7 +219,7 @@ impl<'a, 'vm> Context<'a, 'vm> {
             let text = env
                 .call_method(writer, "toString", "()Ljava/lang/String;", &[])?
                 .l()?;
-            env.new_global_ref(text).map(|value| Value(Some(value)))
+            Value::retain(env, text)
         })?;
         self.text(&text)
     }
@@ -234,11 +247,7 @@ impl<'a, 'vm> Context<'a, 'vm> {
                     &[JValue::Object(&key)],
                 )?
                 .l()?;
-            if value.is_null() {
-                Ok(Value::default())
-            } else {
-                env.new_global_ref(value).map(|v| Value(Some(v)))
-            }
+            Value::retain(env, value)
         })
     }
 
@@ -254,11 +263,7 @@ impl<'a, 'vm> Context<'a, 'vm> {
                     &[JValue::Object(table.object()), JValue::Object(&key)],
                 )?
                 .l()?;
-            if value.is_null() {
-                Ok(Value::default())
-            } else {
-                env.new_global_ref(value).map(|v| Value(Some(v)))
-            }
+            Value::retain(env, value)
         })
     }
 
@@ -294,11 +299,7 @@ impl<'a, 'vm> Context<'a, 'vm> {
                     .call_method(&iterator, "getValue", "()Ljava/lang/Object;", &[])?
                     .l()?;
                 let key = env.new_global_ref(key)?;
-                let value = if value.is_null() {
-                    Value::default()
-                } else {
-                    Value(Some(env.new_global_ref(value)?))
-                };
+                let value = Value::retain(env, value)?;
                 result.push((Value(Some(key)), value));
             }
             Ok(result)
@@ -317,7 +318,7 @@ impl<'a, 'vm> Context<'a, 'vm> {
             let array = env.call_method(caller.object(), "pcall", "(Lse/krka/kahlua/vm/KahluaThread;Ljava/lang/Object;[Ljava/lang/Object;)[Ljava/lang/Object;", &[JValue::Object(thread.object()), JValue::Object(callable.object()), JValue::Object(&args)])?.l()?;
             let array = JObjectArray::from(array);
             let mut values = Vec::new();
-            for i in 0..env.get_array_length(&array)? { let value = env.get_object_array_element(&array, i)?; values.push(if value.is_null() { Value::default() } else { Value(Some(env.new_global_ref(value)?)) }); }
+            for i in 0..env.get_array_length(&array)? { let value = env.get_object_array_element(&array, i)?; values.push(Value::retain(env, value)?); }
             Ok(values)
         })?;
         if result.is_empty() || !self.truth(&result[0])? {
@@ -356,7 +357,7 @@ impl<'a, 'vm> Context<'a, 'vm> {
             let closure = env.call_static_method("se/krka/kahlua/luaj/compiler/LuaCompiler", "loadstring", "(Ljava/lang/String;Ljava/lang/String;Lse/krka/kahlua/vm/KahluaTable;)Lse/krka/kahlua/vm/LuaClosure;", &[JValue::Object(&source), JValue::Object(&filename), JValue::Object(environment.object())])?.l()?;
             let prototype = env.get_field(&closure, "prototype", "Lse/krka/kahlua/vm/Prototype;")?.l()?;
             source_metadata(env, &prototype, &filename)?;
-            env.new_global_ref(closure).map(|v| Value(Some(v)))
+            Value::retain(env, closure)
         })
     }
 
@@ -370,11 +371,7 @@ impl<'a, 'vm> Context<'a, 'vm> {
                 let arg = env
                     .call_method(frame, "get", "(I)Ljava/lang/Object;", &[JValue::Int(i)])?
                     .l()?;
-                args.push(if arg.is_null() {
-                    Value::default()
-                } else {
-                    Value(Some(env.new_global_ref(arg)?))
-                });
+                args.push(Value::retain(env, arg)?);
             }
             Ok(args)
         })

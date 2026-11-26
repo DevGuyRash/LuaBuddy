@@ -487,9 +487,7 @@ impl<'c, 'a, 'vm> Painter<'c, 'a, 'vm> {
     }
 }
 
-pub fn first(values: Vec<Value>) -> Value {
-    values.into_iter().next().unwrap_or_default()
-}
+pub use crate::lua::first;
 
 pub fn numbers(context: &mut Context<'_, '_>, values: &[f64]) -> Result<Vec<Value>> {
     values.iter().map(|value| context.number(*value)).collect()

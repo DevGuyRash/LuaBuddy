@@ -6,7 +6,6 @@ use jni::{
     JNIEnv,
     sys::{jmethodID, jobject},
 };
-use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static SUCCESS: AtomicUsize = AtomicUsize::new(0);
@@ -39,8 +38,6 @@ pub(crate) fn prepare(env: &mut JNIEnv<'_>, jvmti: &Jvmti) -> Result<(), String>
     {
         return Err("Unapproved Workshop callback classloader".into());
     }
-    let layout: serde_json::Value =
-        serde_json::from_str(include_str!("../layouts.json")).map_err(|e| e.to_string())?;
     let mut methods = Vec::new();
     for (name, descriptor) in [
         ("onItemDownloaded", "(J)V"),
@@ -50,18 +47,8 @@ pub(crate) fn prepare(env: &mut JNIEnv<'_>, jvmti: &Jvmti) -> Result<(), String>
             .get_method_id(&class, name, descriptor)
             .map_err(|e| e.to_string())?
             .into_raw();
-        let digest = format!("{:x}", Sha256::digest(jvmti.bytecodes(method)?));
-        if !layout["targets"]
-            .as_array()
-            .ok_or("Missing callback compatibility manifest")?
-            .iter()
-            .any(|target| {
-                target["class"] == "zombie/core/znet/SteamWorkshop"
-                    && target["method"] == name
-                    && target["descriptor"] == descriptor
-                    && target["bytecode_sha256"] == digest
-            })
-        {
+        let digest = crate::layout::fingerprint(&jvmti.bytecodes(method)?);
+        if !crate::layout::approved("zombie/core/znet/SteamWorkshop", name, descriptor, &digest)? {
             return Err(format!(
                 "Unsupported Workshop callback {name} fingerprint {digest}"
             ));

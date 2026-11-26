@@ -1,5 +1,5 @@
 use crate::{
-    callables, game, hooks, log,
+    callables, game, log,
     lua::{Context, Result, Value},
     observe,
 };
@@ -584,7 +584,7 @@ fn execute_step(
         RequireStep::Cached(value) => Ok(value),
         RequireStep::Delegate(function) => {
             let name = context.string(name)?;
-            hooks::first(context.call(&function, &[name])?)
+            Ok(crate::lua::first(context.call(&function, &[name])?))
         }
         RequireStep::Execute(owner, key, chunk) => {
             let result = context.call(&chunk, &[]).map(|mut values| {

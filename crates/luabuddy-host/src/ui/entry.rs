@@ -66,7 +66,7 @@ fn add(context: &mut Context<'_, '_>, session: u64, main: &Value) -> Result<()> 
         let font = env
             .get_static_field("zombie/ui/UIFont", "Large", "Lzombie/ui/UIFont;")?
             .l()?;
-        env.new_global_ref(font).map(|font| Value(Some(font)))
+        Value::retain(env, font)
     })?;
     let mut args = kit::numbers(context, &[0.0, bottom, height])?;
     args.push(context.string(NAME)?);

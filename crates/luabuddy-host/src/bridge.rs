@@ -158,8 +158,8 @@ pub(crate) unsafe extern "system" fn class_prepare(
         env.register_native_methods(
             class,
             &[NativeMethod {
-                name: "call".into(),
-                sig: "(Lse/krka/kahlua/vm/LuaCallFrame;I)I".into(),
+                name: crate::callables::METHOD_NAME.into(),
+                sig: crate::callables::DESCRIPTOR.into(),
                 fn_ptr: native_call as *mut c_void,
             }],
         )

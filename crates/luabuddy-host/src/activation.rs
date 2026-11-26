@@ -606,7 +606,7 @@ fn named_selection(context: &mut Context<'_, '_>, name: &str) -> Result<Value> {
                 &[JValue::Object(&name)],
             )?
             .l()?;
-        env.new_global_ref(value).map(|value| Value(Some(value)))
+        Value::retain(env, value)
     })
 }
 
@@ -618,7 +618,7 @@ fn empty_selection(context: &mut Context<'_, '_>) -> Result<Value> {
             "(Ljava/lang/String;)V",
             &[JValue::Object(&name)],
         )?;
-        env.new_global_ref(value).map(|value| Value(Some(value)))
+        Value::retain(env, value)
     })
 }
 
@@ -702,7 +702,7 @@ fn native_destination(context: &mut Context<'_, '_>) -> Result<PathBuf> {
                 &[],
             )?
             .l()?;
-        env.new_global_ref(value).map(|value| Value(Some(value)))
+        Value::retain(env, value)
     })?;
     Ok(PathBuf::from(context.text(&folder)?).join("mods/default.txt"))
 }

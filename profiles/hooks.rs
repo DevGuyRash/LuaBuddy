@@ -1,6 +1,6 @@
 use crate::{
     game, log,
-    lua::{Context, Result, Value},
+    lua::{Context, Result, Value, first},
     runtime::{self, Deferred},
 };
 
@@ -101,22 +101,22 @@ pub fn after(
             let api = context.global("PZAPI")?;
             let options = context.get(&api, "ModOptions")?;
             let name = context.string("EURY_CRAFTING")?;
-            let group = first(context.invoke(&options, "getOptions", &[name])?)?;
+            let group = first(context.invoke(&options, "getOptions", &[name])?);
             context.invoke(&group, "apply", &[])?;
         }
         "CraftPlanner" => {
             let planner = context.global("CraftPlanner")?;
             for i in players(context)? {
                 let player =
-                    first(context.call_global("getSpecificPlayer", std::slice::from_ref(&i))?)?;
+                    first(context.call_global("getSpecificPlayer", std::slice::from_ref(&i))?);
                 let inventory =
-                    first(context.call_global("getPlayerInventory", std::slice::from_ref(&i))?)?;
-                let loot = first(context.call_global("getPlayerLoot", &[i])?)?;
+                    first(context.call_global("getPlayerInventory", std::slice::from_ref(&i))?);
+                let loot = first(context.call_global("getPlayerLoot", &[i])?);
                 if player.is_nil() || inventory.is_nil() || loot.is_nil() {
                     continue;
                 }
                 let get_state = context.get(&planner, "getState")?;
-                let state = first(context.call(&get_state, std::slice::from_ref(&player))?)?;
+                let state = first(context.call(&get_state, std::slice::from_ref(&player))?);
                 let visible = context.get(&state, "visible")?;
                 if context.truth(&visible)? {
                     let function = context.get(&planner, "setVisible")?;
@@ -148,12 +148,8 @@ pub fn after(
     Ok(())
 }
 
-pub fn first(values: Vec<Value>) -> Result<Value> {
-    Ok(values.into_iter().next().unwrap_or_default())
-}
-
 fn players(context: &mut Context<'_, '_>) -> Result<Vec<Value>> {
-    let count = first(context.call_global("getNumActivePlayers", &[])?)?;
+    let count = first(context.call_global("getNumActivePlayers", &[])?);
     let count = context.numeric(&count)? as i32;
     (0..count).map(|i| context.number(i as f64)).collect()
 }
@@ -170,7 +166,7 @@ fn inventory(context: &mut Context<'_, '_>, runtime: bool) -> Result<()> {
             ("inventory", "getPlayerInventory"),
             ("loot", "getPlayerLoot"),
         ] {
-            let page = first(context.call_global(function, std::slice::from_ref(&i))?)?;
+            let page = first(context.call_global(function, std::slice::from_ref(&i))?);
             if page.is_nil() {
                 continue;
             }
@@ -179,7 +175,7 @@ fn inventory(context: &mut Context<'_, '_>, runtime: bool) -> Result<()> {
                 continue;
             }
             let pin = context.get(&page, "pin")?;
-            let visible = first(context.invoke(&page, "getIsVisible", &[])?)?;
+            let visible = first(context.invoke(&page, "getIsVisible", &[])?);
             let name = context.string(&format!("{prefix}{number}"))?;
             let layout = if runtime {
                 let layout = context.table()?;
@@ -210,16 +206,16 @@ fn mechanics(context: &mut Context<'_, '_>) -> Result<()> {
     let window = context.get(&neat, "Window")?;
     let sidebar = context.get(&neat, "Sidebar")?;
     for i in players(context)? {
-        let ui = first(context.call_global("getPlayerMechanicsUI", std::slice::from_ref(&i))?)?;
+        let ui = first(context.call_global("getPlayerMechanicsUI", std::slice::from_ref(&i))?);
         if !ui.is_nil() {
-            let width = first(context.invoke(&ui, "getWidth", &[])?)?;
-            let height = first(context.invoke(&ui, "getHeight", &[])?)?;
+            let width = first(context.invoke(&ui, "getWidth", &[])?);
+            let height = first(context.invoke(&ui, "getHeight", &[])?);
             let setup = context.get(&window, "setup")?;
             context.call(&setup, std::slice::from_ref(&ui))?;
             context.invoke(&ui, "setWidth", &[width])?;
             context.invoke(&ui, "setHeight", &[height])?;
         }
-        let data = first(context.call_global("getPlayerData", &[i])?)?;
+        let data = first(context.call_global("getPlayerData", &[i])?);
         if !data.is_nil() {
             let equipped = context.get(&data, "equipped")?;
             if !equipped.is_nil() {
@@ -233,7 +229,7 @@ fn mechanics(context: &mut Context<'_, '_>) -> Result<()> {
 
 fn dashboard(context: &mut Context<'_, '_>) -> Result<()> {
     for i in players(context)? {
-        let data = first(context.call_global("getPlayerData", std::slice::from_ref(&i))?)?;
+        let data = first(context.call_global("getPlayerData", std::slice::from_ref(&i))?);
         if data.is_nil() {
             continue;
         }
@@ -242,9 +238,9 @@ fn dashboard(context: &mut Context<'_, '_>) -> Result<()> {
             continue;
         }
         context.invoke(&old, "removeFromUIManager", &[])?;
-        let player = first(context.call_global("getSpecificPlayer", std::slice::from_ref(&i))?)?;
+        let player = first(context.call_global("getSpecificPlayer", std::slice::from_ref(&i))?);
         let class = context.global("ISVehicleDashboard")?;
-        let dashboard = first(context.invoke(&class, "new", &[i, player.clone()])?)?;
+        let dashboard = first(context.invoke(&class, "new", &[i, player.clone()])?);
         context.invoke(&dashboard, "initialise", &[])?;
         context.invoke(&dashboard, "instantiate", &[])?;
         context.set(&data, "vehicleDashboard", &dashboard)?;
@@ -257,11 +253,7 @@ fn dashboard(context: &mut Context<'_, '_>) -> Result<()> {
                     &[],
                 )?
                 .l()?;
-            if value.is_null() {
-                Ok(Value::default())
-            } else {
-                env.new_global_ref(value).map(|v| Value(Some(v)))
-            }
+            Value::retain(env, value)
         })?;
         if !vehicle.is_nil() {
             let driver = context.jni(|env| {
@@ -284,7 +276,7 @@ fn dashboard(context: &mut Context<'_, '_>) -> Result<()> {
 /// Quick Build Menu's startup cleanup clears native handcraft favorites, so they
 /// are remembered before it runs and put back after.
 fn favorites(context: &mut Context<'_, '_>) -> Result<Option<(Value, Vec<String>)>> {
-    let player = first(context.call_global("getPlayer", &[])?)?;
+    let player = first(context.call_global("getPlayer", &[])?);
     if player.is_nil() {
         return Ok(None);
     }
@@ -305,7 +297,7 @@ fn favorites(context: &mut Context<'_, '_>) -> Result<Option<(Value, Vec<String>
                 &[],
             )?
             .l()?;
-        env.new_global_ref(value).map(|v| Value(Some(v)))
+        Value::retain(env, value)
     })?;
     let mut favorites = Vec::new();
     for recipe in game::java_list(context, &recipes)? {
@@ -318,7 +310,7 @@ fn favorites(context: &mut Context<'_, '_>) -> Result<Option<(Value, Vec<String>
                     &[jni::objects::JValue::Object(recipe.object())],
                 )?
                 .l()?;
-            env.new_global_ref(key).map(|v| Value(Some(v)))
+            Value::retain(env, key)
         })?;
         let name = context.text(&key)?;
         let value = context.get(&data, &name)?;
@@ -370,6 +362,6 @@ fn mod_data(context: &mut Context<'_, '_>, player: &Value) -> Result<Value> {
                 &[],
             )?
             .l()?;
-        env.new_global_ref(value).map(|v| Value(Some(v)))
+        Value::retain(env, value)
     })
 }

@@ -26,17 +26,20 @@ pub fn property(context: &mut Context<'_, '_>, key: &str) -> Result<Option<Strin
                 &[JValue::Object(&key)],
             )?
             .l()?;
-        if value.is_null() {
-            Ok(Value::default())
-        } else {
-            env.new_global_ref(value).map(|v| Value(Some(v)))
-        }
+        Value::retain(env, value)
     })?;
     if value.is_nil() {
         Ok(None)
     } else {
         context.text(&value).map(Some)
     }
+}
+
+/// The game's cache folder, the root of everything LuaBuddy writes there.
+pub fn cache_directory(context: &mut Context<'_, '_>) -> Result<std::path::PathBuf> {
+    let filesystem = instance(context)?;
+    let cache = object_method(context, &filesystem, "getCacheDir", "()Ljava/lang/String;")?;
+    Ok(std::path::PathBuf::from(context.text(&cache)?))
 }
 
 pub fn instance(context: &mut Context<'_, '_>) -> Result<Value> {
@@ -48,7 +51,7 @@ pub fn instance(context: &mut Context<'_, '_>) -> Result<Value> {
                 "Lzombie/ZomboidFileSystem;",
             )?
             .l()?;
-        env.new_global_ref(value).map(|v| Value(Some(v)))
+        Value::retain(env, value)
     })
 }
 
@@ -68,11 +71,7 @@ pub fn java_list(context: &mut Context<'_, '_>, list: &Value) -> Result<Vec<Valu
                     &[JValue::Int(i)],
                 )?
                 .l()?;
-            values.push(if value.is_null() {
-                Value::default()
-            } else {
-                Value(Some(env.new_global_ref(value)?))
-            });
+            values.push(Value::retain(env, value)?);
         }
         Ok(values)
     })
@@ -84,7 +83,7 @@ pub fn active(context: &mut Context<'_, '_>) -> Result<BTreeSet<ModId>> {
         let list = env
             .call_method(filesystem.object(), "getModIDs", "()Ljava/util/List;", &[])?
             .l()?;
-        env.new_global_ref(list).map(|v| Value(Some(v)))
+        Value::retain(env, list)
     })?;
     let mut ids = BTreeSet::new();
     for value in java_list(context, &list)? {
@@ -115,11 +114,7 @@ fn object_method(
         let value = env
             .call_method(object.object(), method, signature, &[])?
             .l()?;
-        if value.is_null() {
-            Ok(Value::default())
-        } else {
-            env.new_global_ref(value).map(|v| Value(Some(v)))
-        }
+        Value::retain(env, value)
     })
 }
 
@@ -201,7 +196,7 @@ fn native_info(context: &mut Context<'_, '_>, id: &ModId) -> Result<Value> {
                 &[JValue::Object(&id)],
             )?
             .l()?;
-        retain(env, &value)
+        Value::retain(env, &value)
     })
 }
 
@@ -216,7 +211,7 @@ fn read_mod_info(context: &mut Context<'_, '_>, root: &std::path::Path) -> Resul
                 &[JValue::Object(&path)],
             )?
             .l()?;
-        retain(env, &value)
+        Value::retain(env, &value)
     })
 }
 
@@ -247,7 +242,7 @@ fn registered_workshop_info(context: &mut Context<'_, '_>, id: &ModId) -> Result
                 &[JValue::Int(0), JValue::Object(&known)],
             )?;
         }
-        retain(env, &list)
+        Value::retain(env, &list)
     })?;
     for folder in java_list(context, &folders)? {
         let root = PathBuf::from(context.text(&folder)?);
@@ -308,7 +303,7 @@ fn discover_one(
                         &[JValue::Long(workshop_id as i64)],
                     )?
                     .l()?;
-                retain(env, &value)
+                Value::retain(env, &value)
             })?;
             if folder.is_nil() {
                 return Err(format!(
@@ -356,7 +351,7 @@ pub(crate) fn repair_flat_root(
                 &[JValue::Object(&root)],
             )?
             .l()?;
-        retain(env, &flat)
+        Value::retain(env, &flat)
     })?;
     for method in ["getCommonDir", "getVersionDir"] {
         let dir = object_method(context, &flat, method, "()Ljava/lang/String;")?;
@@ -459,14 +454,6 @@ fn metadata(
     ))
 }
 
-fn retain(env: &jni::JNIEnv<'_>, object: &jni::objects::JObject<'_>) -> jni::errors::Result<Value> {
-    if object.is_null() {
-        Ok(Value::default())
-    } else {
-        env.new_global_ref(object).map(|v| Value(Some(v)))
-    }
-}
-
 pub fn mount(context: &mut Context<'_, '_>, id: &ModId, info: &Value) -> Result<()> {
     let filesystem = instance(context)?;
     let root = object_method(context, info, "getDir", "()Ljava/lang/String;")?;
@@ -544,7 +531,7 @@ pub fn callback_filename(context: &mut Context<'_, '_>, callback: &Value) -> Res
         let filename = env
             .get_field(prototype, "filename", "Ljava/lang/String;")?
             .l()?;
-        retain(env, &filename)
+        Value::retain(env, &filename)
     })?;
     context.text(&filename)
 }
@@ -589,7 +576,7 @@ pub fn remove_callbacks(
                 "Ljava/util/ArrayList;",
             )?
             .l()?;
-        retain(env, &list)
+        Value::retain(env, &list)
     })?;
     let mut removed = 0;
     for event in java_list(context, &events)? {
@@ -597,7 +584,7 @@ pub fn remove_callbacks(
             let name = env
                 .get_field(event.object(), "name", "Ljava/lang/String;")?
                 .l()?;
-            retain(env, &name)
+            Value::retain(env, &name)
         })?;
         let name = context.text(&name)?;
         let owned = callbacks(context, &name, filenames)?;

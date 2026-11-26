@@ -2,7 +2,6 @@ use jni::objects::{GlobalRef, JClass, JFieldID, JMethodID, JObject, JString};
 use jni::signature::{Primitive, ReturnType};
 use jni::sys::{JNIEnv as RawJni, jboolean, jobject, jvalue};
 use jni::{JNIEnv, NativeMethod};
-use sha2::{Digest, Sha256};
 use std::ffi::c_void;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,23 +32,8 @@ pub(crate) fn registered() -> bool {
 }
 
 pub(crate) fn verify(bytecodes: &[u8]) -> Result<(), String> {
-    let fingerprint = format!("{:x}", Sha256::digest(bytecodes));
-    let layout: serde_json::Value = serde_json::from_str(include_str!("../layouts.json"))
-        .map_err(|e| format!("invalid host layout manifest: {e}"))?;
-    if layout["schema"] != 1 || layout["class_loader"] != "system" {
-        return Err("unsupported host layout manifest schema".into());
-    }
-    let compatible = layout["targets"]
-        .as_array()
-        .ok_or("missing host target manifest")?
-        .iter()
-        .any(|target| {
-            target["class"] == "zombie/Lua/Event"
-                && target["method"] == "trigger"
-                && target["descriptor"] == DESCRIPTOR
-                && target["bytecode_sha256"] == fingerprint
-        });
-    if !compatible {
+    let fingerprint = crate::layout::fingerprint(bytecodes);
+    if !crate::layout::approved("zombie/Lua/Event", "trigger", DESCRIPTOR, &fingerprint)? {
         return Err(format!(
             "unsupported Event.trigger bytecode fingerprint {fingerprint}; no lifecycle hooks installed"
         ));
