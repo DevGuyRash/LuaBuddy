@@ -28,7 +28,8 @@ pub fn attach(context: &mut Context<'_, '_>, session: u64) -> Result<()> {
     update(context, &main)
 }
 
-fn main_screen(context: &mut Context<'_, '_>) -> Result<Option<Value>> {
+/// The game's main or pause menu, when one exists.
+pub(super) fn main_screen(context: &mut Context<'_, '_>) -> Result<Option<Value>> {
     let class = context.global("MainScreen")?;
     if class.is_nil() {
         return Ok(None);
@@ -195,8 +196,7 @@ pub fn joypad_gain(context: &mut Context<'_, '_>, args: &[Value]) -> Result<()> 
         }
         let label = context.get(main, LABEL)?;
         let ours = context.table()?;
-        let table = context.global("table")?;
-        let insert = context.get(&table, "insert")?;
+        let insert = kit::table_function(context, "insert")?;
         context.call(&insert, &[ours.clone(), label])?;
         let position = context.numeric(&index)? + 1.0;
         let position = context.number(position)?;

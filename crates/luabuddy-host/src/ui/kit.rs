@@ -503,6 +503,24 @@ impl<'c, 'a, 'vm> Painter<'c, 'a, 'vm> {
 
 pub use crate::lua::first;
 
+/// The first line of a message, for places with room for one.
+pub fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or(text)
+}
+
+/// Gives a controller's focus to an element, the way the game's own UI does.
+pub fn focus_joypad(context: &mut Context<'_, '_>, joypad: &Value, target: &Value) -> Result<()> {
+    context.set(joypad, "focus", target)?;
+    context.call_global("updateJoypadFocus", std::slice::from_ref(joypad))?;
+    Ok(())
+}
+
+/// One of Lua's `table` library functions, such as `insert`.
+pub fn table_function(context: &mut Context<'_, '_>, name: &str) -> Result<Value> {
+    let table = context.global("table")?;
+    context.get(&table, name)
+}
+
 pub fn numbers(context: &mut Context<'_, '_>, values: &[f64]) -> Result<Vec<Value>> {
     values.iter().map(|value| context.number(*value)).collect()
 }

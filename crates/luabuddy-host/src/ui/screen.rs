@@ -52,7 +52,7 @@ pub enum Key {
     Note,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Tab {
     Mods,
     Workshop,
@@ -60,6 +60,9 @@ enum Tab {
 }
 
 impl Tab {
+    const ALL: [Self; 3] = [Self::Mods, Self::Workshop, Self::Activity];
+
+    /// How the journal names the tab.
     fn name(self) -> &'static str {
         match self {
             Self::Mods => "mods",
@@ -67,6 +70,50 @@ impl Tab {
             Self::Activity => "activity",
         }
     }
+
+    /// The name the game hands back when its tab button is pressed.
+    fn control(self) -> &'static str {
+        match self {
+            Self::Mods => "tab-mods",
+            Self::Workshop => "tab-workshop",
+            Self::Activity => "tab-activity",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Mods => "My mods",
+            Self::Workshop => "Workshop",
+            Self::Activity => "Activity",
+        }
+    }
+
+    fn placeholder(self) -> &'static str {
+        match self {
+            Self::Mods => "Filter your mods",
+            Self::Workshop => "Search",
+            Self::Activity => "Search activity",
+        }
+    }
+}
+
+/// The gap between stacked controls.
+const ROW_GAP: f64 = 6.0;
+/// The label of the button that opens a selection's other actions.
+const MORE: &str = "More...";
+/// A button's room beyond its label.
+const BUTTON_INSET: f64 = 28.0;
+
+fn button_width(context: &mut Context<'_, '_>, label: &str) -> Result<f64> {
+    Ok(kit::width(context, Font::Small, label)? + BUTTON_INSET)
+}
+
+fn content_top() -> f64 {
+    PAD + header_height() + PAD
+}
+
+fn list_width(frame_width: f64) -> f64 {
+    (frame_width * 0.40).clamp(260.0, 640.0)
 }
 
 /// The player's selections and the running state, read together.
@@ -102,8 +149,8 @@ pub struct Carried {
     tab: Tab,
     /// Its source, results and any request or download still in progress.
     workshop: Workshop,
-    texts: BTreeMap<&'static str, String>,
-    chosen: BTreeMap<&'static str, Key>,
+    texts: BTreeMap<Tab, String>,
+    chosen: BTreeMap<Tab, Key>,
     folded: BTreeMap<Section, bool>,
 }
 
@@ -133,8 +180,8 @@ pub struct Screen {
     buttons: Buttons,
     size: (f64, f64),
     tab: Tab,
-    texts: BTreeMap<&'static str, String>,
-    chosen: BTreeMap<&'static str, Key>,
+    texts: BTreeMap<Tab, String>,
+    chosen: BTreeMap<Tab, Key>,
     folded: BTreeMap<Section, bool>,
     catalog: Catalog,
     live: Live,
@@ -234,12 +281,7 @@ impl Screen {
             screen.texts = carried.texts;
             screen.chosen = carried.chosen;
             screen.folded = carried.folded;
-            let text = screen
-                .texts
-                .get(screen.tab.name())
-                .cloned()
-                .unwrap_or_default();
-            let text = context.string(&text)?;
+            let text = context.string(screen.text(screen.tab))?;
             context.invoke(&screen.search, "setText", &[text])?;
         }
         let shown = (|| {
@@ -291,7 +333,7 @@ impl Screen {
             let joypad = self.joypad.clone();
             let restored = context
                 .get(&self.root, "prevFocus")
-                .and_then(|previous| focus_joypad(context, &joypad, &previous));
+                .and_then(|previous| kit::focus_joypad(context, &joypad, &previous));
             rest = rest.and(restored);
         }
         log::debug("ui.closed", "Closed the LuaBuddy window").write();
@@ -319,9 +361,9 @@ impl Screen {
             self.catalog_read = true;
         }
         let text = self.search_text(context)?;
-        if self.texts.get(self.tab.name()) != Some(&text) {
+        if self.texts.get(&self.tab) != Some(&text) {
             self.close_menu(context)?;
-            self.texts.insert(self.tab.name(), text.clone());
+            self.texts.insert(self.tab, text.clone());
             if self.tab == Tab::Workshop {
                 self.workshop.type_text(&text);
             }
@@ -391,11 +433,13 @@ impl Screen {
         context.text(&value)
     }
 
+    /// What the player typed in a tab's search box.
+    fn text(&self, tab: Tab) -> &str {
+        self.texts.get(&tab).map(String::as_str).unwrap_or_default()
+    }
+
     fn filter(&self) -> String {
-        self.texts
-            .get(self.tab.name())
-            .map(|text| text.trim().to_lowercase())
-            .unwrap_or_default()
+        self.text(self.tab).trim().to_lowercase()
     }
 
     fn say(&mut self, tone: Tone, text: impl Into<String>) {
@@ -538,10 +582,9 @@ impl Screen {
     }
 
     fn item(&self, id: u64) -> Option<ItemView> {
-        let text = self.texts.get(Tab::Workshop.name());
         let mut view = self
             .workshop
-            .items(text.map(String::as_str).unwrap_or_default())
+            .items(self.text(Tab::Workshop))
             .into_iter()
             .find(|view| view.id == Some(id))?;
         view.contains = self.catalog.contained(id);
@@ -576,12 +619,7 @@ impl Screen {
             None => model::summary(running, attention, waiting, place),
         };
         if self.tab == Tab::Workshop {
-            let text = self
-                .texts
-                .get(Tab::Workshop.name())
-                .cloned()
-                .unwrap_or_default();
-            let shown = self.workshop.items(&text).len();
+            let shown = self.workshop.items(self.text(Tab::Workshop)).len();
             self.summary = (Tone::Muted, self.workshop.summary(shown));
         }
         let rows = match self.tab {
@@ -605,7 +643,7 @@ impl Screen {
         // A remembered choice that is filtered or folded away is not acted on.
         self.list.selected = self
             .chosen
-            .get(self.tab.name())
+            .get(&self.tab)
             .filter(|key| self.list.index_of(key).is_some())
             .cloned();
         self.totals = Totals {
@@ -639,38 +677,29 @@ impl Screen {
                 },
             });
         }
-        for (file, _) in &self.live.unreadable {
-            let name = file
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
-                continue;
-            }
-            sections.entry(Section::Attention).or_default().push(Row {
-                key: Key::Folder(file.to_string_lossy().into_owned()),
-                text: name,
-                face: Face::Item {
-                    status: "This selection file can't be read".into(),
-                    tone: Tone::Bad,
-                    quiet: false,
-                },
-            });
-        }
-        for broken in &self.catalog.broken {
-            let name = broken
-                .directory
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(&broken.directory);
+        let unreadable = self.live.unreadable.iter().map(|(file, _)| {
+            (
+                Section::Attention,
+                file.to_string_lossy().into_owned(),
+                Unread::Selection,
+            )
+        });
+        let broken = self.catalog.broken.iter().map(|broken| {
+            (
+                Section::Unavailable,
+                broken.directory.clone(),
+                Unread::Folder,
+            )
+        });
+        for (section, path, kind) in unreadable.chain(broken) {
+            let name = last_component(&path).to_owned();
             if filter.is_empty() || name.to_lowercase().contains(&filter) {
-                sections.entry(Section::Unavailable).or_default().push(Row {
-                    key: Key::Folder(broken.directory.clone()),
-                    text: name.to_owned(),
+                sections.entry(section).or_default().push(Row {
+                    key: Key::Folder(path),
+                    text: name,
                     face: Face::Item {
-                        status: "The game can't read this folder".into(),
-                        tone: Tone::Warning,
+                        status: kind.status().into(),
+                        tone: kind.tone(),
                         quiet: false,
                     },
                 });
@@ -704,12 +733,7 @@ impl Screen {
     }
 
     fn item_rows(&self) -> Vec<Row<Key>> {
-        let text = self
-            .texts
-            .get(Tab::Workshop.name())
-            .map(String::as_str)
-            .unwrap_or_default();
-        let items = self.workshop.items(text);
+        let items = self.workshop.items(self.text(Tab::Workshop));
         let mut rows = items
             .iter()
             .map(|view| Row {
@@ -787,10 +811,10 @@ impl Screen {
                     .unreadable
                     .iter()
                     .find(|(file, _)| file.to_string_lossy() == directory.as_str());
-                let (status, reason) = match selection {
-                    Some((_, reason)) => ("This selection file can't be read", reason.clone()),
+                let (kind, reason) = match selection {
+                    Some((_, reason)) => (Unread::Selection, reason.clone()),
                     None => (
-                        "The game can't read this folder",
+                        Unread::Folder,
                         self.catalog
                             .broken
                             .iter()
@@ -807,14 +831,8 @@ impl Screen {
                     Node::act("Copy path", Act::Copy(directory.clone(), "Path copied.")),
                 ];
                 vec![
-                    Block::Title(
-                        directory
-                            .rsplit(['/', '\\'])
-                            .next()
-                            .unwrap_or(&directory)
-                            .to_owned(),
-                    ),
-                    Block::Status(Tone::Warning, status.into()),
+                    Block::Title(last_component(&directory).to_owned()),
+                    Block::Status(kind.tone(), kind.status().into()),
                     Block::Text(Tone::Normal, reason),
                     Block::Heading("Details".into()),
                     Block::Fact("Path".into(), Tone::Muted, directory),
@@ -863,7 +881,7 @@ impl Screen {
     fn orientation(&self) -> Vec<Block> {
         match self.tab {
             Tab::Mods => vec![
-                Block::Title("Your mods".into()),
+                Block::Title(Tab::Mods.label().into()),
                 Block::Status(self.summary.0, self.summary.1.clone()),
                 Block::Text(
                     Tone::Normal,
@@ -879,7 +897,7 @@ impl Screen {
                 ),
             ],
             Tab::Workshop => vec![
-                Block::Title("Workshop".into()),
+                Block::Title(Tab::Workshop.label().into()),
                 Block::Text(
                     Tone::Normal,
                     "Choose an item to see it. Downloading one only delivers its files; turn its mods on in My mods."
@@ -887,7 +905,7 @@ impl Screen {
                 ),
             ],
             Tab::Activity => vec![
-                Block::Title("Activity".into()),
+                Block::Title(Tab::Activity.label().into()),
                 Block::Text(
                     Tone::Normal,
                     "Everything LuaBuddy did in this game, newest first. Type to search, including steps not listed here."
@@ -902,24 +920,23 @@ impl Screen {
         let left = list_x + list_w + PAD;
         let y = self.actions_top();
         let has_menu = self.primary.is_some() || !self.actions.is_empty();
-        let top = self.content_top();
+        let top = content_top();
         let bottom = if has_menu { y - PAD } else { list_y + list_h };
         let width = self.frame_size().0 - PAD - left;
         self.page_text
             .resize(context, &self.theme, [left, top, width, bottom - top])?;
         let mut x = left;
         let primary = self.primary.clone();
-        let more_width = kit::width(context, Font::Small, "More...")? + 28.0 + PAD;
+        let more = button_width(context, MORE)?;
         x += place_action(
             context,
             &self.buttons.primary,
             primary.as_ref(),
             [x, y],
-            width - more_width,
+            width - more - PAD,
         )?;
         self.more_shown = !self.other_actions().is_empty();
         kit::call_flag(context, &self.buttons.more, "setVisible", self.more_shown)?;
-        let more = kit::width(context, Font::Small, "More...")? + 28.0;
         kit::set_bounds(
             context,
             &self.buttons.more,
@@ -933,8 +950,8 @@ impl Screen {
             .map(|node| kit::width(context, Font::Small, &node.label))
             .transpose()?
             .unwrap_or(0.0)
-            .min(limit - 28.0)
-            + 28.0;
+            .min(limit - BUTTON_INSET)
+            + BUTTON_INSET;
         place_action(
             context,
             &self.buttons.footer,
@@ -977,16 +994,12 @@ impl Screen {
         frame_size(self.size)
     }
 
-    fn content_top(&self) -> f64 {
-        PAD + header_height() + PAD
-    }
-
     fn list_bounds(&self) -> [f64; 4] {
         let (w, h) = self.frame_size();
         let rows = if self.tab == Tab::Workshop { 2.0 } else { 1.0 };
-        let top = self.content_top() + rows * (kit::control_height() + 6.0);
+        let top = content_top() + rows * (kit::control_height() + ROW_GAP);
         let bottom = h - 2.0 * PAD - kit::control_height();
-        [PAD, top, (w * 0.40).clamp(260.0, 640.0), bottom - top]
+        [PAD, top, list_width(w), bottom - top]
     }
 
     fn actions_top(&self) -> f64 {
@@ -997,12 +1010,7 @@ impl Screen {
     fn lay_out(&mut self, context: &mut Context<'_, '_>) -> Result<()> {
         let list = self.list_bounds();
         panes::place(context, &self.list.panel, list)?;
-        let placeholder = match self.tab {
-            Tab::Mods => "Filter your mods",
-            Tab::Workshop => "Search",
-            Tab::Activity => "Search activity",
-        };
-        let placeholder = context.string(placeholder)?;
+        let placeholder = context.string(self.tab.placeholder())?;
         context.invoke(&self.search, "setPlaceholderText", &[placeholder])?;
         Ok(())
     }
@@ -1013,10 +1021,10 @@ impl Screen {
         }
         self.close_menu(context)?;
         self.tab = tab;
-        let text = self.texts.get(tab.name()).cloned().unwrap_or_default();
+        let text = self.text(tab).to_owned();
         let value = context.string(&text)?;
         context.invoke(&self.search, "setText", &[value])?;
-        self.texts.insert(tab.name(), text.clone());
+        self.texts.insert(tab, text.clone());
         self.lay_out(context)?;
         if tab == Tab::Workshop
             && let Err(error) = self.workshop.open(self.workshop.source, &text)
@@ -1085,12 +1093,12 @@ impl Screen {
                 let y = kit::ask_number(context, &button, "getAbsoluteY")?;
                 self.show_menu(context, nodes, [x, y + kit::control_height()])
             }
-            "tab-mods" => self.show_tab(context, Tab::Mods),
-            "tab-workshop" => self.show_tab(context, Tab::Workshop),
-            "tab-activity" => self.show_tab(context, Tab::Activity),
             "source-subscribed" => self.show_source(context, Source::Subscribed),
             "source-everything" => self.show_source(context, Source::Everything),
-            other => Err(format!("Unknown LuaBuddy control {other}")),
+            other => match Tab::ALL.into_iter().find(|tab| tab.control() == other) {
+                Some(tab) => self.show_tab(context, tab),
+                None => Err(format!("Unknown LuaBuddy control {other}")),
+            },
         }
     }
 
@@ -1106,7 +1114,7 @@ impl Screen {
             return Ok(());
         }
         let text = self.search_text(context)?;
-        self.chosen.remove(Tab::Workshop.name());
+        self.chosen.remove(&Tab::Workshop);
         if let Err(error) = self.workshop.open(source, &text) {
             self.workshop.problem = Some(error);
         }
@@ -1150,7 +1158,7 @@ impl Screen {
             }
             (_, Face::Item { .. }) => {
                 kit::sound(context, "UISelectListItem");
-                self.chosen.insert(self.tab.name(), row.key.clone());
+                self.chosen.insert(self.tab, row.key.clone());
                 self.refresh(context)
             }
             _ => Ok(()),
@@ -1168,7 +1176,7 @@ impl Screen {
             Face::Item { .. } => self.choose(context, index)?,
             Face::Header { .. } => {
                 self.chosen
-                    .insert(self.tab.name(), self.list.rows[index].key.clone());
+                    .insert(self.tab, self.list.rows[index].key.clone());
                 self.refresh(context)?;
             }
             _ => (),
@@ -1269,7 +1277,7 @@ impl Screen {
         let previous = context.get(&data, "focus")?;
         context.set(&self.root, "prevFocus", &previous)?;
         let root = self.root.clone();
-        focus_joypad(context, &data, &root)?;
+        kit::focus_joypad(context, &data, &root)?;
         self.joypad = data;
         let joypad = context.global("Joypad")?;
         let textures = context.get(&joypad, "Texture")?;
@@ -1356,7 +1364,7 @@ impl Screen {
         let closed = menu.close(context);
         if !self.joypad.is_nil() && !self.closed {
             let (joypad, root) = (self.joypad.clone(), self.root.clone());
-            return closed.and(focus_joypad(context, &joypad, &root));
+            return closed.and(kit::focus_joypad(context, &joypad, &root));
         }
         closed
     }
@@ -1622,8 +1630,8 @@ impl Screen {
                 ))
             }
             Act::ShowMod(id) => {
-                self.texts.insert(Tab::Mods.name(), String::new());
-                self.chosen.insert(Tab::Mods.name(), Key::Mod(id.clone()));
+                self.texts.insert(Tab::Mods, String::new());
+                self.chosen.insert(Tab::Mods, Key::Mod(id.clone()));
                 let place = self.live.world.place;
                 let section = self.view(&id, false).section(place);
                 self.folded.insert(section, false);
@@ -1634,9 +1642,9 @@ impl Screen {
                 Ok((Tone::Muted, self.catalog.title(&id)))
             }
             Act::ShowContained(workshop) => {
-                self.texts.insert(Tab::Mods.name(), workshop.to_string());
+                self.texts.insert(Tab::Mods, workshop.to_string());
                 if let Some((id, _)) = self.catalog.contained(workshop).into_iter().next() {
-                    self.chosen.insert(Tab::Mods.name(), Key::Mod(id));
+                    self.chosen.insert(Tab::Mods, Key::Mod(id));
                 }
                 self.go_to_mods(context)?;
                 Ok((Tone::Muted, "Showing what this item installed.".into()))
@@ -1672,10 +1680,9 @@ impl Screen {
                     .write();
                 self.entries = log::recent(usize::MAX);
                 if let Some(entry) = self.entries.first() {
-                    self.chosen
-                        .insert(Tab::Activity.name(), Key::Entry(entry.seq));
+                    self.chosen.insert(Tab::Activity, Key::Entry(entry.seq));
                 }
-                self.texts.insert(Tab::Activity.name(), String::new());
+                self.texts.insert(Tab::Activity, String::new());
                 self.show_tab(context, Tab::Activity)?;
                 Ok((Tone::Normal, "Showing native extension status.".into()))
             }
@@ -1692,15 +1699,9 @@ impl Screen {
                         "The server doesn't let you quit just yet. Try again in a moment.".into(),
                     );
                 }
-                let class = context.global("MainScreen")?;
-                let main = if class.is_nil() {
-                    Value::default()
-                } else {
-                    context.get(&class, "instance")?
-                };
-                if main.is_nil() {
+                let Some(main) = entry::main_screen(context)? else {
                     return Err("Quit from the game's own menu.".into());
-                }
+                };
                 self.close(context)?;
                 context.invoke(&main, "quitToDesktopFunc", &[])?;
                 Ok((Tone::Normal, "Asked the game to quit.".into()))
@@ -1710,12 +1711,7 @@ impl Screen {
 
     fn go_to_mods(&mut self, context: &mut Context<'_, '_>) -> Result<()> {
         if self.tab == Tab::Mods {
-            let text = self
-                .texts
-                .get(Tab::Mods.name())
-                .cloned()
-                .unwrap_or_default();
-            let value = context.string(&text)?;
+            let value = context.string(self.text(Tab::Mods))?;
             context.invoke(&self.search, "setText", &[value])?;
             self.refresh(context)
         } else {
@@ -1736,7 +1732,7 @@ impl Screen {
 
     fn require_no_pending_options(&self, context: &mut Context<'_, '_>) -> Result<()> {
         if super::pending_options(context)? {
-            Err("Apply or cancel your pending game Options changes first.".into())
+            Err(model::OPTIONS_PENDING.into())
         } else {
             Ok(())
         }
@@ -1907,8 +1903,36 @@ fn containing_folder(path: &str) -> String {
     }
 }
 
-fn first_line(text: &str) -> &str {
-    text.lines().next().unwrap_or(text)
+use kit::first_line;
+
+/// Something listed that could not be read.
+#[derive(Clone, Copy)]
+enum Unread {
+    /// A selection file: the player's own choice is in doubt.
+    Selection,
+    /// A mod folder the game itself can't read.
+    Folder,
+}
+
+impl Unread {
+    fn status(self) -> &'static str {
+        match self {
+            Self::Selection => "This selection file can't be read",
+            Self::Folder => "The game can't read this folder",
+        }
+    }
+
+    fn tone(self) -> Tone {
+        match self {
+            Self::Selection => Tone::Bad,
+            Self::Folder => Tone::Warning,
+        }
+    }
+}
+
+/// The last part of a path, whichever separator it uses.
+fn last_component(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 fn note(text: &str) -> Row<Key> {
@@ -1929,12 +1953,6 @@ fn frame_size((width, height): (f64, f64)) -> (f64, f64) {
         (width * part).min(1800.0).floor(),
         (height * 0.92).min(1200.0).floor(),
     )
-}
-
-fn focus_joypad(context: &mut Context<'_, '_>, joypad: &Value, target: &Value) -> Result<()> {
-    context.set(joypad, "focus", target)?;
-    context.call_global("updateJoypadFocus", std::slice::from_ref(joypad))?;
-    Ok(())
 }
 
 fn mark(context: &mut Context<'_, '_>, button: &Value, active: bool) -> Result<()> {
@@ -1965,10 +1983,10 @@ fn place_action(
     let Some(node) = node else {
         return Ok(0.0);
     };
-    let label = kit::fit(context, Font::Small, &node.label, limit - 28.0)?;
+    let label = kit::fit(context, Font::Small, &node.label, limit - BUTTON_INSET)?;
     let title = context.string(&label)?;
     context.invoke(button, "setTitle", &[title])?;
-    let width = kit::width(context, Font::Small, &label)? + 28.0;
+    let width = button_width(context, &label)?;
     kit::set_bounds(context, button, [x, y, width, kit::control_height()])?;
     let (fill, border) = if matches!(node.act, Some(Act::TurnOff(_) | Act::Quit | Act::Copy(..))) {
         ([0.0; 4], kit::BORDER)
@@ -2036,18 +2054,23 @@ fn build(
     let click = callback(context, session, Event::Button)?;
     let height = kit::control_height();
     let header = PAD + (header_height() - height) / 2.0;
-    let mut x = PAD + kit::width(context, Font::Large, "LuaBuddy")? + 28.0;
+    let mut x = PAD + kit::width(context, Font::Large, "LuaBuddy")? + BUTTON_INSET;
     let mut tabs = Vec::new();
-    for (tab, name, label, shown) in [
-        (Tab::Mods, "tab-mods", "My mods", true),
-        (Tab::Workshop, "tab-workshop", "Workshop", steam),
-        (Tab::Activity, "tab-activity", "Activity", true),
-    ] {
-        if shown {
-            let button = button(context, &frame, &click, name, label, [x, header])?;
-            x += kit::ask_number(context, &button, "getWidth")? + 6.0;
-            tabs.push((tab, button));
-        }
+    // The Workshop tab exists only when the game's Steam client does.
+    for tab in Tab::ALL
+        .into_iter()
+        .filter(|tab| steam || *tab != Tab::Workshop)
+    {
+        let button = button(
+            context,
+            &frame,
+            &click,
+            tab.control(),
+            tab.label(),
+            [x, header],
+        )?;
+        x += kit::ask_number(context, &button, "getWidth")? + ROW_GAP;
+        tabs.push((tab, button));
     }
     let tools = button(context, &frame, &click, "tools", "Tools", [0.0, header])?;
     let width = kit::ask_number(context, &tools, "getWidth")?;
@@ -2063,10 +2086,10 @@ fn build(
     )?;
     context.invoke(&back, "enableCancelColor", &[])?;
     let primary = button(context, &frame, &click, "primary", "", [PAD, 0.0])?;
-    let more = button(context, &frame, &click, "more", "More...", [PAD, 0.0])?;
+    let more = button(context, &frame, &click, "more", MORE, [PAD, 0.0])?;
     let footer = button(context, &frame, &click, "footer", "", [PAD, 0.0])?;
-    let top = PAD + header_height() + PAD;
-    let list_width = (w * 0.40).clamp(260.0, 640.0);
+    let top = content_top();
+    let list_width = list_width(w);
     let mut args = vec![context.string("")?];
     let entry = kit::line_height(Font::Small) + 6.0;
     args.extend(kit::numbers(
@@ -2099,9 +2122,9 @@ fn build(
             &click,
             name,
             label,
-            [x, top + height + 6.0],
+            [x, top + height + ROW_GAP],
         )?;
-        x += kit::ask_number(context, &button, "getWidth")? + 6.0;
+        x += kit::ask_number(context, &button, "getWidth")? + ROW_GAP;
         sources.push((source, button));
     }
     let list = surface(context, session, &frame)?;
@@ -2163,7 +2186,7 @@ fn button(
     label: &str,
     [x, y]: [f64; 2],
 ) -> Result<Value> {
-    let width = kit::width(context, Font::Small, label)? + 28.0;
+    let width = button_width(context, label)?;
     let mut args = kit::numbers(context, &[x, y, width, kit::control_height()])?;
     args.push(context.string(label)?);
     args.push(frame.clone());

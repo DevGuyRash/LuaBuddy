@@ -37,6 +37,10 @@ impl Runtime {
     }
 }
 
+/// Why a change waits while the game's Options screen has unsaved edits.
+pub const OPTIONS_PENDING: &str = "Apply or cancel your pending game Options changes first.";
+const UPDATE_AVAILABLE: &str = "Update available";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct World {
     pub place: Place,
@@ -48,8 +52,7 @@ pub struct World {
 
 impl World {
     fn change_blocked(&self) -> Option<String> {
-        self.options_pending
-            .then(|| "Apply or cancel your pending game Options changes first.".into())
+        self.options_pending.then(|| OPTIONS_PENDING.into())
     }
 
     fn load_blocked(&self) -> Option<String> {
@@ -65,6 +68,19 @@ pub struct Requirement {
     pub title: String,
     pub installed: bool,
     pub on: bool,
+}
+
+impl Requirement {
+    /// How a required mod stands, in a word.
+    pub fn state(&self) -> (Tone, &'static str) {
+        if !self.installed {
+            (Tone::Bad, "not installed")
+        } else if self.on {
+            (Tone::Good, "on")
+        } else {
+            (Tone::Muted, "off")
+        }
+    }
 }
 
 /// Everything known about one mod identity.
@@ -590,17 +606,7 @@ pub fn mod_menu(view: &ModView, world: World) -> Vec<Node> {
             .iter()
             .map(|need| {
                 let node = Node::act(
-                    format!(
-                        "{} ({})",
-                        need.title,
-                        if !need.installed {
-                            "not installed"
-                        } else if need.on {
-                            "on"
-                        } else {
-                            "off"
-                        }
-                    ),
+                    format!("{} ({})", need.title, need.state().1),
                     Act::ShowMod(need.id.clone()),
                 );
                 node.blocked((!need.installed).then(|| format!("{} is not installed.", need.title)))
@@ -799,7 +805,7 @@ impl ItemView {
         if state.downloading || state.download_pending {
             "Downloading"
         } else if state.installed && state.needs_update {
-            "Update available"
+            UPDATE_AVAILABLE
         } else if state.installed && state.subscribed {
             "Installed"
         } else if state.installed {
@@ -999,13 +1005,7 @@ pub fn mod_document(view: &ModView, world: World) -> Vec<Block> {
     ));
     if !view.requirements.is_empty() {
         for need in &view.requirements {
-            let (tone, state) = if !need.installed {
-                (Tone::Bad, "not installed")
-            } else if need.on {
-                (Tone::Good, "on")
-            } else {
-                (Tone::Muted, "off")
-            };
+            let (tone, state) = need.state();
             blocks.push(Block::Fact(
                 "Needs".into(),
                 tone,
@@ -1029,7 +1029,7 @@ pub fn mod_document(view: &ModView, world: World) -> Vec<Block> {
                 Tone::Normal
             },
             if state.needs_update {
-                "Update available".into()
+                UPDATE_AVAILABLE.into()
             } else if state.subscribed {
                 "Subscribed".into()
             } else {
