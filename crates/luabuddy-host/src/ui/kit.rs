@@ -11,7 +11,7 @@ use jni::{
     signature::{Primitive, ReturnType},
     sys::jvalue,
 };
-use std::{cell::RefCell, collections::HashMap};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap};
 
 pub type Color = [f64; 4];
 
@@ -107,11 +107,13 @@ struct Native {
     manager: GlobalRef,
 }
 
+/// Measurements per font, looked up by the text itself so a hit allocates nothing.
 #[derive(Default)]
 struct Cache {
     native: Option<Native>,
-    widths: HashMap<(Font, String), f64>,
-    fitted: HashMap<(Font, String), String>,
+    widths: [HashMap<String, f64>; 3],
+    /// The last shortening of each text, and the room it was made for.
+    fitted: [HashMap<String, (f64, String)>; 3],
 }
 
 thread_local! { static CACHE: RefCell<Cache> = RefCell::default(); }
@@ -123,8 +125,8 @@ pub fn prepare(context: &mut Context<'_, '_>) -> Result<()> {
     CACHE.with_borrow_mut(|cache| {
         *cache = Cache {
             native: Some(native),
-            widths: HashMap::new(),
-            fitted: HashMap::new(),
+            widths: Default::default(),
+            fitted: Default::default(),
         };
     });
     Ok(())
@@ -212,8 +214,7 @@ pub fn width(context: &mut Context<'_, '_>, font: Font, text: &str) -> Result<f6
     if text.is_empty() {
         return Ok(0.0);
     }
-    let key = (font, text.to_owned());
-    if let Some(width) = CACHE.with_borrow(|cache| cache.widths.get(&key).copied()) {
+    if let Some(width) = CACHE.with_borrow(|cache| cache.widths[font as usize].get(text).copied()) {
         return Ok(width);
     }
     let measured = with_native(|native| {
@@ -239,34 +240,47 @@ pub fn width(context: &mut Context<'_, '_>, font: Font, text: &str) -> Result<f6
         })
     })?;
     CACHE.with_borrow_mut(|cache| {
+        let widths = &mut cache.widths[font as usize];
         // Workshop text is unbounded; a fresh start is cheaper than eviction.
-        if cache.widths.len() > 20_000 {
-            cache.widths.clear();
+        if widths.len() > 20_000 {
+            widths.clear();
         }
-        cache.widths.insert(key, measured);
+        widths.insert(text.to_owned(), measured);
     });
     Ok(measured)
 }
 
-/// Shortens the text to fit, marking the cut.
-pub fn fit(context: &mut Context<'_, '_>, font: Font, text: &str, limit: f64) -> Result<String> {
+/// Shortens the text to fit, marking the cut. Text that fits is returned as is.
+pub fn fit<'t>(
+    context: &mut Context<'_, '_>,
+    font: Font,
+    text: &'t str,
+    limit: f64,
+) -> Result<Cow<'t, str>> {
     if width(context, font, text)? <= limit {
-        return Ok(text.to_owned());
+        return Ok(Cow::Borrowed(text));
     }
-    let key = (font, format!("{}\u{0}{text}", limit.round()));
-    if let Some(fitted) = CACHE.with_borrow(|cache| cache.fitted.get(&key).cloned()) {
-        return Ok(fitted);
+    let limit = limit.round();
+    let cached = CACHE.with_borrow(|cache| {
+        cache.fitted[font as usize]
+            .get(text)
+            .filter(|(room, _)| *room == limit)
+            .map(|(_, fitted)| fitted.clone())
+    });
+    if let Some(fitted) = cached {
+        return Ok(Cow::Owned(fitted));
     }
     let room = limit - width(context, font, "...")?;
     let kept = longest_prefix(text, |part| Ok(width(context, font, part)? <= room))?;
     let fitted = format!("{}...", text[..kept].trim_end());
     CACHE.with_borrow_mut(|cache| {
-        if cache.fitted.len() > 4_000 {
-            cache.fitted.clear();
+        let cache = &mut cache.fitted[font as usize];
+        if cache.len() > 4_000 {
+            cache.clear();
         }
-        cache.fitted.insert(key, fitted.clone());
+        cache.insert(text.to_owned(), (limit, fitted.clone()));
     });
-    Ok(fitted)
+    Ok(Cow::Owned(fitted))
 }
 
 /// Breaks the text into lines no wider than `limit`, splitting only words that

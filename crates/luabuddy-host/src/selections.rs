@@ -69,6 +69,14 @@ pub fn configured(context: &mut Context<'_, '_>) -> Result<Vec<Profile>> {
     readable(context).map(|(profiles, _)| profiles)
 }
 
+/// The mods selected for this game process only.
+pub fn temporary_ids(context: &mut Context<'_, '_>) -> Result<std::collections::BTreeSet<ModId>> {
+    Ok(claimed(context)?
+        .into_iter()
+        .map(|profile| profile.id)
+        .collect())
+}
+
 pub fn temporary(context: &mut Context<'_, '_>, id: &ModId) -> Result<bool> {
     Ok(claimed(context)?.iter().any(|profile| profile.id == *id))
 }

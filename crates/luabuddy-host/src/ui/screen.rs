@@ -36,6 +36,8 @@ const PAD: f64 = 10.0;
 const POLL: Duration = Duration::from_millis(150);
 const READ_BUDGET: Duration = Duration::from_millis(6);
 const STATUS_LASTS: Duration = Duration::from_secs(12);
+/// How often Activity is shown again so "2 min ago" stays true.
+const AGES_ADVANCE: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Key {
@@ -139,11 +141,24 @@ pub struct Screen {
     startup_at_open: BTreeSet<ModId>,
     workshop: Workshop,
     entries: Vec<Entry>,
-    journal_revision: u64,
+    /// The journal revision `entries` was copied at.
+    journal_revision: Option<u64>,
+    /// When the rows were last shown.
+    shown_at: Instant,
     status: Option<(Tone, String, Instant)>,
     summary: (Tone, String),
+    /// The selection's actions as of the last refresh. The main button, More
+    /// and right-click all read these, so they always agree.
+    actions: Vec<Node>,
     primary: Option<Node>,
     more_shown: bool,
+    totals: Totals,
+    /// How often the live state has been read, so an action can tell whether it read again.
+    reads: u64,
+    /// Folders were read since the rows were last shown.
+    catalog_read: bool,
+    /// Where the status line may draw, measured when the buttons are placed.
+    status_span: [f64; 2],
     footer: Option<Node>,
     menu: Option<menu::Menu>,
     pictures: BTreeMap<String, Option<Value>>,
@@ -195,11 +210,17 @@ impl Screen {
             live,
             workshop,
             entries: Vec::new(),
-            journal_revision: 0,
+            journal_revision: None,
+            shown_at: Instant::now(),
             status: None,
             summary: (Tone::Muted, String::new()),
+            actions: Vec::new(),
             primary: None,
             more_shown: false,
+            totals: Totals::default(),
+            reads: 0,
+            catalog_read: false,
+            status_span: [0.0; 2],
             footer: None,
             menu: None,
             pictures: BTreeMap::new(),
@@ -293,8 +314,9 @@ impl Screen {
                 folded: std::mem::take(&mut self.folded),
             }));
         }
-        if self.catalog.progress().is_some() {
-            self.dirty |= self.catalog.step(context, READ_BUDGET);
+        // New folders show at the poll's pace, not with a full refresh every frame.
+        if self.catalog.progress().is_some() && self.catalog.step(context, READ_BUDGET) {
+            self.catalog_read = true;
         }
         let text = self.search_text(context)?;
         if self.texts.get(self.tab.name()) != Some(&text) {
@@ -316,14 +338,14 @@ impl Screen {
     }
 
     fn poll(&mut self, context: &mut Context<'_, '_>) -> Result<()> {
+        self.dirty |= std::mem::take(&mut self.catalog_read);
         for progress in self.workshop.poll() {
             match progress {
                 Progress::Items => self.dirty = true,
                 Progress::Status(text) => self.say(Tone::Waiting, text),
                 Progress::Failed(text) => self.say(Tone::Bad, text),
                 Progress::Delivered(id) => {
-                    self.catalog = Catalog::begin(context, true)?;
-                    self.catalog.finish(context);
+                    self.rescan_catalog(context)?;
                     let contained = self.catalog.contained(id);
                     self.say(
                         Tone::Good,
@@ -341,8 +363,11 @@ impl Screen {
             self.workshop.more()?;
             self.dirty = true;
         }
-        let revision = log::revision();
-        if self.tab == Tab::Activity && revision != self.journal_revision {
+        // New entries show at once; the ages beside the old ones advance slowly.
+        if self.tab == Tab::Activity
+            && (Some(log::revision()) != self.journal_revision
+                || self.shown_at.elapsed() > AGES_ADVANCE)
+        {
             self.dirty = true;
         }
         if self
@@ -385,7 +410,17 @@ impl Screen {
 
     // ---- Observed state ----
 
+    /// Reads every mod folder again, now, with the posters they show.
+    fn rescan_catalog(&mut self, context: &mut Context<'_, '_>) -> Result<()> {
+        self.catalog = Catalog::begin(context, true)?;
+        self.catalog.finish(context);
+        self.pictures.clear();
+        self.dirty = true;
+        Ok(())
+    }
+
     fn reread(&mut self, context: &mut Context<'_, '_>) -> Result<()> {
+        self.reads += 1;
         self.live = Live::read(context)?;
         self.live.world.steam = self.workshop.available();
         self.dirty = true;
@@ -517,17 +552,18 @@ impl Screen {
 
     fn refresh(&mut self, context: &mut Context<'_, '_>) -> Result<()> {
         self.dirty = false;
+        self.shown_at = Instant::now();
         let place = self.live.world.place;
         let (mut running, mut attention, mut waiting) = (0, 0, 0);
         let mut mods = Vec::new();
-        for id in self.listed() {
-            let view = self.view(&id, false);
+        let listed = self.listed();
+        for id in &listed {
+            let view = self.view(id, false);
             match view.section(place) {
                 Section::Running => running += 1,
                 Section::Attention => attention += 1,
-                Section::On if matches!(view.state(place), State::Ready | State::Waiting) => {
-                    waiting += 1;
-                }
+                // Ready is what loading would take now; off a server nothing is.
+                _ if view.state(place) == State::Ready => waiting += 1,
                 _ => (),
             }
             mods.push(view);
@@ -552,8 +588,11 @@ impl Screen {
             Tab::Mods => self.mod_rows(mods),
             Tab::Workshop => self.item_rows(),
             Tab::Activity => {
-                self.journal_revision = log::revision();
-                self.entries = log::recent(usize::MAX);
+                let revision = log::revision();
+                if self.journal_revision != Some(revision) {
+                    self.journal_revision = Some(revision);
+                    self.entries = log::recent(usize::MAX);
+                }
                 let rows = activity::rows(&self.entries, &self.filter());
                 if rows.is_empty() {
                     vec![note("Nothing recorded matches.")]
@@ -569,18 +608,13 @@ impl Screen {
             .get(self.tab.name())
             .filter(|key| self.list.index_of(key).is_some())
             .cloned();
-        let totals = Totals {
-            waiting: if place == Place::Server { waiting } else { 0 },
+        self.totals = Totals {
+            waiting,
             restart: usize::from(self.live.startup != self.startup_at_open),
             ..extension_totals()
         };
-        self.show_selection(context)?;
-        self.footer = model::load_waiting(totals, self.live.world).or_else(|| {
-            (totals.restart > 0).then(|| {
-                Node::act("Quit to apply...", Act::Quit)
-                    .hint("Your changes to the game's mod list apply when you start it again.")
-            })
-        });
+        self.footer = model::footer(self.totals, self.live.world);
+        self.show_selection(context, &listed)?;
         self.show_buttons(context)
     }
 
@@ -710,13 +744,19 @@ impl Screen {
         rows
     }
 
-    /// Shows what is selected, or orients the player when nothing is.
-    fn show_selection(&mut self, context: &mut Context<'_, '_>) -> Result<()> {
+    /// Shows what is selected, or orients the player when nothing is, and
+    /// settles the actions it offers. Each is built once per refresh.
+    fn show_selection(
+        &mut self,
+        context: &mut Context<'_, '_>,
+        listed: &BTreeSet<ModId>,
+    ) -> Result<()> {
         let world = self.live.world;
         let mut picture = None;
-
+        let mut menu = Vec::new();
+        let mut primary = None;
         let blocks = match self.list.selected.clone() {
-            Some(Key::Mod(id)) if self.listed().contains(&id) => {
+            Some(Key::Mod(id)) if listed.contains(&id) => {
                 let view = self.view(&id, true);
                 let path = self
                     .catalog
@@ -724,8 +764,22 @@ impl Screen {
                     .get(&id)
                     .and_then(|found| found.poster.clone());
                 picture = path.and_then(|path| self.picture(context, &path));
-
+                menu = model::mod_menu(&view, world);
+                primary = model::primary(&menu);
                 model::mod_document(&view, world)
+            }
+            // Pressing a section title folds or opens it; the button says which.
+            // A filter shows every match, so there is nothing to fold meanwhile.
+            Some(Key::Header(section)) => {
+                if self.filter().is_empty() {
+                    let label = if self.is_folded(section) {
+                        "Show"
+                    } else {
+                        "Hide"
+                    };
+                    primary = Some(Node::label(label));
+                }
+                self.orientation()
             }
             Some(Key::Folder(directory)) => {
                 let selection = self
@@ -745,6 +799,13 @@ impl Screen {
                             .unwrap_or_default(),
                     ),
                 };
+                menu = vec![
+                    Node::act(
+                        "Open folder",
+                        Act::OpenFolder(containing_folder(&directory)),
+                    ),
+                    Node::act("Copy path", Act::Copy(directory.clone(), "Path copied.")),
+                ];
                 vec![
                     Block::Title(
                         directory
@@ -760,17 +821,35 @@ impl Screen {
                 ]
             }
             Some(Key::Item(id)) => match self.item(id) {
-                Some(view) => model::item_document(&view),
+                Some(view) => {
+                    menu = model::item_menu(&view, world);
+                    model::item_document(&view)
+                }
                 None => self.orientation(),
             },
-            Some(Key::Entry(seq)) => self
-                .entries
-                .iter()
-                .find(|entry| entry.seq == seq)
-                .map(|entry| activity::document(entry, &self.entries))
-                .unwrap_or_else(|| self.orientation()),
+            Some(Key::Entry(seq)) => match self.entries.iter().find(|entry| entry.seq == seq) {
+                Some(entry) => {
+                    menu.push(Node::act(
+                        "Copy this entry",
+                        Act::Copy(activity::copy_text(entry), "Entry copied."),
+                    ));
+                    if let Some(id) = &entry.module {
+                        menu.push(Node::act(
+                            format!("Show {}", self.catalog.title(id)),
+                            Act::ShowMod(id.clone()),
+                        ));
+                    }
+                    activity::document(entry, &self.entries)
+                }
+                None => self.orientation(),
+            },
             _ => self.orientation(),
         };
+        if primary.is_none() && !matches!(self.list.selected, Some(Key::Mod(_) | Key::Header(_))) {
+            primary = menu.iter().find(|node| node.act.is_some()).cloned();
+        }
+        self.actions = menu;
+        self.primary = primary;
         self.page_text.show(context, &self.theme, blocks, picture)
     }
 
@@ -822,24 +901,7 @@ impl Screen {
         let [list_x, list_y, list_w, list_h] = self.list_bounds();
         let left = list_x + list_w + PAD;
         let y = self.actions_top();
-        let choices = self.selection_menu();
-        self.primary = match &self.list.selected.clone() {
-            Some(Key::Mod(id)) if self.listed().contains(id) => {
-                let view = self.view(id, true);
-                model::primary(&view, self.live.world)
-            }
-            Some(Key::Mod(_)) => None,
-            // Pressing a section title folds or opens it; the button says which.
-            // A filter shows every match, so there is nothing to fold meanwhile.
-            Some(Key::Header(_)) if !self.filter().is_empty() => None,
-            Some(Key::Header(section)) => Some(Node::label(if self.is_folded(*section) {
-                "Show"
-            } else {
-                "Hide"
-            })),
-            _ => choices.iter().find(|node| node.act.is_some()).cloned(),
-        };
-        let has_menu = self.primary.is_some() || !choices.is_empty();
+        let has_menu = self.primary.is_some() || !self.actions.is_empty();
         let top = self.content_top();
         let bottom = if has_menu { y - PAD } else { list_y + list_h };
         let width = self.frame_size().0 - PAD - left;
@@ -855,9 +917,7 @@ impl Screen {
             [x, y],
             width - more_width,
         )?;
-        self.more_shown = choices
-            .iter()
-            .any(|node| Some(node) != self.primary.as_ref());
+        self.more_shown = !self.other_actions().is_empty();
         kit::call_flag(context, &self.buttons.more, "setVisible", self.more_shown)?;
         let more = kit::width(context, Font::Small, "More...")? + 28.0;
         kit::set_bounds(
@@ -882,6 +942,14 @@ impl Screen {
             [w - PAD - width, h - PAD - kit::control_height()],
             limit,
         )?;
+        // The status line runs between the Close button and the footer action.
+        let back = kit::ask_number(context, &self.buttons.back, "getWidth")?;
+        let right = if footer.is_some() {
+            w - 2.0 * PAD - width
+        } else {
+            w - PAD
+        };
+        self.status_span = [PAD + back + 2.0 * PAD, right];
         for (tab, button) in &self.buttons.tabs {
             mark(context, button, *tab == self.tab)?;
         }
@@ -893,54 +961,14 @@ impl Screen {
     }
 
     /// What More and right-click offer: every action but the one on the main button.
-    fn other_actions(&mut self) -> Vec<Node> {
-        let mut nodes = self.selection_menu();
+    fn other_actions(&self) -> Vec<Node> {
+        let mut nodes = self.actions.clone();
         if let Some(primary) = &self.primary
             && let Some(index) = nodes.iter().position(|node| node == primary)
         {
             nodes.remove(index);
         }
         nodes
-    }
-
-    fn selection_menu(&mut self) -> Vec<Node> {
-        let world = self.live.world;
-        match self.list.selected.clone() {
-            Some(Key::Mod(id)) if self.listed().contains(&id) => {
-                let view = self.view(&id, true);
-                model::mod_menu(&view, world)
-            }
-            Some(Key::Item(id)) => self
-                .item(id)
-                .map(|view| model::item_menu(&view, world))
-                .unwrap_or_default(),
-            Some(Key::Folder(directory)) => vec![
-                Node::act(
-                    "Open folder",
-                    Act::OpenFolder(containing_folder(&directory)),
-                ),
-                Node::act("Copy path", Act::Copy(directory, "Path copied.")),
-            ],
-            Some(Key::Entry(seq)) => self
-                .entries
-                .iter()
-                .find(|entry| entry.seq == seq)
-                .map(|entry| {
-                    let mut nodes = vec![Node::act(
-                        "Copy this entry",
-                        Act::Copy(activity::copy_text(entry), "Entry copied."),
-                    )];
-                    if let Some(id) = &entry.module {
-                        nodes.push(Node::act(
-                            format!("Show {}", self.catalog.title(id)),
-                            Act::ShowMod(id.clone()),
-                        ));
-                    }
-                    nodes
-                })
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        }
     }
 
     // ---- Layout ----
@@ -999,31 +1027,24 @@ impl Screen {
         self.refresh(context)
     }
 
+    /// Runs every frame, so it only paints what layout already measured.
     pub fn draw(&mut self, context: &mut Context<'_, '_>) -> Result<()> {
         let (w, h) = self.frame_size();
-        let footer_left =
-            PAD + kit::ask_number(context, &self.buttons.back, "getWidth")? + 2.0 * PAD;
-        let footer_right = if self.footer.is_some() {
-            kit::ask_number(context, &self.buttons.footer, "getX")? - PAD
-        } else {
-            w - PAD
-        };
+        let [footer_left, footer_right] = self.status_span;
         let (tone, text) = match &self.status {
-            Some((tone, text, _)) => (*tone, text.clone()),
-            None => self.summary.clone(),
+            Some((tone, text, _)) => (*tone, text.as_str()),
+            None => (self.summary.0, self.summary.1.as_str()),
         };
         let text = kit::fit(
             context,
             Font::Small,
-            first_line(&text),
+            first_line(text),
             footer_right - footer_left,
         )?;
         let color = self.theme.tone(tone);
-        let root = self.root.clone();
-        let mut painter = kit::Painter::new(context, &root)?;
+        let mut painter = kit::Painter::new(context, &self.root)?;
         painter.rect(0.0, 0.0, self.size.0, self.size.1, [0.0, 0.0, 0.0, 0.6])?;
-        let frame = self.frame.clone();
-        let mut painter = kit::Painter::new(context, &frame)?;
+        let mut painter = kit::Painter::new(context, &self.frame)?;
         painter.rect(0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.94])?;
         painter.border(0.0, 0.0, w, h, kit::BORDER)?;
         painter.text(Font::Large, PAD + 2.0, PAD, "LuaBuddy", [1.0; 4])?;
@@ -1058,12 +1079,7 @@ impl Screen {
                 self.show_menu(context, nodes, at)
             }
             "tools" => {
-                let totals = Totals {
-                    waiting: self.waiting(),
-                    restart: usize::from(self.live.startup != self.startup_at_open),
-                    ..extension_totals()
-                };
-                let nodes = model::tools_menu(totals, self.live.world);
+                let nodes = model::tools_menu(self.totals, self.live.world);
                 let button = self.buttons.tools.clone();
                 let x = kit::ask_number(context, &button, "getAbsoluteX")?;
                 let y = kit::ask_number(context, &button, "getAbsoluteY")?;
@@ -1076,14 +1092,6 @@ impl Screen {
             "source-everything" => self.show_source(context, Source::Everything),
             other => Err(format!("Unknown LuaBuddy control {other}")),
         }
-    }
-
-    fn waiting(&mut self) -> usize {
-        let place = self.live.world.place;
-        self.listed()
-            .into_iter()
-            .filter(|id| self.view(id, false).state(place) == State::Ready)
-            .count()
     }
 
     fn above(&self, context: &mut Context<'_, '_>, button: &Value) -> Result<[f64; 2]> {
@@ -1407,9 +1415,12 @@ impl Screen {
             }),
         );
         let act_changed = act.changes_state();
+        let reads = self.reads;
         let result = self.perform(context, act);
-        // Leaving the world is the one action after which nothing here is current.
-        if !self.closed {
+        // Only a change can make what was read stale, and an action that read
+        // again to report its result needs no second reading. Leaving the world
+        // is the one action after which nothing here is current.
+        if !self.closed && act_changed && self.reads == reads {
             self.reread(context)?;
         }
         let after = self.describe(subject.as_ref());
@@ -1437,7 +1448,8 @@ impl Screen {
                 self.say(Tone::Bad, first_line(error));
             }
         }
-        if self.closed {
+        // Navigation has shown its result already; the status line draws itself.
+        if self.closed || !self.dirty {
             return Ok(());
         }
         self.refresh(context)
@@ -1595,9 +1607,7 @@ impl Screen {
             }
             Act::Rescan => {
                 let before = self.catalog.mods.len();
-                self.catalog = Catalog::begin(context, true)?;
-                self.catalog.finish(context);
-                self.pictures.clear();
+                self.rescan_catalog(context)?;
                 let now = self.catalog.mods.len();
                 Ok((
                     Tone::Normal,
@@ -1737,12 +1747,7 @@ impl Live {
     fn read(context: &mut Context<'_, '_>) -> Result<Self> {
         let state = runtime::snapshot();
         let (profiles, unreadable) = crate::selections::readable(context)?;
-        let mut temporary = BTreeSet::new();
-        for profile in &profiles {
-            if crate::selections::temporary(context, &profile.id)? {
-                temporary.insert(profile.id.clone());
-            }
-        }
+        let temporary = crate::selections::temporary_ids(context)?;
         let templates = profile_store::templates(context)?;
         let queued = crate::selections::queued(context)
             .unwrap_or_default()

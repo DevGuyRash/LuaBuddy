@@ -507,10 +507,10 @@ impl Node {
     }
 }
 
-/// The action this mod's state calls for, if any. Other actions stay in the
-/// menu rather than standing in for it.
-pub fn primary(view: &ModView, world: World) -> Option<Node> {
-    mod_menu(view, world).into_iter().find(|node| node.main)
+/// The action a mod's state calls for, if its menu has one. Other actions stay
+/// in the menu rather than standing in for it.
+pub fn primary(menu: &[Node]) -> Option<Node> {
+    menu.iter().find(|node| node.main).cloned()
 }
 
 /// Every action that applies to this mod in this situation, likeliest first.
@@ -901,6 +901,17 @@ pub fn load_waiting(totals: Totals, world: World) -> Option<Node> {
     })
 }
 
+/// The action at the window's foot: loading what waits, or quitting to apply
+/// changes to the game's own mod list.
+pub fn footer(totals: Totals, world: World) -> Option<Node> {
+    load_waiting(totals, world).or_else(|| {
+        (totals.restart > 0).then(|| {
+            Node::act("Quit to apply...", Act::Quit)
+                .hint("Your changes to the game's mod list apply when you start it again.")
+        })
+    })
+}
+
 pub fn tools_menu(totals: Totals, world: World) -> Vec<Node> {
     let mut nodes = Vec::new();
     nodes.extend(load_waiting(totals, world));
@@ -1208,11 +1219,13 @@ mod tests {
     fn an_off_mod_is_turned_on_in_the_menu_and_loaded_on_a_server() {
         let view = installed("A");
         assert_eq!(
-            primary(&view, world(Place::MainMenu)).unwrap().act,
+            primary(&mod_menu(&view, world(Place::MainMenu)))
+                .unwrap()
+                .act,
             Some(Act::TurnOn(id("A")))
         );
         assert_eq!(
-            primary(&view, world(Place::Server)).unwrap().act,
+            primary(&mod_menu(&view, world(Place::Server))).unwrap().act,
             Some(Act::LoadNow(id("A")))
         );
         // Nothing offered here can unload it, because it isn't on.
@@ -1291,7 +1304,7 @@ mod tests {
             "Failed: Broken.lua:1: unexpected symbol"
         );
         assert_eq!(
-            primary(&view, world(Place::Server)).unwrap().act,
+            primary(&mod_menu(&view, world(Place::Server))).unwrap().act,
             Some(Act::LoadNow(id("Broken")))
         );
         view.spent = true;
@@ -1313,16 +1326,23 @@ mod tests {
         view.selected = true;
         view.runtime = Runtime::Loaded;
         view.can_reload = true;
-        let first = primary(&view, world(Place::Server)).unwrap();
+        let first = primary(&mod_menu(&view, world(Place::Server))).unwrap();
         assert_eq!(first.act, Some(Act::Reload(id("Base"))));
         assert_eq!(first.blocked, None);
         view.running_dependents = vec!["Top".into()];
-        let blocked = primary(&view, world(Place::Server)).unwrap().blocked;
+        let blocked = primary(&mod_menu(&view, world(Place::Server)))
+            .unwrap()
+            .blocked;
         assert!(blocked.unwrap().starts_with("Top runs on top of it"));
         view.running_dependents.clear();
         let mut pending = world(Place::Server);
         pending.options_pending = true;
-        assert!(primary(&view, pending).unwrap().blocked.is_some());
+        assert!(
+            primary(&mod_menu(&view, pending))
+                .unwrap()
+                .blocked
+                .is_some()
+        );
     }
 
     #[test]
