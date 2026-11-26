@@ -75,14 +75,6 @@ impl OperationReport {
             summary: BTreeMap::new(),
             error: None,
         };
-        game::log(&format!(
-            "Starting session={} version={} game={} java={} operation={}",
-            report.session,
-            report.version,
-            report.game_version,
-            report.java_version,
-            report.operation
-        ));
         Ok(Self {
             report,
             started: Instant::now(),
@@ -113,7 +105,7 @@ impl OperationReport {
     }
 }
 
-fn session_identity(context: &mut Context<'_, '_>, session: u64) -> Result<String> {
+pub fn session_identity(context: &mut Context<'_, '_>, session: u64) -> Result<String> {
     static PROCESS: OnceLock<String> = OnceLock::new();
     if PROCESS.get().is_none() {
         let uuid = context.jni(|env| {

@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) const DESCRIPTOR: &str =
     "(Lse/krka/kahlua/vm/KahluaTable;Lse/krka/kahlua/integration/LuaCaller;[Ljava/lang/Object;)Z";
 pub(crate) const ORIGINAL: &str = "luabuddy$trigger";
+/// Receives a failure the handler could not report through its own result.
+pub(crate) type Reporter = fn(&str);
 pub(crate) type Handler = for<'a> fn(&mut JNIEnv<'a>, &str, bool) -> Result<(), String>;
 
 struct Dispatcher {
@@ -19,7 +21,7 @@ struct Dispatcher {
 }
 
 static DISPATCHER: OnceLock<Dispatcher> = OnceLock::new();
-static HANDLER: OnceLock<Handler> = OnceLock::new();
+static HANDLER: OnceLock<(Handler, &'static [&'static str], Reporter)> = OnceLock::new();
 static REGISTERED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn installed() -> bool {
@@ -84,38 +86,75 @@ pub(crate) fn register(env: &mut JNIEnv<'_>, class: &JClass<'_>) -> Result<(), S
     Ok(())
 }
 
-pub(crate) fn prepare(env: &mut JNIEnv<'_>, handler: Handler) -> Result<(), String> {
+/// Observes only the named events. Every event the game triggers passes the
+/// bridge, so other names are filtered before anything is decoded.
+pub(crate) fn prepare(
+    env: &mut JNIEnv<'_>,
+    handler: Handler,
+    names: &'static [&'static str],
+    report: Reporter,
+) -> Result<(), String> {
     env.find_class("zombie/Lua/Event")
         .map_err(|e| e.to_string())?;
     if !registered() {
         return Err("native event dispatcher was not registered".into());
     }
     HANDLER
-        .set(handler)
+        .set((handler, names, report))
         .map_err(|_| "event dispatch hook already prepared".into())
 }
 
-fn observe(env: &mut JNIEnv<'_>, event: &JObject<'_>, dispatcher: &Dispatcher, enter: bool) {
-    let Some(handler) = HANDLER.get() else { return };
+/// The event's name when anything here could care about it. Every event the
+/// game triggers passes through, so names of other lengths are never decoded.
+fn watched(env: &mut JNIEnv<'_>, event: &JObject<'_>, dispatcher: &Dispatcher) -> Option<String> {
+    let (_, names, _) = HANDLER.get()?;
+    let name = env
+        .get_field_unchecked(event, dispatcher.name, ReturnType::Object)
+        .and_then(|value| value.l())
+        .ok()?;
+    let name = env.auto_local(JString::from(name));
+    let length = string_length(env, &name)?;
+    // Java counts a string's length in UTF-16 units.
+    if !names
+        .iter()
+        .any(|watched| watched.encode_utf16().count() == length)
+    {
+        return None;
+    }
+    let text = env.get_string(&name).ok()?;
+    let text: std::borrow::Cow<'_, str> = (&*text).into();
+    names.contains(&&*text).then(|| text.into_owned())
+}
+
+fn string_length(env: &JNIEnv<'_>, text: &JString<'_>) -> Option<usize> {
+    if text.is_null() {
+        return None;
+    }
+    let raw = env.get_raw();
+    // SAFETY: The environment is the current thread's, and the string is a live,
+    // non-null local reference. GetStringLength runs no Java code.
+    let length = unsafe { ((**raw).GetStringLength?)(raw, text.as_raw()) };
+    usize::try_from(length).ok()
+}
+
+fn observe(env: &mut JNIEnv<'_>, name: &str, enter: bool) {
+    let Some((handler, _, report)) = HANDLER.get() else {
+        return;
+    };
     let outcome =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
-            let name = env
-                .get_field_unchecked(event, dispatcher.name, ReturnType::Object)
-                .and_then(|value| value.l())
-                .map_err(|e| e.to_string())?;
-            let name = env.auto_local(JString::from(name));
-            let text = env.get_string(&name).map_err(|e| e.to_string())?;
-            let text: std::borrow::Cow<'_, str> = (&*text).into();
-            handler(env, &text, enter)
-        }));
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(env, name, enter)));
     match outcome {
         Ok(Ok(())) => (),
         error => {
-            eprintln!("[LuaBuddy] lifecycle inactive: {error:?}");
+            let error = match error {
+                Ok(Err(error)) => error,
+                _ => "a panic was contained".to_owned(),
+            };
             if matches!(env.exception_check(), Ok(true)) {
                 let _ = env.exception_describe();
                 let _ = env.exception_clear();
             }
+            report(&format!("LuaBuddy could not handle {name}: {error}"));
         }
     }
 }
@@ -134,7 +173,10 @@ unsafe extern "system" fn trigger(
         // SAFETY: The receiver is a live local reference for this native call.
         let event = unsafe { JObject::from_raw(receiver) };
         let dispatcher = DISPATCHER.get().ok_or("event bridge unavailable")?;
-        observe(&mut env, &event, dispatcher, true);
+        let name = watched(&mut env, &event, dispatcher);
+        if let Some(name) = &name {
+            observe(&mut env, name, true);
+        }
         // SAFETY: The original private method is resolved on the same final
         // class and pinned by _class. Its unchanged descriptor accepts these
         // three JVM-supplied reference arguments and returns boolean. No lock
@@ -157,7 +199,9 @@ unsafe extern "system" fn trigger(
             .map_err(|e| e.to_string())?
             .z()
             .map_err(|e| e.to_string())?;
-        observe(&mut env, &event, dispatcher, false);
+        if let Some(name) = &name {
+            observe(&mut env, name, false);
+        }
         Ok(jboolean::from(value))
     });
     match outcome {

@@ -51,7 +51,7 @@ Bundled integration rules and Rust hook behavior remain under `profiles/`. Addin
 
 `live=auto` is conservative. Content with native definitions, maps, animation assets, texture packs, or server Lua requires normal startup. `live=client-shared` explicitly requests only the client/shared portion and reports the native components that remain outside LuaBuddy's activation. `live=startup` refuses late restoration. When neither the selected profile nor its bundled template sets `live`, LuaBuddy uses `auto`.
 
-**Startup enable** and **Startup disable** edit the native default selection for the next ordinary loading path, with native dependency and dependent checks. They preserve the running world's selection and multiplayer server IDs. Restart confirmation uses the game's ordinary exit flow. Saving a future selection is distinct from activating the content in the current session.
+**Start with the game** and **Don't start with the game** edit the native default selection for the next ordinary loading path, with native dependency and dependent checks. They preserve the running world's selection and multiplayer server IDs. Restart confirmation uses the game's ordinary exit flow. Saving a future selection is distinct from activating the content in the current session.
 
 ## Source and require behavior
 
@@ -65,7 +65,7 @@ The first returned value is cached, including nil and false. Tables and closures
 
 ## Refresh and reload
 
-**Load new profiles** validates the selected configuration, discovers native metadata, and compiles candidate sources before publishing mappings. Existing loaded generations, resolver identity, and cached values remain intact. Removing or disabling a running profile changes the next session's selection and does not claim an arbitrary unload.
+**Load now** and **Load waiting mods** validate the selected configuration, discovers native metadata, and compiles candidate sources before publishing mappings. Existing loaded generations, resolver identity, and cached values remain intact. Removing or disabling a running profile changes the next session's selection and does not claim an arbitrary unload.
 
 A runtime addition cannot replace a running logical path or an effective import provider. It cannot require code to precede an already loaded native or local profile. Those cases require a compatible new connection or native startup.
 
@@ -89,6 +89,12 @@ Opt-in mounting exposes loose upstream files with native common/version preceden
 
 The native Options controls preserve pending edits. Apply or discard those edits before profile mutation or loading. The manager uses the game's controls and owner-thread update callbacks. Repeated opening, dismissal, and no-op refresh preserve appropriate identity and focus. A new environment retires the old interface.
 
-The environment writes `LuaBuddy/diagnostics.json` beneath the actual game cache. Reports retain the session identity and actual running generations while recording the latest operation, timings, target, source, stage, native game/JVM versions, profile metadata, and available Lua/Java traces. A refused replacement records an operation error without replacing the old loaded record. A write failure is logged without stopping healthy profiles.
+Each environment appends to `LuaBuddy/journal.jsonl` beneath the actual game cache, one JSON object per line, rotating to `journal.previous.jsonl` at 8 MiB. Every entry written while one intent is carried out, such as a player's action or a startup, shares an `operation` number. The loader records what it decided and why, per-mod read, compile and run timings with thread CPU time, the files that ran slowly, the event callbacks and globals each mod added, translations and settings it restored, and player and open-container state before and after. Entries at info level and above also go to the game's `console.txt`. Starting the game with `-Dluabuddy.debug=true` echoes the detail entries too.
+
+The environment also writes `LuaBuddy/diagnostics.json` beneath the actual game cache. Reports retain the session identity and actual running generations while recording the latest operation, timings, target, source, stage, native game/JVM versions, profile metadata, and available Lua/Java traces. A refused replacement records an operation error without replacing the old loaded record. A write failure is logged without stopping healthy profiles.
+
+A mod that failed before any of its code ran, such as a syntax error, a missing requirement or an unreadable file, is retried by the next load in the same environment. One whose code ran and failed keeps its quarantined generation until reconnect. One unreadable profile file is reported on its own and does not stop the others. A mod that registers settings with the game's Mod Options gets its saved values restored as soon as its client code has run, before its profile hook and replayed events.
+
+Selected mods' Lua files are read in the background when an environment's Lua starts, so that a join does not wait on a cold or busy disk; the loader also reads mods in parallel.
 
 Use `luabuddy diagnostics --cache-dir /path/to/cache` for the last report. Missing, stale, incomplete, or failed reports are distinct from a verified successful game action. Installed files alone do not establish runtime success.

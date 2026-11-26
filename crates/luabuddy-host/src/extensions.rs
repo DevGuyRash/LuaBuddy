@@ -417,6 +417,19 @@ pub fn retry(context: &mut Context<'_, '_>) -> Result<()> {
     }
 }
 
+/// How many extensions are stored, and how many enabled ones are not installed.
+pub fn counts() -> (usize, usize) {
+    let Ok(state) = manager().lock() else {
+        return (0, 0);
+    };
+    let waiting = state
+        .entries
+        .values()
+        .filter(|entry| entry.enabled && (entry.pending.is_some() || entry.error.is_some()))
+        .count();
+    (state.entries.len(), waiting)
+}
+
 pub fn diagnostics() -> Json {
     let Ok(state) = manager().lock() else {
         return json!({"error":"Native extension manager is poisoned"});

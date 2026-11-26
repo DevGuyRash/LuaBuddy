@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !route.request(item)?
         || REQUEST_COUNT.load(Ordering::SeqCst) != 3
         || REQUEST_ITEM.load(Ordering::SeqCst) != 42
-        || REQUEST_PRIORITY.load(Ordering::SeqCst) != 0
+        || REQUEST_PRIORITY.load(Ordering::SeqCst) != 1
         || !REQUEST_RECEIVER.load(Ordering::SeqCst)
         || REQUEST_FAULT.load(Ordering::SeqCst)
     {

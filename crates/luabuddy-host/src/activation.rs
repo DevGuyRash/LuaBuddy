@@ -20,6 +20,8 @@ pub enum StartupComponent {
     TexturePacks,
     TileDefinitions,
     ServerLua,
+    Clothing,
+    SandboxOptions,
 }
 
 impl StartupComponent {
@@ -31,7 +33,15 @@ impl StartupComponent {
             Self::TexturePacks => "texture packs",
             Self::TileDefinitions => "tile definitions",
             Self::ServerLua => "server Lua",
+            Self::Clothing => "clothing",
+            Self::SandboxOptions => "sandbox settings",
         }
+    }
+
+    /// Whether loading only its Lua would leave the mod without its substance.
+    /// Sandbox settings have script defaults, so their absence is only a limit.
+    fn essential(self) -> bool {
+        self != Self::SandboxOptions
     }
 }
 
@@ -44,19 +54,28 @@ pub enum Eligibility {
 impl Eligibility {
     pub fn explanation(&self) -> String {
         match self {
-            Self::Live { limitations } if limitations.is_empty() => "Client/shared Lua can be requested through the late loader. Native compatibility and server policy still apply.".into(),
-            Self::Live { limitations } => format!("This profile explicitly restores client/shared Lua only. Its {} are not activated by LuaBuddy. Server code remains controlled by the server.", descriptions(limitations)),
+            Self::Live { limitations } if limitations.is_empty() => {
+                "Its client and shared Lua can be loaded late.".into()
+            }
+            Self::Live { limitations } => format!(
+                "Only its client and shared Lua is loaded. Its {} need the game's normal startup or the server.",
+                descriptions(limitations)
+            ),
             Self::RestartRequired { reason } => reason.clone(),
         }
     }
 }
 
-fn descriptions(components: &[StartupComponent]) -> String {
-    components
+pub fn descriptions(components: &[StartupComponent]) -> String {
+    let names = components
         .iter()
         .map(|component| component.description())
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect::<Vec<_>>();
+    match names.split_last() {
+        Some((last, [])) => (*last).to_owned(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
 }
 
 pub fn assess(profile: &Profile, roots: &[PathBuf], templates: &[Profile]) -> Result<Eligibility> {
@@ -77,17 +96,26 @@ pub fn assess(profile: &Profile, roots: &[PathBuf], templates: &[Profile]) -> Re
                 break;
             }
         }
-        for (relative, component) in [
-            ("media/scripts", StartupComponent::Definitions),
-            ("media/maps", StartupComponent::Maps),
-            ("media/animations", StartupComponent::Animations),
-            ("media/animsets", StartupComponent::Animations),
-            ("media/anims_X", StartupComponent::Animations),
-            ("media/texturepacks", StartupComponent::TexturePacks),
-            ("media/lua/server", StartupComponent::ServerLua),
+        // Mods ship placeholder text files in some of these only to silence the game.
+        let any: &[&str] = &[];
+        let animation: &[&str] = &["xml", "x", "fbx", "glb", "gltf"];
+        for (relative, kinds, component) in [
+            ("media/scripts", any, StartupComponent::Definitions),
+            ("media/maps", any, StartupComponent::Maps),
+            ("media/animations", animation, StartupComponent::Animations),
+            ("media/animsets", animation, StartupComponent::Animations),
+            ("media/anims_X", animation, StartupComponent::Animations),
+            ("media/texturepacks", any, StartupComponent::TexturePacks),
+            ("media/lua/server", any, StartupComponent::ServerLua),
+            ("media/clothing", any, StartupComponent::Clothing),
+            (
+                "media/sandbox-options.txt",
+                any,
+                StartupComponent::SandboxOptions,
+            ),
         ] {
             for candidate in resource_paths(root, relative)? {
-                if contains_file(&candidate, &mut BTreeSet::new())? {
+                if contains_file(&candidate, kinds, &mut BTreeSet::new())? {
                     components.insert(component);
                     break;
                 }
@@ -96,12 +124,14 @@ pub fn assess(profile: &Profile, roots: &[PathBuf], templates: &[Profile]) -> Re
     }
     let components: Vec<_> = components.into_iter().collect();
     if policy == LivePolicy::Startup {
-        return Ok(Eligibility::RestartRequired { reason: "This profile explicitly requires native startup loading. Select Startup enable and restart through the game's normal loading path.".into() });
+        return Ok(Eligibility::RestartRequired {
+            reason: "Its profile says it has to start with the game.".into(),
+        });
     }
-    if policy == LivePolicy::Auto && !components.is_empty() {
+    if policy == LivePolicy::Auto && components.iter().any(|component| component.essential()) {
         return Ok(Eligibility::RestartRequired {
             reason: format!(
-                "Restart required. This mod supplies {}. Enable it for native startup rather than treating client/shared Lua restoration as complete activation. Multiplayer server code still requires server approval.",
+                "It has {}, which only load when it starts with the game. Server code also needs the server to run it.",
                 descriptions(&components)
             ),
         });
@@ -190,7 +220,8 @@ fn resource_paths(root: &Path, relative: &str) -> Result<Vec<PathBuf>> {
     Ok(candidates)
 }
 
-fn contains_file(path: &Path, visited: &mut BTreeSet<PathBuf>) -> Result<bool> {
+/// Whether a file is below the path, of one of the kinds when any are named.
+fn contains_file(path: &Path, kinds: &[&str], visited: &mut BTreeSet<PathBuf>) -> Result<bool> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -202,7 +233,15 @@ fn contains_file(path: &Path, visited: &mut BTreeSet<PathBuf>) -> Result<bool> {
         }
     };
     if metadata.is_file() {
-        return Ok(true);
+        return Ok(kinds.is_empty()
+            || path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    kinds
+                        .iter()
+                        .any(|kind| extension.eq_ignore_ascii_case(kind))
+                }));
     }
     let identity = path
         .canonicalize()
@@ -215,7 +254,7 @@ fn contains_file(path: &Path, visited: &mut BTreeSet<PathBuf>) -> Result<bool> {
     {
         let entry =
             entry.map_err(|error| format!("Inspect startup assets {}: {error}", path.display()))?;
-        if contains_file(&entry.path(), visited)? {
+        if contains_file(&entry.path(), kinds, visited)? {
             return Ok(true);
         }
     }

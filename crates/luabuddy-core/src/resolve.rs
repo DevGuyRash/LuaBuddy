@@ -176,7 +176,7 @@ pub fn resolve(
                     CoreError::new(
                         "dependencies",
                         format!(
-                            "Enable required mod profiles or server mods: {}",
+                            "It needs {}, which is neither turned on nor loaded by the server",
                             missing.join(", ")
                         ),
                     ),

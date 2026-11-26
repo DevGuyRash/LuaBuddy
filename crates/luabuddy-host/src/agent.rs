@@ -8,7 +8,14 @@ pub(crate) unsafe fn start(vm: *mut JavaVM) -> Result<(), String> {
     // SAFETY: Agent_OnLoad's JVM pointer remains live until JVM shutdown.
     // from_vm checks the native ABI before accessing the invocation table.
     let jvmti = unsafe { Jvmti::from_vm(vm) }?;
-    jvmti.enable_proof_capabilities()?;
+    jvmti.enable_required_capabilities()?;
+    if let Err(error) = jvmti.enable_breakpoint_capabilities() {
+        crate::log::warn(
+            "agent.limited",
+            format!("Native patches and Workshop downloads are unavailable: another agent holds the JVM's breakpoints ({error})"),
+        )
+        .write();
+    }
     crate::patcher::initialize(&jvmti)?;
     jvmti.set_callbacks_full(
         vm_init,
@@ -24,15 +31,27 @@ unsafe extern "system" fn vm_init(raw: CallbackEnv, jni: *mut RawJni, _thread: j
         let mut env = unsafe { JNIEnv::from_raw(jni) }.map_err(|e| e.to_string())?;
         // SAFETY: raw belongs to the active VMInit callback.
         let jvmti = unsafe { Jvmti::from_raw(raw) };
+        crate::log::start(&env);
         crate::bridge::expect_system_loader(&mut env)?;
-        crate::events::prepare(&mut env, crate::runtime::event)?;
+        crate::events::prepare(
+            &mut env,
+            crate::runtime::event,
+            &crate::runtime::EVENTS,
+            |error| crate::log::error("lifecycle.failed", error).write(),
+        )?;
         if let Err(error) = crate::download_events::prepare(&mut env, &jvmti) {
             if matches!(env.exception_check(), Ok(true)) {
                 let _ = env.exception_clear();
             }
-            eprintln!("[LuaBuddy] Workshop downloads unavailable: {error}");
+            crate::log::warn(
+                "workshop.downloads",
+                format!("Workshop downloads are unavailable: {error}"),
+            )
+            .write();
         }
-        eprintln!("[LuaBuddy] Rust runtime waiting for game lifecycle");
+        crate::log::info("agent.started", "Waiting for the game's Lua to start")
+            .with(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }))
+            .write();
         Ok(())
     });
     report(outcome, jni, "startup");
@@ -67,7 +86,7 @@ fn report(outcome: std::thread::Result<Result<(), String>>, jni: *mut RawJni, st
         Ok(Err(error)) => error,
         Err(_) => "Rust panic contained at JVM callback".to_owned(),
     };
-    eprintln!("[LuaBuddy] {stage} inactive: {error}");
+    crate::log::error(&format!("agent.{stage}"), error).write();
     // SAFETY: report is called before the native JVM callback returns.
     if let Ok(env) = unsafe { JNIEnv::from_raw(jni) }
         && matches!(env.exception_check(), Ok(true))

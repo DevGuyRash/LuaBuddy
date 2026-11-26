@@ -88,7 +88,10 @@ pub fn active(context: &mut Context<'_, '_>) -> Result<BTreeSet<ModId>> {
     })?;
     let mut ids = BTreeSet::new();
     for value in java_list(context, &list)? {
-        ids.insert(ModId::new(context.text(&value)?).map_err(|e| e.to_string())?);
+        let id = context.text(&value)?;
+        if !id.trim().is_empty() {
+            ids.insert(ModId::new(id).map_err(|e| e.to_string())?);
+        }
     }
     Ok(ids)
 }
@@ -124,7 +127,11 @@ fn strings(context: &mut Context<'_, '_>, object: &Value, method: &str) -> Resul
     let list = object_method(context, object, method, "()Ljava/util/ArrayList;")?;
     let mut ids = Vec::new();
     for value in java_list(context, &list)? {
-        ids.push(ModId::new(context.text(&value)?).map_err(|e| e.to_string())?);
+        let id = context.text(&value)?;
+        // A blank metadata line reaches here as one empty entry.
+        if !id.trim().is_empty() {
+            ids.push(ModId::new(id).map_err(|e| e.to_string())?);
+        }
     }
     Ok(ids)
 }
@@ -616,11 +623,8 @@ pub fn remove_callbacks(
     Ok(removed)
 }
 
-pub fn log(message: &str) {
-    eprintln!("[LuaBuddy] {message}");
-}
-
-pub fn translations(context: &mut Context<'_, '_>, roots: &[PathBuf]) -> Result<()> {
+/// Adds the mod's translations, returning how many entries it supplied.
+pub fn translations(context: &mut Context<'_, '_>, roots: &[PathBuf]) -> Result<usize> {
     context.jni(|env| {
         let mut languages: Vec<jni::objects::GlobalRef> = Vec::new();
         let mut language = env.call_static_method("zombie/core/Translator", "getLanguage", "()Lzombie/core/Language;", &[])?.l()?;
@@ -663,11 +667,13 @@ pub fn translations(context: &mut Context<'_, '_>, roots: &[PathBuf]) -> Result<
             }
             prepared.push((env.new_global_ref(section)?, env.new_global_ref(merged)?));
         }
+        let mut added = 0;
         for (section, merged) in prepared {
+            added += env.call_method(merged.as_obj(), "size", "()I", &[])?.i()?.max(0) as usize;
             let target = env.call_method(&maps, "get", "(Ljava/lang/Object;)Ljava/lang/Object;", &[JValue::Object(section.as_obj())])?.l()?;
             env.call_method(target, "putAll", "(Ljava/util/Map;)V", &[JValue::Object(merged.as_obj())])?;
         }
-        Ok(())
+        Ok(added)
     })
 }
 

@@ -409,7 +409,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ModId::new("Consumer")?,
         ModDiagnostic {
             status: ModStatus::Loaded,
-            stage: "complete".into(),
+                        stage: "complete".into(),
+            timings_ms: BTreeMap::new(),
             profile: profiles[0].file.clone(),
             source: None,
             error: None,

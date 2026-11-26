@@ -67,17 +67,17 @@ pub fn scan_sources(
     let mut sources = BTreeMap::new();
     for root in roots {
         for phase in ["shared", "client"] {
-            let directory = root.join("media/lua").join(phase);
-            if !directory.is_dir() {
-                continue;
-            }
             let mut files = Vec::new();
-            source_files(&directory, &mut files)?;
-            files.sort();
+            for directory in directories_named(root, &["media", "lua", phase])? {
+                let first = files.len();
+                source_files(&directory, &mut files)?;
+                files[first..].sort();
+            }
             for file in files {
                 let relative = file
-                    .strip_prefix(&directory)
-                    .map_err(|e| CoreError::new("source-scan", e.to_string()).at(&file))?;
+                    .components()
+                    .skip(root.components().count() + 3)
+                    .collect::<PathBuf>();
                 let name = format!("{phase}/{}", relative.to_string_lossy().replace('\\', "/"));
                 let lower = name.to_lowercase();
                 if !lower.ends_with(".lua")
@@ -129,6 +129,36 @@ pub fn absolute_normalized_path(path: &Path) -> Result<PathBuf, CoreError> {
         }
     }
     Ok(normalized)
+}
+
+/// Directories below `root` whose path matches, ignoring case as the game does.
+fn directories_named(root: &Path, segments: &[&str]) -> Result<Vec<PathBuf>, CoreError> {
+    let mut candidates = vec![root.to_owned()];
+    for segment in segments {
+        let mut matching = Vec::new();
+        for directory in candidates {
+            if !directory.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(&directory)
+                .map_err(|e| CoreError::new("source-scan", e.to_string()).at(&directory))?
+            {
+                let entry = entry
+                    .map_err(|e| CoreError::new("source-scan", e.to_string()).at(&directory))?;
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(segment)
+                    && entry.path().is_dir()
+                {
+                    matching.push(entry.path());
+                }
+            }
+        }
+        matching.sort();
+        candidates = matching;
+    }
+    Ok(candidates)
 }
 
 fn source_files(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), CoreError> {
