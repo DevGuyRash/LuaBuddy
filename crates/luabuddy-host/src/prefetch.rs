@@ -20,7 +20,7 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 pub fn start(context: &mut Context<'_, '_>) {
     let found = selections::configured(context).and_then(|profiles| {
         let active = game::active(context)?;
-        game::discover(context, &profiles, &active)
+        game::locate(context, &profiles, &active)
     });
     let mut roots = match found {
         Ok(found) => found

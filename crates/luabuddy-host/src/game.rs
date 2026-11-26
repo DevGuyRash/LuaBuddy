@@ -157,10 +157,31 @@ pub struct Discovered {
     pub failures: BTreeMap<ModId, String>,
 }
 
+/// Resolves the selected and native mods, registering Workshop folders with
+/// the game so its own file lookups find them.
 pub fn discover(
     context: &mut Context<'_, '_>,
     profiles: &[Profile],
     native: &BTreeSet<ModId>,
+) -> Result<Discovered> {
+    resolve(context, profiles, native, true)
+}
+
+/// Finds the same mods without telling the game anything, for work that must
+/// leave the game as it was, such as warming the disk cache.
+pub fn locate(
+    context: &mut Context<'_, '_>,
+    profiles: &[Profile],
+    native: &BTreeSet<ModId>,
+) -> Result<Discovered> {
+    resolve(context, profiles, native, false)
+}
+
+fn resolve(
+    context: &mut Context<'_, '_>,
+    profiles: &[Profile],
+    native: &BTreeSet<ModId>,
+    register: bool,
 ) -> Result<Discovered> {
     let mut result = Discovered {
         metadata: BTreeMap::new(),
@@ -172,7 +193,7 @@ pub fn discover(
             continue;
         }
         let resolved = if profile.enabled {
-            discover_one(context, profile)
+            discover_one(context, profile, register)
         } else {
             native_info(context, &profile.id).and_then(|info| metadata(context, &profile.id, info))
         };
@@ -281,6 +302,7 @@ fn registered_workshop_info(context: &mut Context<'_, '_>, id: &ModId) -> Result
 fn discover_one(
     context: &mut Context<'_, '_>,
     profile: &Profile,
+    register: bool,
 ) -> Result<(NativeMetadata, Value)> {
     let mut info = if profile.path.is_some() {
         Value::default()
@@ -334,13 +356,13 @@ fn discover_one(
             luabuddy_core::source::absolute_normalized_path(&PathBuf::from(context.text(&folder)?))
                 .map_err(|e| e.to_string())?
         };
-        if profile.workshop.is_some() && root.join("mod.info").is_file() {
+        if register && profile.workshop.is_some() && root.join("mod.info").is_file() {
             repair_flat_root(context, &root)?;
         }
         info = read_mod_info(context, &root)?;
     }
     let resolved = metadata(context, &profile.id, info)?;
-    if profile.workshop.is_some() {
+    if register && profile.workshop.is_some() {
         let filesystem = instance(context)?;
         let dir = object_method(context, &resolved.1, "getDir", "()Ljava/lang/String;")?;
         context.jni(|env| {
@@ -520,6 +542,11 @@ pub fn callbacks(
             let callback = env
                 .call_method(&list, "get", "(I)Ljava/lang/Object;", &[JValue::Int(index)])?
                 .l()?;
+            // Only a Lua closure comes from a script file; anything else that
+            // was registered belongs to no mod and is left alone.
+            if !env.is_instance_of(&callback, "se/krka/kahlua/vm/LuaClosure")? {
+                continue;
+            }
             let prototype = env
                 .get_field(&callback, "prototype", "Lse/krka/kahlua/vm/Prototype;")?
                 .l()?;
