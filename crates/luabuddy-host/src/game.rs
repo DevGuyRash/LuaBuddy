@@ -451,6 +451,9 @@ pub(crate) fn repair_flat_root(
                 &[JValue::Object(&file), JValue::Object(&file)],
             )?;
         }
+        // The game keeps the first reading of a folder, so one taken before
+        // this repair, such as the read-ahead's, would still find no mod.info.
+        env.set_field(flat.object(), "read", "Z", JValue::Bool(0))?;
         Ok(())
     })
 }
