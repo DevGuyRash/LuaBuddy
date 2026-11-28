@@ -17,6 +17,7 @@ pub const IDS: &[&str] = &[
     "NeatUI_Mechanics",
     "NutritionHelper",
     "P4AlarmSyndrome",
+    "PinyosShelfAware",
     "QuickBuildMenu",
     "RetroDashboard",
     "TrueLineOfSight",
@@ -123,6 +124,27 @@ pub fn after(
                     let yes = context.boolean(true)?;
                     context.call(&function, &[player, yes])?;
                 }
+            }
+        }
+        "PinyosShelfAware" => {
+            // Its scanner uploads the whole registry once this timer is 5 s old. A
+            // timer that never elapses keeps the scanner on this client.
+            let shelf = context.global("ShelfAware")?;
+            let scan = if shelf.is_nil() {
+                Value::default()
+            } else {
+                context.get(&shelf, "Scan")?
+            };
+            if scan.is_nil() {
+                log::warn(
+                    "mod.unexpected",
+                    "Shelf Aware! did not create its scanner; nothing is tracked automatically",
+                )
+                .about(&owner.id)
+                .write();
+            } else {
+                let never = context.number(f64::INFINITY)?;
+                context.set(&scan, "lastSyncMs", &never)?;
             }
         }
         "NeatUI_Inventory" => inventory(context, runtime)?,
